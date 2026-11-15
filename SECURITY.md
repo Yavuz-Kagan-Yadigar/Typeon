@@ -1,4 +1,9 @@
-# Typoon — Security & Network Architecture
+# Typeon — Security & Network Architecture
+
+> **Current state: 2026-11-15, HEAD `50bb608` (client, server, Linux 7.4.6-beta.2).**
+> Sections 1–9 are the audit trail and may describe gossipsub, mDNS, UPnP,
+> DCUtR and 64-device caps that are no longer in the code. Section 10 lists
+> what is true now and overrides older text. Where code and this file differ, the code wins.
 
 Plain-language summary of how this app protects messages, and how devices find
 and talk to each other. Written after a full security audit pass (two rounds);
@@ -43,8 +48,8 @@ These are deliberate trade-offs, each explained further down:
   to read your messages or forge your identity, including a future attacker
   with a working quantum computer.
 - There is **no central server**. Devices find each other over Tor onion
-  services (a Kademlia DHT in client mode + gossipsub), and talk
-  directly, peer-to-peer.
+  services (a Kademlia DHT in client mode), and exchange envelopes
+  directly, peer-to-peer. There is no gossipsub (removed, see §10).
 - Trust in a contact is established once, on first contact ("Trust On First
   Use" / TOFU) — normally by scanning their QR code in person — and then
   cryptographically enforced on every message after that.
@@ -308,14 +313,15 @@ turns them on.
   wire.
 - **Cross-network reachability — Circuit Relay v2 + DCUtR.** New this
   round; see its own subsection below.
-- **Message delivery — gossipsub.** Encrypted messages are published to a
-  gossipsub topic that the recipient is subscribed to. See "Topic
-  pseudonymization" below for how that topic name is chosen.
+- **Message delivery — direct envelope protocol (gossipsub removed).** Encrypted
+  envelopes go point to point over `/p2pmessenger/envelope/1.0.0`, then to the
+  server if the direct path fails, then to a retry queue (§10). The "Topic
+  pseudonymization" section below describes the old gossipsub design.
 - **Peer metadata — identify.** Standard libp2p peer-info exchange (what
   protocols/addresses a peer supports), feeding discovered addresses into
   Kademlia, and (new this round) into relay-candidate discovery.
 
-### Topic pseudonymization (second audit round fix)
+### Topic pseudonymization (second audit round fix; historical, gossipsub removed — §10)
 
 The first audit round found that the gossipsub topic name was computed
 **directly from the recipient's device fingerprint** (`p2p_msg_<fingerprint>`).
@@ -528,7 +534,7 @@ hardening the existing protocol:
 Until now the app had **no store-and-forward anywhere**, and that gap was
 structural rather than accidental. A libp2p Circuit Relay v2 only builds a
 *live* circuit between two peers who are both online at the same moment; it
-stores nothing. The `p2p_msg_<fingerprint>` gossipsub topic is a naming
+stores nothing. The old `p2p_msg_<fingerprint>` gossipsub topic (now removed) was a naming
 convention, not a mailbox — if the recipient is not subscribed at that
 instant, the packet is gone. All durability therefore lived on the **sender**:
 retry with exponential backoff, re-encrypt under a fresh ratchet step every
@@ -554,7 +560,7 @@ certificate.
   then sealed a **second** time under `HKDF(root_key, "…server-seal")` (the key comes from the ratchet root; the mailbox id does not, see below) before
   being deposited. Without that second layer the server's database would hold
   `MessagePacketHeader.sender_device_fingerprint` in cleartext — that field is
-  openly readable, which is acceptable on a pseudonymous gossipsub topic but
+  openly readable, which is acceptable on a pseudonymous mailbox id but
   not in a log that persists for weeks.
 - *Who is talking to whom, by name.* Mailbox ids are `HKDF` of the topic
   string, so a fingerprint cannot be read out of a bucket name. Archive bucket
@@ -595,9 +601,9 @@ certificate.
   it is the newest. A device that already holds the message is not affected.
 - It can **drop, delay, reorder or withhold** messages. This is the
   irreducible power of any store-and-forward operator. It is contained, not
-  eliminated: an ordinary message is server-only for 30 seconds, after which
-  every retry also goes out over gossipsub/Tor/relay, and pairing handshakes
-  and ratchet-rotation announcements always take both paths from the start. A
+  eliminated: an ordinary message goes direct when the peer is connected, and
+  gets a server copy only when no Ack arrives within 1.5 seconds. Pairing
+  handshakes and ratchet-rotation announcements always take both paths from the start. A
   censoring server therefore degrades delivery to "slower, over peer-to-peer",
   never to "lost".
 - It **cannot forge or modify** anything: the recipient verifies both Ed25519
@@ -710,7 +716,7 @@ anything, so the honest reading is "we asked", not "it is gone".
   app deliberately sets **no** `FLAG_SECURE` (screenshots, recording and
   recents thumbnails are allowed; an earlier version of this document claimed
   otherwise). The *server app* (`ServerActivity`) sets it in non-debug builds
-  because its join code is a bearer token for unlimited enrollments.
+  because its join code is a bearer token. The code now lasts 3 days and is renewed (§10).
 - **Recovery file uses Argon2id (fourth audit round fix).** The recovery
   export (which contains *all* long-term secret keys — Ed25519, ML-DSA,
   X25519, ML-KEM) previously derived its file-encryption key with
@@ -781,3 +787,53 @@ anything, so the honest reading is "we asked", not "it is gone".
 
 - **Clipboard self-clear only covers the running process.** `SensitiveClip` clears the primary clip 60 s after a copy, but that timer lives in the app process: if the process is killed first (force stop, OOM, reboot) the copied text stays on the clipboard until something else overwrites it. Other apps can also read the clipboard before the timer fires.
 - **Server archive buckets reveal record counts.** Archive records are grouped into per-conversation, per-period buckets, so a server can count how many records a conversation produced in each period even though record bodies stay sealed (end-to-end encrypted, keyed ids). Traffic analysis of volume/timing is not hidden; padding is not implemented.
+
+---
+
+## 10. Current state (2026-11-15, HEAD `50bb608`) — overrides earlier sections
+
+**Network**
+- **No gossipsub.** Removed in c798a6f. Envelopes go over `/p2pmessenger/envelope/1.0.0`
+  to the peer's connected PeerId; if that fails, the server copy; if neither works, the
+  pending-envelope retry queue. Replies to pairing (IdentityExchange, Handshake) go back on
+  the connection they arrived on.
+- Server copy timing: critical packets (handshake, IdentityExchange, ratchet rotation, call
+  signal) go to both paths at once. Ordinary messages get a server copy only when there is no
+  Ack after 1.5 s, or when the direct path is down.
+- **mDNS, UPnP and DCUtR are not in the build.** Circuit Relay v2 (client and service) and
+  identify remain. Kademlia runs in client mode. The sections on DCUtR, UPnP and mDNS above
+  are history.
+- Transport is onion-only. Plain outgoing TCP is refused (`DialReject`).
+
+**Server (optional store-and-forward)**
+- Protocol version **8**. Archive bucket ids are hashes of per-bucket purge secrets, so only
+  the account's own devices can purge a bucket (see §8).
+- Enrolment cap: **16 active devices** per server (`DEFAULT_MAX_ENROLLMENTS`, changed from 64
+  on 2026-11-15; the Android server app uses the same 16). Idle enrolments (30 days) are put
+  to sleep. At most 60 public enrolments per hour.
+- Public join code: **valid 3 days**, then renewed by the server (`PUBLIC_CODE_TTL_MS`). It is a
+  bearer token, so anyone holding it can enrol until the operator rotates it. Rotating the code
+  does not affect enrolled devices. A revoke only blocks the enrol key, so a real ban means
+  rotating the code.
+- Server DB schema version 5. Archive rows expire 13 months after their last write.
+- Server app PIN lock: PBKDF2-HMAC-SHA256, 600,000 iterations, at least 6 characters (older PINs
+  with 300,000 iterations are still read).
+
+**Client**
+- App lock: PBKDF2-HMAC-SHA256, 600,000 iterations (120,000 is still read). App password minimum
+  8 characters.
+- No `FLAG_SECURE` in the client (owner rule). The server app sets it in non-debug builds.
+- `allowBackup` off. `targetSdk` 35.
+- Notification text hidden by default. No `SYSTEM_ALERT_WINDOW`.
+
+**Updates**
+- Self-update checks GitHub release tags over Tor about every 20 hours. An update is installed
+  only when `SHA256SUMS` carries the owner's offline Ed25519 signature (`SHA256SUMS.sig`). The
+  public key is pinned in `update.rs`. A release without the signature counts as unpublished.
+  The server installer checks signature, hash and version before the root step replaces the binary.
+- Release APKs are signed only by `sign-release.sh`. Gradle leaves the release build unsigned.
+
+**Open, not changed by this pass**
+- Server `sent_at_ms` still in clear. Blob and bucket ids are still capabilities for anyone enrolled.
+- Clipboard self-clear and archive record counts (§9) remain as stated.
+- The desktop "bye on quit" behaviour (7170907) was not re-checked in code.

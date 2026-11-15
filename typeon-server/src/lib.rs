@@ -190,7 +190,7 @@ const MAX_PUBLIC_ENROLLMENTS_PER_HOUR: i64 = 60;
 /// itself; `public_join_token` then makes a new one.
 const PUBLIC_CODE_TTL_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 /// Default `ServerConfig::max_enrollments`.
-pub const DEFAULT_MAX_ENROLLMENTS: u32 = 64;
+pub const DEFAULT_MAX_ENROLLMENTS: u32 = 16;
 /// An active enrollment not seen for this long is removed by `maybe_sweep`.
 const ENROLLMENT_IDLE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 

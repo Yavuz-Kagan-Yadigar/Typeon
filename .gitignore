@@ -104,5 +104,12 @@ Linux/packaging/build-dir/
 Linux/target-sdk/
 
 # Personal tool config and device screenshots stay local.
-.claude/settings.local.json
+.claude/
 /redmi9s_main.png
+
+# Private notes, review trail and test logs: never pushed to GitHub.
+reviews/
+trafficvis/
+Mesaj-Akisi-Senaryosu.md
+Pil-LTE-Ozeti-*.md
+Test-Bulgulari-*.md

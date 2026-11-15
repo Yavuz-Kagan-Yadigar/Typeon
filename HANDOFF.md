@@ -19,7 +19,7 @@ Every number in this file was checked against the code. Anything not checked is 
 9. **Do not touch:** `service/BatteryLog.kt`; the keyboard fix (`util/KeyboardInsets.kt`, `adjustResize`, input bar); do not add `FLAG_SECURE` to the client (it stays on the server app in release builds); do not add LAN addresses to server records. **Signing:** do NOT add a release signing config to `app/build.gradle`. Gradle produces an unsigned release, and `./sign-release.sh` signs it (private key, v3 lineage).
 10. **Redmi Note 9S is the owner's daily phone.** Do not delete, reset, or leave network settings changed. If you changed a setting, put it back.
 
-Release rule: first bump the version in 3 places (`p2p_messenger_android/app/build.gradle`, `p2p_messenger_android_server/app/build.gradle`, `Linux/Cargo.toml`). Then copy the files into `dist/` as e.g. `typeon-client-<version>.apk`. **`sign-release.sh` does the signing** (Gradle does not sign). Regenerate `dist/SHA256SUMS` with the command, do not write it by hand.
+Release rule: bump the version with `tools/bump-version.sh` (it touches the client and server `build.gradle` (versionCode + versionName), `Linux/Cargo.toml`, `Linux/data/com.p2p.messenger.Typeon.metainfo.xml`, `p2p_messenger_android/app/src/main/cpp/rust/Cargo.toml`, `typeon-server/Cargo.toml`, and the lock files). Then copy the files into `dist/` as e.g. `typeon-client-<version>.apk`. **`sign-release.sh` does the APK signing** (Gradle does not sign). **`tools/sign-update.sh` makes the update signature** (`SHA256SUMS.sig`) with the owner's offline key: the agent does not run it; the owner does (see §8). Regenerate `dist/SHA256SUMS` with the command, do not write it by hand. Pre-release tags (`-`) build debug artifacts; plain tags build release.
 
 ---
 
@@ -48,12 +48,14 @@ Features: 1:1 messages, groups, edit, delete, reactions, read state, files/media
 | `typeon-crypto/src/server_proto.rs` | Server message types + default limits (`mailbox_ttl_ms` = 14 days) |
 | `typeon-crypto/src/server_seal.rs` | Second seal on the envelope sent to the server |
 | `p2p_messenger_android/app/src/main/cpp/rust/src/lib.rs` | Core root (~930 lines): `P2PCore` struct, global `RUNTIME`/`CORE`, module list, `CORE_SRC`. It used to be one 29,000-line file; it is now split into topic modules (line below) |
-| same folder, core topic modules (all `impl P2PCore` / `use super::*`) | `core_lock.rs` (core lock), `media_unlocked.rs` (file and label work without the lock), `wire.rs` (libp2p wire types), `util.rs` (helpers, signature inputs, `mono_ms`), `types.rs` (types), `tuning.rs` (constants), `db.rs` (`init_db`, schema, SQLCipher), `pairing.rs` (QR/pairing, `IdentityExchange`), `devices.rs` (device fan-out/authority), `sibling_sync.rs` (sibling devices: sync, read state, history), `contacts.rs` (contacts, block, delete/wipe), `session.rs` (handshake, ratchet rotation), `send.rs` (sending, reactions, edit/delete, Ack), `receive.rs` (`receive_message`), `archive.rs` (message archive, history requests), `persist.rs` (sealed blobs, ratchet persistence), `group_ops.rs` (group operations), `storage.rs` (labels, storage), `network.rs` (`start_network`, reconnect, retry), `file_transfer.rs` (file transfer), `poll.rs` (`poll_events`, `process_incoming_envelope`), `recovery.rs` (recovery file), `jni_exports.rs` (JNI functions `Java_com_p2p_messenger_P2PLib_*`), `core_tests.rs` (tests). Details: TECHNICAL_HANDOFF §1.1 |
+| same folder, core topic modules (all `impl P2PCore` / `use super::*`) | `core_lock.rs` (core lock), `media_unlocked.rs` (file and label work without the lock), `wire.rs` (libp2p wire types), `util.rs` (helpers, signature inputs, `mono_ms`), `types.rs` (types), `tuning.rs` (constants), `db.rs` (`init_db`, schema, SQLCipher), `pairing.rs` (QR/pairing, `IdentityExchange`), `devices.rs` (device fan-out/authority), `sibling_sync.rs` (sibling devices: sync, read state, history), `contacts.rs` (contacts, block, delete/wipe), `session.rs` (handshake, ratchet rotation), `send.rs` (sending, reactions, edit/delete, Ack), `receive.rs` (`receive_message`), `archive.rs` (message archive, history requests), `persist.rs` (sealed blobs, ratchet persistence), `group_ops.rs` (group operations), `storage.rs` (labels, storage), `network/` (`start_network`, reconnect, retry, direct/server publish route in `publish.rs`), `file_transfer.rs` (file transfer), `poll.rs` (`poll_events`, `process_incoming_envelope`), `recovery.rs` (recovery file), `jni_exports/` (JNI functions `Java_com_p2p_messenger_P2PLib_*`), `core_tests.rs` (tests). Details: TECHNICAL_HANDOFF §1.1 |
 | same folder `api.rs` | Plain Rust interface without JNI. Linux and Windows call this |
-| same folder `server_client.rs` | Client side of the server: enroll, deposit, fetch, archive |
-| same folder `call.rs` | Call media transport (encrypted packets, libp2p stream) |
+| same folder `server_client/` | Client side of the server: `mod.rs` (sweeps, errors), `connection.rs` (enroll, rebind), `mailbox.rs` (register, deposit, fetch, ack), `archive.rs`, `blobs.rs` |
+| same folder `call/` | Call state and signalling (`signalling.rs`), media transport (`media_link.rs`, encrypted packets, libp2p stream) |
 | same folder `whiteboard.rs` | Whiteboard |
-| same folder `attachments.rs` | File chunks, EXIF/GPS stripping |
+| same folder `attachments/` | File chunks, EXIF/GPS stripping (`strip_metadata.rs`), JXL (`jxl_codec.rs`) |
+| same folder `update.rs` | Self-update check over Tor (GitHub `releases.atom`), Ed25519 check of `SHA256SUMS`. Details: TECHNICAL_HANDOFF §21 |
+| same folder `wire.rs` | libp2p behaviour and wire types |
 | same folder `tor.rs` | Tor (arti) client + onion service |
 | same folder `group.rs`, `contact.rs` | Group structure and validation; contact and device trust checks |
 | `p2p_messenger_android/app/src/main/java/com/p2p/messenger/` | Android Kotlin code |
@@ -63,12 +65,13 @@ Features: 1:1 messages, groups, edit, delete, reactions, read state, files/media
 | ↳ `util/` | Helpers (42 files; main ones): `AppLock`, `OutgoingMedia` (media cleanup), `KeystoreCrypto`, `IdentityManager`, `NotificationHelper`, `FontOverride` (custom font), `Quote` |
 | `trafficvis/` | Traffic visualisation simulator (`traffic_visualization.html`, `selftest.js`) |
 | `p2p_messenger_android_server/` | Android app for the server. Screen: `ServerActivity` |
-| `typeon-server/src/` | Server logic: `lib.rs` (protocol), `store.rs` (SQLite; mail `seq` per mailbox, `mail_seq` table), `jni.rs`, `bin/typeon-server.rs` (CLI) |
+| `typeon-server/src/` | Server logic: `lib.rs` (`ServerCore`, constants), `handlers.rs` (requests), `store/` (SQLite: `mod.rs` schema, `mail.rs` mailboxes and `seq`, `enrollments.rs`, `archive.rs`, `blobs.rs`), `blobs.rs`, `limits.rs`, `sweep.rs`, `config.rs`, `relay_streams.rs`, `jni.rs`, `bin/typeon-server.rs` (CLI) |
+| `tools/` | `sign-update.sh` (owner's offline update signing), `bump-version.sh`, `import_icons.py` |
 | `Linux/src/` | Desktop client (Linux + Windows, same crate `typeon-linux`). `core.rs` core bridge, `ui/*.rs` screens, `prefs.rs`/`theme.rs`/`font.rs`/`audio.rs`/`qr.rs`/`util.rs` helpers, `call_media.rs` calls (GStreamer), `keyring.rs` + `secrets.rs` key storage (Secret Service: GNOME Keyring / KDE Wallet). **Windows files:** `win.rs` (tray icon, notifications, autostart, fonts), `keyring_win.rs` (DPAPI vault key), `audio_win.rs` (WASAPI recording); on Windows `main.rs` routes the `audio`/`keyring` modules to these |
 | `Linux/packaging/` | Flatpak packaging (`README.md`). `Linux/packaging/windows/`: Windows cross-build/package scripts (`build.sh`, `package.sh`, `package-msys2.sh`, `fetch-sysroot.py`) and `TEST-NOTES.md` |
 | `AGENTS.md` | Shared rules for agents + build recipes (Linux, Windows cross-build) |
-| `reviews/` | Old code review notes. `ALL_OPEN_FINDINGS.md` = items deliberately left open, not to be debated again |
-| `Description.md` | Protocol specification (Turkish). Sections: 1 identity, 2 trust, 3 encryption, 4 discovery + server, 5 groups, 6 open decisions |
+| `reviews/` | Review notes. Old ones are in `reviews/archive/` (`reviews/archive/ALL_OPEN_FINDINGS.md` = items deliberately left open, not to be debated again) |
+| `Description.md` | Protocol design spec (English, draft v0.2). Sections: 1 identity, 2 trust, 3 encryption, 4 discovery + server, 5 groups, 6 open decisions, 7 prototype scope. Parts are behind the code (see its status note) |
 | `SECURITY.md` | Security summary (English). **Partly out of date**: if it conflicts, trust the code |
 | `Mesaj-Akisi-Senaryosu.md` | Worked example of the send/ack/edit/file flow. Good source for Ack behaviour |
 | `.claude/skills/typeon-adb-debug/SKILL.md` | Phone testing guide with adb (the password there is old; the correct one is in this file) |
@@ -76,7 +79,7 @@ Features: 1:1 messages, groups, edit, delete, reactions, read state, files/media
 | `dist/` | Release files |
 
 To find a behaviour: `grep -n "fn function_name" p2p_messenger_android/app/src/main/cpp/rust/src/*.rs` (the core is split into modules, not one file). Do not read a big file in full; read it in parts.
-If you change a JNI function, `jni_exports.rs` and `P2PLib.kt` (and `api.rs` if needed) must change together. If you add a new core `.rs` file, add it both to the `mod` list in `lib.rs` and to `CORE_SRC` (the tests that scan the sources).
+If you change a JNI function, `jni_exports/` and `P2PLib.kt` (and `api.rs` if needed) must change together. If you add a new core `.rs` file, add it both to the `mod` list in `lib.rs` and to `CORE_SRC` (the tests that scan the sources).
 
 ---
 
@@ -94,7 +97,7 @@ If you change a JNI function, `jni_exports.rs` and `P2PLib.kt` (and `api.rs` if 
 2. If there is no connection, `ensure_connected` tries to connect.
 3. If there is no ratchet, a handshake is done (`initiate_handshake_with`).
 4. If 30 min have passed, the ratchet is renewed (`maybe_rotate_ratchet`).
-5. The message is encrypted, hybrid-signed, and published to the gossipsub topic. If a server is set, it is also deposited on the server.
+5. The message is encrypted, hybrid-signed, and sent over the direct envelope protocol if the peer is connected. It is deposited on the server when the direct path is down, when the message is critical (handshake, rotation, call signal), or when there is no Ack after 1.5 s. Otherwise it stays in the retry queue (`network/publish.rs`). Gossipsub no longer exists.
 6. Types that wait for an Ack are written to the `awaiting_confirmation` list and to the DB (`pending_durable_retries`, `pending_group_messages`).
 7. Retry: first after 15 s (`ACK_RETRY_INITIAL_MS`), then with backoff up to 120 s (`ACK_RETRY_MAX_MS`). After about 25 min, a fresh encrypted copy with the same `message_id`. It gives up after **7 days** (`TEXT_RETRY_GIVE_UP_MS`).
 
@@ -122,9 +125,9 @@ If you change a JNI function, `jni_exports.rs` and `P2PLib.kt` (and `api.rs` if 
 - Missing updates are resent periodically by `group_sync_sweep`.
 
 ### 3.6 Network
-- libp2p. Transport: Noise + yamux. Messaging: gossipsub. Discovery: Kademlia (default client mode). Relay: Circuit Relay v2 + DCUtR.
-- Custom protocols: `/p2pmessenger/envelope/1.0.0`, `/p2pmessenger/ack/1.0.0`, `/p2pmessenger/keepalive/1.0.0` (and `1.1.0`), `/p2pmessenger/filexfer/1.0.0`, `/typeon/server/1.0.0`.
-- **The internet is reached only through the Tor onion service.** mDNS and UPnP are `None` in the code (off). Plain outgoing TCP is refused with `DialReject`. This is intended, so IP addresses do not leak. Do not "fix" it.
+- libp2p. Transport: Noise + yamux. **No gossipsub** (removed in c798a6f): envelopes go point to point. Discovery: Kademlia (client mode). Relay: Circuit Relay v2. Identify on. DCUtR and mDNS are not in the build.
+- Custom protocols: `/p2pmessenger/envelope/1.0.0`, `/p2pmessenger/ack/1.0.0`, `/p2pmessenger/keepalive/1.0.0` (and `1.1.0`), `/p2pmessenger/filexfer/1.0.0`, `/typeon/server/1.0.0`, `/typeon/media/1.0.0` (calls), `/typeon/relay/1.0.0`.
+- **The internet is reached only through the Tor onion service.** mDNS and UPnP are not in the build. Plain outgoing TCP is refused with `DialReject`. This is intended, so IP addresses do not leak. Do not "fix" it.
 - Tor states (`TorStatus`): `Disabled`, `Bootstrapping`, `Ready`, `Failed`.
 - `start_network` starts the network. `poll_events` returns events as JSON.
 - Reconnect: `reconnect_sweep` every 15 s. `dial_with_relay_fallback` tries direct first, then the relay.
@@ -135,26 +138,27 @@ If you change a JNI function, `jni_exports.rs` and `P2PLib.kt` (and `api.rs` if 
 ### 3.7 Server (optional)
 - What it does: while the recipient is offline it **writes the encrypted envelope to disk**, and gives it over when the recipient comes back.
 - Three operations: `Deposit` (leave), `Fetch` (take), `Ack` (may delete).
-- Default retention: **14 days** (`mailbox_ttl_ms`, `server_proto.rs`). An enrolled device that is idle for 30 days is dropped (`ENROLLMENT_IDLE_MS`). Default maximum 64 enrollments. At most 60 public enrollments per hour.
+- Default retention: **14 days** (`mailbox_ttl_ms`, `server_proto.rs`). An enrolled device that is idle for 30 days is put to sleep (`ENROLLMENT_IDLE_MS`). Default maximum 16 enrollments (`DEFAULT_MAX_ENROLLMENTS`; the Android server app sets the same 16 in `jni.rs`). At most 60 public enrollments per hour. The public join code lasts **3 days** and is renewed (`PUBLIC_CODE_TTL_MS`).
 - The server cannot read content: the envelope is already end-to-end encrypted, with a second seal on top. The session mailbox name comes from the static DH of the two devices' long-term KEM X25519 keys (fixed per pair, not changed on rotation; `server_seal::session_mailbox`). The seal key comes from the ratchet root.
 - The server can see: size, time, and which PeerId reads which mailbox. This is a known and accepted limit.
-- The server can delay or drop messages but cannot forge them. So: a normal message goes only to the server for the first 30 s (`SERVER_ONLY_GRACE_MS`); after that each retry also goes to gossipsub. The handshake (`Handshake`, `IdentityExchange`) and ratchet renewal notices always go to both.
+- The server can delay or drop messages but cannot forge them. So: a normal message goes direct when the peer is connected. The server copy is made only if there is no Ack after 1.5 s (`ACK_SUSPECT_MS`). The handshake (`Handshake`, `IdentityExchange`) and ratchet renewal notices always go to both (`network/publish.rs`).
 - A server item that cannot be opened or processed is not Acked. The mailbox cursor stays 5 min before it, it is fetched again every 45 s, then skipped (`SERVER_HOLD_GRACE_MS`; details in TECHNICAL_HANDOFF §13.4).
 - Envelopes fetched from the server enter the message path with `source = None`, so the server's address is not written into the contact address book.
 - The server's **onion address is its identity.** It must be kept on update. Uninstalling and reinstalling the app deletes the onion address.
 - "Keep history on the server" is a separate option, off by default. The archive is encrypted with the root key (not forward-secret; an accepted cost).
-- SQLite tables (`store.rs`, schema version 4): `enrollments, invites, mailboxes, mailbox_readers, mail, mail_seq, mail_acks, archive, blobs, blob_chunks, blocked_keys, meta`.
+- Server protocol version **8** (`SERVER_PROTOCOL_VERSION`). Archive buckets are hashes of purge secrets, so the operator cannot delete history it cannot name.
+- SQLite tables (`store/`, schema version 5): `enrollments, invites, mailboxes, mailbox_readers, mail, mail_seq, mail_acks, archive, blobs, blob_chunks, blocked_keys, meta`.
 
 ### 3.8 Local data
 - Database: SQLCipher, file `p2p_messenger.db`. Schema is in `init_db` (`db.rs`).
 - Main tables: `identities, own_devices, contacts, groups, messages, message_reactions, message_seen, ratchet_states, skipped_message_keys, remote_devices, files, device_addrs, device_onion_addrs, pending_durable_retries, pending_group_messages, blocked_identities, deleted_identities, removed_contacts, removed_groups, app_meta, acked_packets, own_prekeys, peer_prekeys, pending_sibling_ops`.
 - Columns added later are added with `ALTER TABLE`; `CREATE TABLE IF NOT EXISTS` does not change an old table.
-- AppLock: the passcode is derived with PBKDF2-HMAC-SHA256 (`util/AppLock.kt`).
+- AppLock: the passcode is derived with PBKDF2-HMAC-SHA256, 600,000 iterations; app password minimum 8 characters (`util/AppLock.kt`).
 - Recovery file: all secret keys, encrypted with Argon2id (`RecoveryFile`).
 - Android backup is off.
 
 ### 3.9 Calls
-- Signalling goes through ratchet messages. Media goes through a separate libp2p stream, each packet encrypted with its own AEAD (`call.rs`). Direct, or through a relay/server.
+- Signalling goes through ratchet messages. Media goes through a separate libp2p stream, each packet encrypted with its own AEAD (`call/`). Direct, or through a relay/server.
 - The video flag has an HEVC bit. The Linux side uses GStreamer.
 - Group call: `start_group_call`.
 - Android event: `type = "call"`, `action = "invite"` rings the phone.
@@ -169,6 +173,8 @@ If you change a JNI function, `jni_exports.rs` and `P2PLib.kt` (and `api.rs` if 
 - If you change the signature input or the packet format, all devices must re-pair. Bump the version.
 - Wake lock: one object, and each acquire has a matching release. A leak used to drain the battery.
 - Do not keep depositing the same handshake on the server. The server quota fills and store-and-forward locks up.
+- Gossipsub is gone. Do not add topic subscriptions or a gossip publish path. Route changes go in `network/publish.rs try_publish_raw_via`.
+- Self-update: a release without `SHA256SUMS.sig` counts as not published. Do not change `UPDATE_KEY` or the verify logic without the owner.
 - Linux GTK: `AdwActionRow` is already a `GtkListBoxRow`. Do not put it inside another `ListBoxRow`, or the `activated` signal never arrives.
 - Linux notifications need an installed `.desktop` file and a notification service.
 - The Android incremental Kotlin build cache sometimes gives an old APK. If it says "no change", check `lastUpdateTime` with `dumpsys package`.
@@ -204,7 +210,7 @@ cd p2p_messenger_android && ./gradlew assembleDebug     # or assembleRelease
 | `<serial>` | Samsung Tab A8 | `run-as` works in debug. Rotates automatically; lock it |
 | `<serial>` | Redmi Note 8 Pro | Client + server app |
 
-- AppLock passcode on every device: **(removed)**.
+- AppLock passcodes: the owner keeps them. They are not written in the repo (AGENTS.md rule). Ask the owner if you need one.
 - Loop: take a screenshot → read it → `adb shell input tap x y`.
 - When the keyboard opens the button positions change; take a new screenshot.
 - With text in the passcode field, `uiautomator dump` returns nothing; send `KEYCODE_ENTER` instead of pressing Unlock.
@@ -225,3 +231,5 @@ cd p2p_messenger_android && ./gradlew assembleDebug     # or assembleRelease
 - Findings under `reviews/` are historical. Line numbers may have moved. Read the line before fixing it.
 - `SECURITY.md` and `Description.md` are behind the code in places. If they conflict, the code is right.
 - Every function name in this file exists in the code, but read the function before changing its behaviour.
+- Update signing (`tools/sign-update.sh`, offline Ed25519 key): the owner runs it. Give the owner the command with `!` (e.g. `! cd <repo> && echo y | tools/sign-update.sh vX`), then refresh `dist/SHA256SUMS`. Never put the private key in the repo.
+- Last checked against code: 2026-11-15, HEAD `50bb608`, version 7.4.6-beta.2. Details of the newest round: TECHNICAL_HANDOFF §21.

@@ -1,4 +1,13 @@
-# Typoon P2P Messaging Protocol — Draft v0.2
+# Typeon P2P Messaging Protocol — Draft v0.2
+
+> **Status note (2026-11-15, HEAD `50bb608`).** This is a design spec. Where it
+> disagrees with the code, the code is right. Current differences:
+> - Gossipsub is removed. Delivery is direct envelope → server deposit → retry queue (sections 4.4, 7). The "gossipsub topic" wording below means a mailbox id only.
+> - Server protocol version 8. Public join code expires after 3 days and is renewed; limits: 16 active enrolments, 60 public enrolments per hour.
+> - App lock PBKDF2 is 600,000 iterations; app password minimum 8 characters.
+> - Self-update uses a signed release list (Ed25519, offline owner key). See `TECHNICAL_HANDOFF.md` §21.
+>
+> Full implementation details: `TECHNICAL_HANDOFF.md`.
 
 ## 1. Identity
 
@@ -497,26 +506,28 @@ Fetch   { cursors }              -> recipient fetches everything after its curso
 Ack     { mailbox_id, seq }      -> processed, can be deleted
 ```
 
-- `mailbox_id` is the gossipsub topic name the client already computes, blinded
-  with HKDF — the server cannot read a fingerprint from a mailbox name.
+- `mailbox_id` is derived from the same HKDF topic string the client computes
+  (`p2pmsg-v0.1-gossip-topic`; the name is historical, there is no gossipsub any more),
+  blinded so the server cannot read a fingerprint from a mailbox name.
 - `sealed` is the envelope encrypted a SECOND time with a SEPARATE key derived from
   the ratchet `root_key`. Otherwise the `sender_device_fingerprint` that
   `MessagePacketHeader` carries in the clear would be readable in the server's database.
-- Joining uses a single PERMANENT code (`typeon-server:<address>#<token>`): the
-  operator publishes it once (QR, link or plain text) and an unlimited number of
-  people join on their own — without ever talking to the operator. The Sybil gate is
-  not that the token is single-use, but an hourly enrolment ceiling (60) and the
-  operator's ability to rotate the code at any moment; rotating the code does not
-  affect enrolled devices. For narrow cases (a set number of uses / per day),
-  single-use invites still exist.
+- Joining uses a public code (`typeon-server:<address>#<token>`) that the operator
+  publishes (QR, link or plain text). People join on their own, without talking to
+  the operator. The code lasts 3 days and the server renews it (`PUBLIC_CODE_TTL_MS`).
+  The Sybil gate is an hourly enrolment ceiling (60), a default cap of 16 active
+  enrolments, and the operator's ability to rotate the code at any moment. Rotating
+  the code does not affect enrolled devices. For narrow cases (a set number of uses /
+  per day), single-use invites still exist.
 - Enrolment (`Enroll`) is done with the operator-issued invite token and a fresh key
   pair generated ONLY FOR THAT SERVER — the device's identity keys never go to the
   server. The signature is HYBRID (Ed25519 + ML-DSA-87, both verified), the same as
   in the rest of the app.
-- The server path does NOT replace gossipsub: handshakes and ratchet rotation
-  announcements always go by both paths, while ordinary messages are also copied to
-  gossipsub after 30 seconds. A censoring or broken server slows delivery; it cannot
-  block it.
+- The server path does NOT replace the direct path: handshakes and ratchet rotation
+  announcements always go by both paths. Ordinary messages go direct when the peer is
+  connected, and are copied to the server when there is no acknowledgement after
+  1.5 seconds (or when the direct path is down). A censoring or broken server slows
+  delivery; it cannot block it.
 
 Storing history on the server is a SEPARATE and default-off option: delivery
 envelopes cannot be used as history (the ratchet keys are forward-secret and

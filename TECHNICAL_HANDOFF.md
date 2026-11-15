@@ -2,7 +2,7 @@
 
 This document is the technical companion to `HANDOFF.md` (working rules, file map). Every claim below was verified against the source code; file/function names are given. In case of conflict, the **code** is right (`SECURITY.md` and `Description.md` are partly out of date).
 
-**Last updated: 2026-11-11 (HEAD `e916a13`).** The core (`p2p_messenger_core`) is no longer a single `lib.rs`: it has been split into 24 topic modules (§1.1). In this document code locations are given as `file.rs function_name`(core files: `p2p_messenger_android/app/src/main/cpp/rust/src/`); line numbers are not given because they drift. To find them: `grep -n "fn name" p2p_messenger_android/app/src/main/cpp/rust/src/*.rs`. Versions: client 6.0.7 (code 51), server app 6.0.1 (code 44), Linux/Windows desktop 6.1.4, server protocol 7.
+**Last updated: 2026-11-15 (HEAD `50bb608`).** The core (`p2p_messenger_core`) is no longer a single `lib.rs`: it has been split into 24 topic modules (§1.1). In this document code locations are given as `file.rs function_name`(core files: `p2p_messenger_android/app/src/main/cpp/rust/src/`); line numbers are not given because they drift. To find them: `grep -n "fn name" p2p_messenger_android/app/src/main/cpp/rust/src/*.rs`. Versions: client 7.4.6-beta.2 (code 66), server app 7.4.6-beta.2 (code 57), Linux/Windows desktop 7.4.6-beta.2, server protocol 8. Sections 19–20 are history; §21 is the latest round.
 
 Contents: 1 Layers (1.1 module map, 1.2 desktop client) · 2 Crypto primitives · 3 Identity and trust · 4 Session setup (handshake) · 5 Ratchet · 6 Message packet · 7 Send path · 8 Receive path · 9 Delivery/retry · 10 Multi-device · 11 Group · 12 Network layer · 13 Server · 14 Local storage · 15 Files/media · 16 Calls · 17 Threat model · 18 Constants table · 19 2026-10-20/21 fix round · 20 2026-11-05..11 changes
 
@@ -15,7 +15,7 @@ Contents: 1 Layers (1.1 module map, 1.2 desktop client) · 2 Crypto primitives �
 │ UI:  Android Kotlin (ChatActivity, P2PService…)                 │
 │      | GTK4 + libadwaita (Linux and Windows, same crate)        │
 ├────────────────────────────────────────────────────────────────┤
-│ Bridge: JNI (jni_exports.rs, P2PLib.kt) | api.rs (desktop,      │
+│ Bridge: JNI (jni_exports/, P2PLib.kt) | api.rs (desktop,      │
 │        no JNI)                                                  │
 ├────────────────────────────────────────────────────────────────┤
 │ Core (crate p2p_messenger_core): P2PCore — struct in lib.rs,   │
@@ -24,7 +24,7 @@ Contents: 1 Layers (1.1 module map, 1.2 desktop client) · 2 Crypto primitives �
 ├────────────────────────────────────────────────────────────────┤
 │ typeon-crypto: identity, ratchet, packet, server_proto, seal   │
 ├────────────────────────────────────────────────────────────────┤
-│ libp2p (noise, yamux, gossipsub, kad, relay, dcutr, req-resp)  │
+│ libp2p (noise, yamux, kad, identify, relay, req-resp; no gossipsub) │
 │ arti (Tor client + onion service) · SQLCipher · ml-kem/ml-dsa   │
 └────────────────────────────────────────────────────────────────┘
           (optional) typeon-server: store-and-forward
@@ -59,14 +59,24 @@ Contents: 1 Layers (1.1 module map, 1.2 desktop client) · 2 Crypto primitives �
 | `persist.rs` | sealed local blobs (`seal_local_blob`), ratchet/skipped-key persistence, durable retries |
 | `group_ops.rs` | group create/update/membership, founder chain (`heal_founder_chain`), group message fan-out, `process_group_update` |
 | `storage.rs` | labels (stickers), storage limits and pruning |
-| `network.rs` | swarm start (`start_network`), radio/power modes, relays, reconnection, retried publish (`try_publish_raw_via`, `retry_unconfirmed_messages`) |
+| `network/mod.rs` | swarm start (`start_network`), radio/power modes, relays, reconnection, retried publish (`try_publish_raw_via`, `retry_unconfirmed_messages`) |
 | `file_transfer.rs` | file offers, chunked download, chunk service |
 | `poll.rs` | `poll_events`, early-packet buffer, rate limit, `process_incoming_envelope` |
 | `recovery.rs` | recovery file export/import |
-| `jni_exports.rs` | Android JNI bindings (`Java_com_p2p_messenger_P2PLib_*`) and helpers (`catch_panic`) |
+| `jni_exports/mod.rs` | Android JNI bindings (`Java_com_p2p_messenger_P2PLib_*`) and helpers (`catch_panic`) |
 | `core_tests.rs` | crate-level tests (`#[cfg(test)]`) |
 
-Core crate files outside the module split (already separate before it): `api.rs` (non-JNI interface), `server_client.rs` (client side of the server, talking to `ServerCore`, ~4300 lines), `call.rs`, `whiteboard.rs`, `attachments.rs`, `tor.rs` (arti + `DialReject`), `group.rs`, `contact.rs`.
+Large files were split again on 2026-11-15 (c7af0f6). They are now directories with `mod.rs` plus topic files. Paths below are relative to `src/`:
+
+| Directory | Files |
+|---|---|
+| `call/` | `mod.rs` (`CallSession`, call state), `signalling.rs`, `media_link.rs` (media stream, `/typeon/media/1.0.0`), `tests.rs` |
+| `network/` | `mod.rs` (`start_network`, swarm build, behaviours), `connections.rs`, `power.rs` (radio saver, power save, metered/node modes), `publish.rs` (envelope route selection, retries) |
+| `server_client/` | `mod.rs` (`ServerCore` client, sweeps, error handling), `connection.rs` (Hello/Enroll/Rebind, request handling, Push), `mailbox.rs` (Register, Deposit, Fetch, Ack, session mailbox), `archive.rs` (archive put/fetch/restore), `blobs.rs` (blob upload), `tests.rs` |
+| `attachments/` | `mod.rs`, `jxl_codec.rs`, `strip_metadata.rs` (EXIF/GPS strip), `tests.rs` |
+| `jni_exports/` | `mod.rs` (`catch_panic`), `account.rs`, `contacts.rs`, `files.rs`, `groups.rs`, `history.rs`, `linking.rs`, `messages.rs`, `net.rs`, `pruning.rs`, `servers.rs`, `stickers.rs` |
+
+Single files outside the module split: `api.rs` (non-JNI interface), `whiteboard.rs`, `tor.rs` (arti + `DialReject`), `group.rs`, `contact.rs`, `update.rs` (self-update check, §21).
 
 ### 1.2 Desktop client (`Linux/`, crate `typeon-linux`) — Linux and Windows
 
@@ -90,7 +100,7 @@ The same GTK4 + libadwaita crate is built for both platforms; platform code is s
 | AEAD | ChaCha20-Poly1305 (message: nonce = message number; local rows: random 12-byte nonce) | `encrypt_next`, `seal_with` |
 | Fingerprint | SHA3-256(ed25519‖mldsa‖x25519‖mlkem), fixed lengths (32, 2592, 32, 1568) | `identity.rs compute_fingerprint` |
 | Recovery file | Argon2id + ChaCha20-Poly1305 | `export_recovery` |
-| AppLock | PBKDF2-HMAC-SHA256, 300,000 iterations (old 120,000 is still read) | `util/AppLock.kt` |
+| AppLock | PBKDF2-HMAC-SHA256, 600,000 iterations (old 120,000 is still read, `LEGACY_ITERATIONS`); password min 8 chars (`MIN_PASSWORD_LENGTH`) | `util/AppLock.kt` |
 | Local DB | SQLCipher; key = HKDF(storage_key, `typeon-db-sqlcipher-v1`) | `db_key_pragma` |
 
 Important details:
@@ -139,7 +149,7 @@ Only **single round-trip, asynchronous** (the other side does not need to be onl
 3. **Replay protection (H37):** the timestamp must be within ±`HANDSHAKE_MAX_SKEW_MS` (10 min) (if old, a window of `HANDSHAKE_MAX_AGE_MS` = 7 days applies); if the same classical signature was already seen in the window, it is ignored (`recent_handshake_sigs`, persistent). Also, any init **older than a handshake already accepted** is ignored (not only those outside the skew window), and an init **older than the current session** (`handshake.timestamp < existing.last_rotation`, outside the collision window) is ignored — the sender has changed those keys.
 4. If it is a first contact with `recipient_prekey_id == 0` and a prekey exists, it is **rejected** and a new handshake is started (id 0 is accepted only in the link window).
 5. **Simultaneous handshake collision** (90 s): if we have our own initiator state and `own_fp < sender_fp`, keep ours; otherwise accept theirs (the smaller fingerprint wins).
-6. `respond` with our own prekey/KEM secret → the same keys are derived, `has_responded_to_peer_key = false`, written to `ratchet_states`, and the gossipsub topic is subscribed.
+6. `respond` with our own prekey/KEM secret → the same keys are derived, `has_responded_to_peer_key = false`, written to `ratchet_states`. The rotating mailbox topic is derived from the root key (no subscription; gossipsub is gone).
 
 Because the responder is deterministic, it **always rotates before its first send** (`is_fresh_responder`), so a replayed init cannot force a repeat of key and nonce.
 
@@ -213,19 +223,19 @@ signature input = raw header bytes ‖ ciphertext ‖ recipient_fp (length-prefi
     else:             publish_envelope(...)
 ```
 
-**Route selection** (`try_publish_raw_via`):
-- Topic: `Handshake/IdentityExchange` → `p2p_msg_<recipient_fp>`; a packet announcing a rotation → `p2p_rt_<hex>` from the **old** root (the peer does not know the new root yet); others → `p2p_rt_<hex>` from the current root (`topic_for_root_key`, HKDF `p2pmsg-v0.1-gossip-topic`, 16 bytes).
-- `direct = connected?`. `critical = handshake | identityexchange | rotation | call signal`.
-- **Leave on the server** if one of these holds: `!direct || critical || (no acknowledgement within 1.5 s)` and the server is connected and registered.
-- **Direct send:** if connected, via the `/p2pmessenger/envelope/1.0.0` request-response.
-- **Publish on gossipsub:** if not direct, or if it could not be left on the server; even when left on the server, if `should_shadow_on_gossipsub` (handshake, rotation, or first send older than 30 s) is true, it is also sent to gossipsub.
+**Route selection** (`network/publish.rs try_publish_raw_via`; gossipsub is removed, c798a6f):
+- Mailbox id: `Handshake/IdentityExchange` → `p2p_msg_<recipient_fp>`; a packet announcing a rotation → `p2p_rt_<hex>` from the **old** root (the peer does not know the new root yet); others → `p2p_rt_<hex>` from the current root (`topic_for_root_key`, HKDF `p2pmsg-v0.1-gossip-topic`, 16 bytes). These strings are now only mailbox-id inputs, not pub/sub topics.
+- `direct = mapped PeerId connected?` (`direct_peer_for`; for IdentityExchange/Handshake also the connection the exchange arrived on, `pairing_reply_peer`). `critical = handshake | identityexchange | rotation | call signal`.
+- **Direct send first:** if connected, `/p2pmessenger/envelope/1.0.0` request-response (`send_envelope_direct`).
+- **Server deposit** when `!direct || critical || (no acknowledgement within ACK_SUSPECT_MS = 1.5 s)` and the server accepts. It also runs when the direct send fails.
+- **Nothing left:** the envelope goes to `pending_envelopes` and is resent by `poll_events` (same bytes, no re-encryption).
 - Error classes: `Permanent` (blocked, deleted account, envelope >1 MiB) → status `Failed`; `Transient` → `pending_envelopes` queue + status `Pending`.
 
 ---
 
 ## 8. Receive path (algorithm)
 
-Sources: gossipsub message, direct envelope request, server `Push`/`Batch`.
+Sources: direct envelope request (`/p2pmessenger/envelope/1.0.0`), server `Push`/`Batch`, the pending-envelope resend loop.
 
 `process_incoming_envelope`:
 1. **Duplicate guard:** if the hash of the raw bytes was seen in the last 10 min (`INBOUND_DEDUP_WINDOW_MS`, 8192 entries), skip; if it is a message, resend the Ack.
@@ -288,7 +298,7 @@ Sources: gossipsub message, direct envelope request, server `Push`/`Batch`.
 **Sibling history (history backfill)** — two triggers, one response builder `sibling_sync.rs build_sibling_history_response`:
 - *Automatic* (`request_sibling_backfill`): debounced by `SIBLING_BACKFILL_INTERVAL_MS` (30 min); only to **connected** siblings (a request sent to an offline sibling was re-deposited on the server and kept the radio on overnight); `since_timestamp` = since the last answered request from that sibling (`sibling_backfill_since`, with `SIBLING_BACKFILL_SINCE_MARGIN_MS` = 10 min as clock-skew margin), `SIBLING_BACKFILL_PER_CONVERSATION` (30) per conversation. In an unscoped (all conversations) reply the row limit `SIBLING_BACKFILL_MAX_ENTRIES` (300) is divided among the conversations/groups.
 - *User press* "Fetch older history" (`request_older_sibling_history`): one conversation, window `[after_timestamp, before_timestamp)`, `HISTORY_SYNC_MAX_MESSAGES` (200) per page; sent to each connected sibling and recorded in `sibling_fetch_open[(sibling, before, after)]`. The response (`SiblingHistoryResponse{entries, window, more}`) **echoes** the window; only a response whose echo matches an open press counts as a user fetch (the match is consumed; a restart clears `sibling_fetch_open`, and in that case a lost press is reopened: `reopen_fetch_cursor`). `more` means the responder cut the page, and the older remainder of the window is requested again from the same sibling.
-- **Budget:** text rows are charged against the `HISTORY_SYNC_MAX_TEXT_BYTES` (512 KiB) budget (for the gossipsub 1 MiB limit). In an unscoped reply, a row that does not fit is **skipped** (one long message must not cut off the later conversations); in a scoped press, the reply ends there (`more = true`), because older rows below a skipped row would become a permanent hole.
+- **Budget:** text rows are charged against the `HISTORY_SYNC_MAX_TEXT_BYTES` (512 KiB) budget (for the 1 MiB envelope limit). In an unscoped reply, a row that does not fit is **skipped** (one long message must not cut off the later conversations); in a scoped press, the reply ends there (`more = true`), because older rows below a skipped row would become a permanent hole.
 - **Attachments and reactions** (dcd2cb6): `SiblingHistoryEntry` gained two fields: `file: Option<Box<MessageContent>>` (always a `FileOffer`; `file_id` = `message_id`, the recipient downloads the file from that sibling) and `reactions: Vec<(reacting_identity, emoji, reacted_at_ms)>` (empty emoji = removal, kept for its timestamp). `sibling_file_entries` only sends `status = 'complete'` files, in the `created_at` window, the newest `limit` of them; the file key (`unwrap_file_key`), `chunk_hashes`, header/quote fields and label info go with the offer. The recipient writes the row with `apply_sibling_file` like `receive_file_offer`, then turns its direction/conversation/date into the sibling's. Attachment rows are not text bubbles: `apply_sibling_reply` puts only `file.is_none()` and non-empty texts into the event JSON, and the chat is reloaded.
 - **Budget rule, attachments** (670ab45): an attachment is charged as `512 + header + chunk_hashes` bytes plus the preview; if the budget does not fit, the **preview (preview_jpeg) is dropped first** — the file still arrives and shows with a generic icon until downloaded; if even the preview-less form does not fit, the row is skipped. A reaction carrier row is charged `128 + id + reactions` bytes.
 - **Fetch cursor problem with an earlier press** (926d724): an earlier press had moved the fetch cursor below the rows whose text it delivered; the attachments and reactions of those rows never appeared in any later window. Now the responder adds, **after** the window rows (with the remaining budget), the attachments (`sibling_file_entries`) and reactions (`sibling_reaction_entries`, text-less carrier rows) of rows sent since the window's end (`before`). The recipient (`apply_sibling_reply`) keeps only attachment and reaction carriers (`file.is_some() || text empty`) from outside the window; text rows stay within the window; for a reaction carrier **no row is written** (the reaction is applied only to a row that is already there).
@@ -332,9 +342,9 @@ Sources: gossipsub message, direct envelope request, server `Push`/`Batch`.
 **Swarm setup** (`network.rs start_network`):
 - Identity: the libp2p Ed25519 key is in `files/libp2p_identity.key` (protobuf; if corrupt a new one is generated; if unreadable, a temporary one for that run). This is **separate from the Typeon device identity**; the PeerId comes from this key and appears in the server record.
 - Transport: `tcp(nodelay)` → wrapped in **`DialReject`** (`tor.rs`) (outgoing dial always gives `MultiaddrNotSupported`) → noise → yamux; and `ArtiDialTransport` (dial `.onion` over Tor) → noise → yamux. Listening only on `127.0.0.1:<listen_port>`; the incoming streams of the Tor onion service are bridged to this local port with `tor.rs bridge_incoming_stream` (`tor.rs MAX_INBOUND_ONION_STREAMS = 64`). So there are no direct clearnet connections, in or out.
-- gossipsub: `MessageAuthenticity::Signed(libp2p keypair)`, `ValidationMode::Strict`, heartbeat 10 s, `max_transmit_size` 1 MiB. At start it subscribes to its own `p2p_msg_<active_fp>` topic and to the `p2p_rt_<hex>` topic for each ratchet (current + `prev_root_key`).
+- **No gossipsub, no topic subscriptions** (c798a6f). The libp2p feature list in `Cargo.toml` is `tcp, noise, yamux, kad, identify, tokio, macros, dns, request-response, cbor, relay`.
 - kad: `Mode::Client` (does not route for others); if node mode is on, relay server behaviour is added (`relay::Behaviour` only when `node_mode`).
-- `mdns = None`, `upnp = None` (Toggle off); `dcutr` and relay client on; `identify` on.
+- mDNS, UPnP and dcutr are **not in the build** (`wire.rs`: "removed: onion-only transport"); relay client on; `identify` on.
 - Request-response behaviours: `envelopes` (`/p2pmessenger/envelope/1.0.0`), `acks` (`/p2pmessenger/ack/1.0.0`, AckBatch ≤256), `keepalive` (`1.0.0`/`1.1.0`), `file_chunks` (`/p2pmessenger/filexfer/1.0.0`), `server_rpc` (`/typeon/server/1.0.0`), `stream` (libp2p-stream: `/typeon/media/1.0.0`, `/typeon/relay/1.0.0`).
 
 **Tor** (`tor.rs`): `TorClient::create_unbootstrapped` + `launch_onion_service` (nickname `p2pmsg`). If `bootstrap()` fails, it retries forever, starting with a 2 s wait and growing to 60 s. State: `Disabled` → `Bootstrapping` → `Ready` (onion address obtained) / `Failed`. On `corrupted data in persistent state` errors, `state/` and `hss/` are deleted and it starts once more; `keystore/` (the onion identity) is kept. `set_dormant` for radio saving.
@@ -352,19 +362,19 @@ Sources: gossipsub message, direct envelope request, server `Push`/`Batch`.
 ## 13. Server (store-and-forward)
 
 ### 13.1 Protocol
-`/typeon/server/1.0.0`, libp2p request-response with CBOR. Wire limits: request ≤ 1 MiB (hard codec limit; anything larger is silently truncated), response ≤ 10 MiB → so `MAX_DEPOSIT_BYTES = 900 KiB`; an envelope above that is never tried on the server (direct gossipsub only).
+`/typeon/server/1.0.0`, libp2p request-response with CBOR. Wire limits: request ≤ 1 MiB (hard codec limit; anything larger is silently truncated), response ≤ 10 MiB → so `MAX_DEPOSIT_BYTES = 900 KiB`; an envelope above that is never tried on the server (direct envelope path only).
 
-`ServerRequest`: `Hello{version}` (version **7**, `SERVER_PROTOCOL_VERSION`; version history in `server_proto.rs`: 2 `Registered`, 4 blob `upload_secret`, 5 session/relay mailbox id from the proof key (`key_bound_mailbox_id`), 6 24-byte upload secret + author tag, 7 the blob id hashes only the bytes after the tag), `Enroll{…}`, `Rebind{…}`, `Register{add, drop, proofs}`, `Deposit{mailbox, sealed}`, `Fetch{cursors, max_items, max_bytes}`, `Ack{acks:[(mailbox, seq)]}`, `Cancel{mailbox, seqs}`, `ArchivePut/Probe/Fetch/Purge`, `BlobPut/Finish/Delete`; server → client: `Notify`, `Push{item}`.
+`ServerRequest`: `Hello{version}` (version **8**, `SERVER_PROTOCOL_VERSION`; version history in `server_proto.rs`: 2 `Registered`, 4 blob `upload_secret`, 5 session/relay mailbox id from the proof key (`key_bound_mailbox_id`), 6 24-byte upload secret + author tag, 7 the blob id hashes only the bytes after the tag, 8 archive bucket id = hash of a per-bucket purge secret; `ArchivePurge{purge_secrets}`), `Enroll{…}`, `Rebind{…}`, `Register{add, drop, proofs}`, `Deposit{mailbox, sealed}`, `Fetch{cursors, max_items, max_bytes}`, `Ack{acks:[(mailbox, seq)]}`, `Cancel{mailbox, seqs}`, `ArchivePut/Probe/Fetch/Purge`, `BlobPut/Finish/Delete`; server → client: `Notify`, `Push{item}`.
 `ServerResponse`: `Welcome{version, challenge, enrolled, enrollment_id, limits, server_name}`, `Enrolled{enrollment_id, limits}`, `Deposited{seq}`, `Batch{items, more}`, `ArchiveProbed`, `ArchiveBatch`, `Registered{proof_needed, refused}` (the reply to `Register`; if every mailbox is accepted it is a plain `Ok`; no old `ProofNeeded`), `Ok`, `Err(code)`. Error codes (`ServerErrorCode`): `NotEnrolled, BadInvite, BadSignature, Stale, UnknownMailbox, TooLarge, QuotaExceeded, RateLimited, Revoked, BadDirection, Unsupported, Internal, BadHash, BlobIncomplete`. `MailItem.seq` increases **per mailbox** (see §13.3).
 
 ### 13.2 Enrolment (server side `handle_*`)
-- `Hello`: version ≠ `SERVER_PROTOCOL_VERSION` (7) → `Unsupported`. Blob requests carry a 24-byte `upload_secret`; blob id = 8-byte author tag (in clear) + `blob_id_hash_hex` (SHA-256 of the bytes after the tag, `typeon-blob-id-v3`, first 16 bytes) = 48 hex characters (`blob_id_for_upload_secret`). Otherwise a random 32-byte `challenge` is generated and written to the connection state; the reply is `Welcome` (+ `enrolled` = whether this PeerId's record is `Active`, `enrollment_id` = that record's id; a client that lost the `Enrolled` reply recovers it this way).
-- `Enroll`: in order — version; `|now − ts_ms| ≤ 5 min` (`Stale`); invite token hash is valid and has uses left (`BadInvite`); the connection's single-use `challenge` is taken with `take()` and must equal what the client sent (`BadSignature`); the hybrid signature `enroll_signing_input(version, server_peer_id, client_peer_id, token, enroll_pk, enroll_pk_pq, challenge, ts)` is verified (the client PeerId and both enroll keys are bound to the signature); `Enroll`/`Rebind` share one **global verification budget** (`verify_budget`, 120 per minute, at most 4 per peer) → `RateLimited` if exceeded; `Register` proofs have their own pool (256 per minute, 64 per peer = one full `Register`), so a peer can neither starve others nor the registrations; a rejected request does not spend the budget; if the key is in `blocked_keys` → `Revoked`; for a public invite (`uses_left == -1`) a ceiling of 60 registrations per hour (`QuotaExceeded`); number of active enrolments reaches `max_enrollments` (default 64; counts those not idle for the last 30 days) → `QuotaExceeded`; then `enroll_with_invite` consumes the token and writes the record in one transaction. If the same PeerId enrols again, the previous `enrollment_id` and the quota counters are kept.
+- `Hello`: version ≠ `SERVER_PROTOCOL_VERSION` (8) → `Unsupported`. Blob requests carry a 24-byte `upload_secret`; blob id = 8-byte author tag (in clear) + `blob_id_hash_hex` (SHA-256 of the bytes after the tag, `typeon-blob-id-v3`, first 16 bytes) = 48 hex characters (`blob_id_for_upload_secret`). Otherwise a random 32-byte `challenge` is generated and written to the connection state; the reply is `Welcome` (+ `enrolled` = whether this PeerId's record is `Active`, `enrollment_id` = that record's id; a client that lost the `Enrolled` reply recovers it this way).
+- `Enroll`: in order — version; `|now − ts_ms| ≤ 5 min` (`Stale`); invite token hash is valid and has uses left (`BadInvite`); the connection's single-use `challenge` is taken with `take()` and must equal what the client sent (`BadSignature`); the hybrid signature `enroll_signing_input(version, server_peer_id, client_peer_id, token, enroll_pk, enroll_pk_pq, challenge, ts)` is verified (the client PeerId and both enroll keys are bound to the signature); `Enroll`/`Rebind` share one **global verification budget** (`verify_budget`, 120 per minute, at most 4 per peer) → `RateLimited` if exceeded; `Register` proofs have their own pool (256 per minute, 64 per peer = one full `Register`), so a peer can neither starve others nor the registrations; a rejected request does not spend the budget; if the key is in `blocked_keys` → `Revoked`; for a public invite (`uses_left == -1`) a ceiling of 60 registrations per hour (`QuotaExceeded`); number of active enrolments reaches `max_enrollments` (default 16; counts those not idle for the last 30 days) → `QuotaExceeded`; then `enroll_with_invite` consumes the token and writes the record in one transaction. If the same PeerId enrols again, the previous `enrollment_id` and the quota counters are kept.
 - `Rebind`: if the record is unknown → `NotEnrolled`; `Rebind` verification pool (`VerifyPool::Rebind`); the `ts` window, `challenge`, and the hybrid signature by the existing record's `enroll_pk` over `rebind_signing_input(enrollment_id, server_peer_id, new_peer_id, challenge, ts)`. **`Revoked` (a revoked record, or a key in `blocked_keys`) is returned only after the signature is verified** (6a603c7): someone who knows the record id but not the key cannot learn the revocation status. Then the record moves to the new PeerId; the invite token is not consumed.
-- **Revoke = block.** On the server, revocation puts the record's `enroll_pk` into `blocked_keys` (`store.rs`); it is **not** "close the record and allow return with a fresh invite". The same key cannot come back; but someone who reinstalls the app and generates a new PeerId + new enroll key can re-enrol with a usable invite token. The real ban is to **rotate the join code (invite token)**. Uninstalling the server app deletes the onion identity and every enrolled device's token.
+- **Revoke = block.** On the server, revocation puts the record's `enroll_pk` into `blocked_keys` (`store/enrollments.rs`); it is **not** "close the record and allow return with a fresh invite". The same key cannot come back; but someone who reinstalls the app and generates a new PeerId + new enroll key can re-enrol with a usable invite token. The real ban is to **rotate the join code (invite token)**. Uninstalling the server app deletes the onion identity and every enrolled device's token.
 - All other requests require `authenticate(peer)`; no record → `NotEnrolled`; revoked → `Revoked`. Each request first passes `check_rate` (`requests_per_minute`=1800 per minute; a separate `CHUNKS_PER_MINUTE`=600 for file chunks) → `RateLimited`.
 
-### 13.3 Mailbox semantics (`store.rs`)
+### 13.3 Mailbox semantics (`store/mail.rs`; enrolment in `store/enrollments.rs`, archive in `store/archive.rs`, blobs in `store/blobs.rs`; schema `SCHEMA_VERSION` = 5)
 - **`Register{add, drop, proofs}`:** `add`/`drop` ≤ `max_mailboxes`, `proofs` ≤ `MAX_REGISTER_PROOFS` (64); identifiers must pass `is_safe_id` (otherwise `BadDirection`). A new reader must provide a proof signed with the mailbox's **mailbox key** (a hybrid key derived from `mailbox_proof_seeds`) (`register_signing_input(mailbox, enrollment_id, server_peer_id)`); proofs leave their own verification pool. The server binds the mailbox to a **per-reader** key hash (`mailbox_readers.key_hash`, `mailbox_key_hash`), not to one key; the old `mailbox_keys` table was removed. A mailbox id with the `mk_` prefix (key-bound) can only be one derived from its own proof key (`key_bound_mailbox_id`); another key is `refused`. Mailboxes whose proof never arrived come back in `Registered{proof_needed}`; unverified/rejected ones come back in `refused` (the client re-sends `Register` with ≤64 proofs; if all are accepted, `Ok`). The reader limit is **per key**: `MAX_READERS_PER_KEY` = 2 (I-48): two different keys can each get 2 readers on the same first-contact mailbox, and one cannot take the other's place. A new reader to a full mailbox with the same key (a restored device) takes the place of the same-key reader unseen the longest, **only** if that reader has not been seen for 7 days (`READER_EVICT_IDLE_MS`; by its own requests or its last `Register`), otherwise `refused`. If the number of registrations exceeds `max_mailboxes`, it is also `refused`. Accepted mailboxes are written to `live_interest[peer]` on the server (the target for Push/Notify).
 - **`Deposit`:** `sealed ≤ min(max_item_bytes, 900 KiB)` (`TooLarge`); a mailbox with no other active registered reader (`mailbox_has_other_reader`), apart from the depositor → `UnknownMailbox`; the depositor's record must satisfy `bytes_mail ≤ max_mail_bytes`, the total disk budget (`total_budget_exceeded`), and the number of items **that depositor has in that mailbox** (`depositor_item_count`) < `max_items_per_mailbox` (5000) → otherwise `QuotaExceeded`. If the same `(mailbox, depositor, sha256(sealed))` already exists, **no new row is opened**, the TTL is extended, and the old `seq` is returned (idempotent). Otherwise a `mail` row is written: **`seq` is a per-mailbox counter** (`mail_seq` table: `INSERT ... ON CONFLICT DO UPDATE SET last = last + 1 RETURNING last`; row id is a separate `id`, `UNIQUE(mailbox_id, seq)`), so a reader cannot estimate the server's total intake rate from gaps in `seq`. The `mail_seq` row is never deleted (even if the mailbox is emptied the counter is not reset; otherwise new mail would fall below a reader's cursor). Migration from the old global-AUTOINCREMENT schema (`init_schema`, `SCHEMA_VERSION` 4): old rows keep their `seq`; new mailboxes start above the old maximum (`meta.mail_seq_base`) → no client cursor is left above new mail. `expires_at = now + mailbox_ttl` (14 days).
 - **`Fetch{cursors}`:** for each `(mailbox, after_seq)` the client reports, rows with `seq > after_seq`, **`depositor != requester`** (it does not take back what it deposited itself), where the requester is in that mailbox's `mailbox_readers`, ordered by `seq`, ≤64 items and ≤512 KiB; if it does not all fit, `more = true`.
@@ -373,7 +383,7 @@ Sources: gossipsub message, direct envelope request, server `Push`/`Batch`.
 - **Sweep** (`maybe_sweep`, every 60 s): reader rows of revoked/sleeping records are removed → fully-acked rows of orphan mailboxes are deleted → rows with `expires_at ≤ now` are deleted → `blobs_to_gc` (blob_ttl 30 days) → `incremental_vacuum`. If a **clock jump** (>24 hours) is detected, the TTL sweep is held back for an hour (a wrong clock must not erase all mail). A record idle for 30 days is "put to sleep" (`sleep_idle_enrollments`). Connections without a record are dropped after 60 s (except in node mode).
 - **Notification** (`notify_owner_of`): for a new envelope, to every connected reader that has the mailbox in `live_interest` and is not the depositor: if the reader has **one** unacked item in that mailbox and the envelope is ≤64 KiB, `Push{item}` (inline delivery, no extra Fetch needed); otherwise `Notify`. `Notify` is repeated every 20 s until a Fetch arrives (`NOTIFY_RESEND_MS`).
 
-### 13.4 Client-side flow (`server_client.rs`)
+### 13.4 Client-side flow (`server_client/mod.rs`)
 **Connection lifecycle:** when the server connects, `Hello` → `Welcome`; if `enrolled`, `server_sweep_at = 0` (immediately `Register` + `Fetch`); otherwise `begin_enrollment`: if already enrolled, `Rebind` (persistent `enrollment_id` + enroll key); if there is a token, `Enroll` (server-specific Ed25519 secret key of 32 bytes + ML-DSA-87 **seed**; if absent, the error "Enrollment key in old format"). If the connection drops, `enrolled=false` and `registered` is cleared.
 **Sweep** every `SERVER_SWEEP_INTERVAL_MS` = 15 s: if enrolled, refresh the mailbox registrations (`Register`, mailboxes derived from ratchet roots + first-contact mailboxes); `Fetch` at least every `SERVER_FETCH_SWEEP_INTERVAL_MS` = 5 min, and immediately on `Notify`/`Push`.
 **Fetch processing** (`Batch{items, more}`):
@@ -386,15 +396,15 @@ Sources: gossipsub message, direct envelope request, server `Push`/`Batch`.
 **Error handling** (`handle_server_error`):
 | Code | Behaviour |
 |---|---|
-| `UnknownMailbox` | That (server, mailbox) is marked "unknown", and the pause **doubles on each consecutive reply**: 60 s (`SERVER_UNKNOWN_MAILBOX_TTL_MS`) << `min(streak, 6)`, at most 60 min (`SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS`); the streak is kept in `server_unknown_streak[(server, mailbox)]`; **deposits in flight at the same time** count as one step while the pause lasts; a successful `Deposited` to that mailbox clears the streak (fb5fecd; before this, for a device never registered on the server, every 2-minute retry re-deposited unacked packets over Tor, keeping the LTE radio on 60–75 % overnight). The envelope is always handed to gossipsub immediately. Account deletion/wipe (`contacts.rs wipe_all_local_state`) also clears the streak |
+| `UnknownMailbox` | That (server, mailbox) is marked "unknown", and the pause **doubles on each consecutive reply**: 60 s (`SERVER_UNKNOWN_MAILBOX_TTL_MS`) << `min(streak, 6)`, at most 60 min (`SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS`); the streak is kept in `server_unknown_streak[(server, mailbox)]`; **deposits in flight at the same time** count as one step while the pause lasts; a successful `Deposited` to that mailbox clears the streak (fb5fecd; before this, for a device never registered on the server, every 2-minute retry re-deposited unacked packets over Tor, keeping the LTE radio on 60–75 % overnight). The envelope stays on the pending-envelope retry queue. Account deletion/wipe (`contacts.rs wipe_all_local_state`) also clears the streak |
 | `NotEnrolled` | `enrolled=false`, `Hello` again; if during `Rebind`, the `enrollment_id` is deleted ("add a new join code") |
 | `Revoked` | the `enrollment_id` is deleted, "operator revoked" |
-| `QuotaExceeded` (Deposit) | deposits to that mailbox stop for 5 min (`SERVER_DEPOSIT_BACKOFF_MS`, in the same `server_unknown_mailboxes` map, no doubling); the envelope goes to gossipsub |
+| `QuotaExceeded` (Deposit) | deposits to that mailbox stop for 5 min (`SERVER_DEPOSIT_BACKOFF_MS`, in the same `server_unknown_mailboxes` map, no doubling); the envelope stays on the retry queue |
 | `RateLimited`, `Internal` | treated as temporary; back-off of 5 min on deposit (`SERVER_DEPOSIT_BACKOFF_MS`) |
 | `BadInvite` (Enroll) | the token is deleted |
 | `BadHash` (BlobFinish) | permanent: stored bytes do not match `enc_sha256`; the same Finish will never work |
 | others (`TooLarge`, `BadSignature`…) | permanent; the blob/archive work is dropped |
-Timeout/connection error (`handle_server_failure`): deposit back-off plus fall-back to gossipsub. **Every failed deposit falls back to gossipsub**; the server is never the only delivery path.
+Timeout/connection error (`handle_server_failure`): deposit back-off; the envelope stays on the retry queue and the direct path is tried again. Every envelope has at least one path (direct, server or retry queue); the server is never the only delivery path.
 
 ### 13.5 Server-side privacy and sealing
 - The session mailbox is **fixed** per device pair (`server_client.rs session_mailbox`): a static DH between the two devices' long-lived KEM X25519 keys, plus HKDF over the ordered fingerprints (`server_seal::session_mailbox_secret`, `p2pmsg-v0.6-session-mailbox:`); it does not change on rotation and is not derived from root_key/topic (X25519 only, no static ML-KEM). The mailbox id is a **hash of the proof key** derived from this secret: `mk_<hex16>` (`server_client.rs key_bound_mailbox_id` → `server_proto::key_bound_mailbox_id(mailbox_key_hash(...))`); the call relay mailbox uses the same form from `pair_key`. For an `mk_` mailbox the server accepts no other key (§13.3): knowing the id is not enough to become a reader. The sealing key still comes from the ratchet root (the recipient tries the current and the previous root). The first-contact mailbox = HKDF(secret, `p2pmsg-v0.5-first-contact-mailbox:`‖fp) — the secret can be the pairing nonce, the link nonce, or the **per-group** first-contact secret (see §11); the first-contact mailbox has the form `mb_<hex16>` (not key-bound); its reader proof key comes from the reading device's own Ed25519 signing key (`server_client.rs own_server_mailboxes`, `mailbox_proof_seeds`).
@@ -413,7 +423,7 @@ Timeout/connection error (`handle_server_failure`): deposit back-off plus fall-b
 - **Process lock:** a `server.lock` file in the data directory is locked with `flock` (held for the whole life of `ServerCore`, `_dir_lock`); a second server cannot open the same directory ("this data directory is in use by another server process").
 - **DB encryption:** the Android server app opens the DB with **SQLCipher** — the key is 32 random bytes, wrapped by an AES-GCM key in the Android Keystore that cannot be exported (`DbKey.get`), and given to the core as 64 hex characters via `ServerLib.setDbKey`. An old plain DB is migrated to an encrypted DB **once** on first open (`sqlcipher_export`); if no key arrives the server **stops** (fail-closed; it never falls back to a plain DB). The Linux `typeon-server` **stays plain**; if `TYPEON_SERVER_DB_KEY` (64 hex) is given, it is opened encrypted the same way (the plain DB is still migrated once).
 - **Archive lifetime:** archive rows are deleted **13 months** after they were last written (`ARCHIVE_TTL_MS` = 13×30 days; `sweep_expired_archive`, runs with the mailbox sweep, quota counters are recalculated).
-- **PIN lock (server app):** the whole screen (join code, device list, settings) is behind a PIN; PBKDF2-HMAC-SHA256, 300,000 iterations, at least 6 characters; after 5 wrong attempts an increasing wait (30 s, then exponential); locks at once when the screen turns off, and 30 s after leaving the app.
+- **PIN lock (server app, `ServerLock.kt`):** the whole screen (join code, device list, settings) is behind a PIN; PBKDF2-HMAC-SHA256, 600,000 iterations (PINs saved before are read with 300,000, `KEY_ITERATIONS`), at least 6 characters; after 5 wrong attempts an increasing wait (30 s, then exponential); locks at once when the screen turns off, and 30 s after leaving the app.
 
 ---
 
@@ -433,13 +443,13 @@ Timeout/connection error (`handle_server_failure`): deposit back-off plus fall-b
 
 - `FileOffer` (metadata, Acked) → the recipient asks for chunks with `/p2pmessenger/filexfer/1.0.0` (`FileChunkRequest/Response`). A random key per file; chunks are encrypted. Multi-source download (sender, siblings, server `alt_source_peer_ids`), automatic resume, identity-verified recovery. `FileChunkResponse::Busy` = the server's rate limit; the client retries the same source after `DOWNLOAD_RETRY_DELAY_MS`. Limit 4 GiB (`MAX_ATTACHMENT_SIZE`).
 - Server blob: chunks stay encrypted with the file key on the server; `BlobPut/Finish`, `blob_ttl 30 days`.
-- Privacy on sending: metadata stripping (`attachments.rs`) covers **only JPEG and PNG**; for other formats (HEIC/WebP/GIF/video etc.) EXIF/GPS is **not stripped** (Android `OutgoingMedia.kt` also re-encodes/remuxes; Linux `prepare_outgoing` does the same). A visual (non-JPEG/PNG) that cannot be re-encoded (undecodable HEIC, animated WebP, GIF over the limit, alpha on API 26–27) and video that cannot be remuxed go out unchanged on both clients only if the user confirms "send with metadata?". If JPEG/PNG metadata cannot be parsed, the file is **rejected** (fail-closed), not sent dirty. Orientation is kept.
+- Privacy on sending: metadata stripping (`attachments/mod.rs`) covers **only JPEG and PNG**; for other formats (HEIC/WebP/GIF/video etc.) EXIF/GPS is **not stripped** (Android `OutgoingMedia.kt` also re-encodes/remuxes; Linux `prepare_outgoing` does the same). A visual (non-JPEG/PNG) that cannot be re-encoded (undecodable HEIC, animated WebP, GIF over the limit, alpha on API 26–27) and video that cannot be remuxed go out unchanged on both clients only if the user confirms "send with metadata?". If JPEG/PNG metadata cannot be parsed, the file is **rejected** (fail-closed), not sent dirty. Orientation is kept.
 
 ---
 
 ## 16. Calls and whiteboard
 
-### 16.1 Call state machine (`call.rs`, one `CallSession`)
+### 16.1 Call state machine (`call/mod.rs`, one `CallSession`; signalling in `call/signalling.rs`, media in `call/media_link.rs`)
 `CallPhase`: `Outgoing`, `Incoming`, `Active`. Only one call at a time (`"A call is already in progress"`).
 
 **Start:** `start_call(peer)`: invites **all devices** that have a ratchet inside `fanout_targets(peer)`. Group: `group_call_devices` = the active and **recently seen** devices of the other members. Each participant generates a **fresh random** `my_key` (32 bytes) and `my_sid` (8 bytes) per call (`CallSession::new`) and opens the media engine with `media_start`.
@@ -474,7 +484,7 @@ Kotlin does the coding (Opus audio; video H.264/HEVC — flag bit), and the core
 **Protected:** content confidentiality and integrity (E2E + PQ hybrid), forward secrecy (30-min rotation + chain key deletion), post-compromise recovery (rotation), sender identity (hybrid signature, bound to the recipient), replay (message_id dedup, consumed keys, handshake signature/time window), IP privacy (onion only; no clearnet dial), content privacy from the server (double seal, blinded mailbox name).
 
 **Accepted / known limits:**
-- The server operator sees volume, timing, and the PeerId↔mailbox mapping (the peer graph); it can delay or drop a message but cannot forge it (this is why there is a gossipsub copy).
+- The server operator sees volume, timing, and the PeerId↔mailbox mapping (the peer graph); it can delay or drop a message but cannot forge it (this is why the direct path is preferred whenever it is up, and the server copy is a fallback).
 - The server archive is not forward-secret; the server can offer an old edit revision to a device that restores from scratch.
 - `Handshake`/`IdentityExchange` stay readable on the server (the sender's name is visible); they carry only public keys + signatures.
 - Noise transport is classical X25519 (the content is already hybrid).
@@ -505,7 +515,7 @@ Kotlin does the coding (Opus audio; video H.264/HEVC — flag bit), and the core
 | `RECONNECT_SWEEP_INTERVAL_MS` | 15 s | tuning.rs |
 | `KEEPALIVE_FAST_INTERVAL_MS` / `_IDLE_` / `_POWER_SAVE_INTERVAL_MS` | 2 / 20 / 60 s | tuning.rs |
 | `MAX_ENVELOPE_BYTES` | 1 MiB | tuning.rs |
-| `SERVER_PROTOCOL_VERSION` | 7 | typeon-crypto/src/server_proto.rs |
+| `SERVER_PROTOCOL_VERSION` | 8 | typeon-crypto/src/server_proto.rs |
 | `MAX_DEPOSIT_BYTES` | 900 KiB | server_proto.rs |
 | `SERVER_ONLY_GRACE_MS` | 30 s | server_client.rs |
 | `SERVER_DEPOSIT_BACKOFF_MS` | 5 min | server_client.rs |
@@ -526,12 +536,16 @@ Kotlin does the coding (Opus audio; video H.264/HEVC — flag bit), and the core
 | `MAX_ARCHIVE_PUT_RECORDS` | 256 | server_proto.rs |
 | `MAX_FETCH_BATCH_ITEMS` / `MAX_FETCH_BATCH_BYTES` | 64 / 512 KiB | server_proto.rs |
 | `MAX_BLOB_CHUNK_BYTES` / `BLOB_UPLOAD_SECRET_LEN` / `BLOB_TAG_LEN` | 768 KiB / 24 / 8 | server_proto.rs |
-| `MAX_READERS_PER_KEY` / `READER_EVICT_IDLE_MS` | 2 / 7 days | typeon-server/src/store.rs |
-| `SCHEMA_VERSION` (server DB) | 4 | typeon-server/src/store.rs |
-| `NOTIFY_RESEND_MS` / `CHUNKS_PER_MINUTE` / `MAX_HASH_JOBS` | 20 s / 600 / 4 | typeon-server/src/lib.rs |
-| `ARCHIVE_TTL_MS` (server archive row) | 13 months (13×30 days) | typeon-server/src/store.rs |
-| `MAX_INVITE_PARTICIPANTS` / `RING_TIMEOUT_MS` / `MEDIA_LOST_MS` / `INVITE_MAX_AGE_MS` | 1024 / 45 s / 30 s / 60 s | call.rs |
-| AppLock PBKDF2 | 300,000 it. | AppLock.kt |
+| `MAX_READERS_PER_KEY` / `READER_EVICT_IDLE_MS` | 2 / 7 days | typeon-server/src/store/mail.rs |
+| `SCHEMA_VERSION` (server DB) | 5 | typeon-server/src/store/mod.rs |
+| `PUBLIC_CODE_TTL_MS` (public join code lifetime) | 3 days (renewed, §21) | typeon-server/src/lib.rs |
+| `DEFAULT_MAX_ENROLLMENTS` / `MAX_PUBLIC_ENROLLMENTS_PER_HOUR` / `ENROLLMENT_IDLE_MS` | 16 / 60 / 30 days | typeon-server/src/lib.rs |
+| `NOTIFY_RESEND_MS` / `CHUNKS_PER_MINUTE` / `MAX_HASH_JOBS` | 20 s / 600 / 4 | typeon-server/src/lib.rs, limits.rs, blobs.rs |
+| `ARCHIVE_TTL_MS` (server archive row) | 13 months (13×30 days) | typeon-server/src/store/mod.rs |
+| `MAX_INVITE_PARTICIPANTS` / `RING_TIMEOUT_MS` / `MEDIA_LOST_MS` / `INVITE_MAX_AGE_MS` | 1024 / 45 s / 30 s / 60 s | call/mod.rs |
+| AppLock PBKDF2 | 600,000 it. | AppLock.kt |
+| Server PIN PBKDF2 | 600,000 it. (300,000 for PINs saved before) | ServerLock.kt |
+| `MIN_PASSWORD_LENGTH` (app password) | 8 | AppLock.kt |
 
 Note: these constants change over time. Before relying on a number, verify it with `grep -n "CONSTANT_NAME"`.
 
@@ -604,3 +618,49 @@ Source: `git log ef2f806..HEAD`; review decisions in `reviews/glm5-2026-11-05/`,
 - 6a603c7: settings/contacts JNI calls run off the main thread; avatar and wallpaper import is size-bounded; media is recognised by magic bytes: mislabelled MP4/MOV/HEIC/TIFF/MKV/AVI is remuxed or asks for "send with metadata?"; 6c9d437: metadata is stripped from m4a audio files; settings show the app version, and the server code paste screen shows the warning about adding a gate.
 
 **NOT VERIFIED:** everything in this round was checked by reading the source; build and device results were taken from commit messages (6c9d437: host tests crypto 37, server 51, core 124; Linux check; two debug APKs built — not re-run while writing this document). On Windows, the pairing problem on a real device has not been diagnosed (`Linux/packaging/windows/TEST-NOTES.md`).
+
+---
+
+## 21. 2026-11-12..15 changes (after e916a13, HEAD 50bb608)
+
+Source: `git log e916a13..HEAD`. Facts below were read from the code on 2026-11-15. Nothing was compiled or run on a device in this pass (AGENTS.md: no build without "derle"). Compatibility with old versions is not pursued.
+
+**PROTOCOL / WIRE BREAKS**
+- **Gossipsub removed** (c798a6f): no pub/sub, no topic subscriptions, no `subscribe` at start. Delivery order is now: direct envelope request-response (`/p2pmessenger/envelope/1.0.0`) → server deposit → `pending_envelopes` retry queue (§7, §12). IdentityExchange/Handshake replies go back on the connection they came in on (`pairing_reply_peer`, `network/publish.rs direct_peer_for`). Strings `p2p_msg_` / `p2p_rt_` remain only as mailbox-id inputs.
+- **Server protocol 8** (47bb856): archive bucket id = hash of a per-bucket purge secret; `ArchivePurge{purge_secrets}`. The operator cannot delete history it cannot name (§13.1, §13.6).
+- **Server DB `SCHEMA_VERSION` 5** (c798a6f). Change details are in `typeon-server/src/store/mod.rs`; read them before touching the schema.
+- Revokes: packets carry the newest 64 revokes (plus the target's own); the local list stays complete (47bb856).
+- **ml-kem 0.3.4** (seed-stored keys; old expanded keys still load through `ratchet::mlkem_dk_from_bytes`); `kem` dropped as a direct dependency; `ml-dsa` 0.1.2.
+- Contact deletion syncs to linked devices (5f25e4b). This is new behaviour, not a wire break.
+
+**SERVER**
+- Public join code: **3-day lifetime** (`PUBLIC_CODE_TTL_MS`), renewed by the server when it expires (0167c7b). Defaults: `DEFAULT_MAX_ENROLLMENTS` 16 active enrolments (changed from 64 on 2026-11-15; matches the Android server app's `EXPECTED_DEVICES`); `MAX_PUBLIC_ENROLLMENTS_PER_HOUR` 60; idle enrolment dropped after `ENROLLMENT_IDLE_MS` 30 days. Commit c798a6f said 16; the code said 64 until 2026-11-15, when `DEFAULT_MAX_ENROLLMENTS` was set to 16 to match `jni.rs EXPECTED_DEVICES = 16`.
+- Installed binary check (47bb856): `install-staged` verifies the update signature, hash and version before the root `ExecStartPre` replaces the binary.
+- `typeon-server` source split: `store.rs` → `store/{mod,mail,enrollments,archive,blobs,tests}.rs`; `lib.rs` → `handlers.rs`, `blobs.rs`, `config.rs`, `limits.rs`, `relay_streams.rs`, `sweep.rs`, `jni.rs`.
+
+**SELF-UPDATE (new, 518d464 → 870b02c → 47bb856; 7.4.x)**
+- `update.rs` (core): once every 20 h (`CHECK_EVERY`) each app reads the project's GitHub `releases.atom` over Tor (no API rate limit). The release tag with a `-` is a beta; without the beta flag only plain versions count (`pick_tags`, `is_newer`).
+- Trust chain: the download is checked against `SHA256SUMS`; `SHA256SUMS` is checked against `SHA256SUMS.sig`, an Ed25519 signature made **offline** by the owner with `tools/sign-update.sh`. The public key is pinned as `UPDATE_KEY` in `update.rs`. A release without the signature counts as not published. TLS uses webpki roots, not the OS store.
+- Downloads are resumable (`.part` file plus HTTP range). State lives in one directory per app: `beta`, `last-check`, `status`, and the verified download.
+- Android: `service/SelfUpdate.kt` (client) and `SelfUpdate.kt` (server app) run through WorkManager. The daily check runs only on unmetered networks. Install goes through PackageInstaller with user confirmation (`askUser`).
+- Linux: the Flatpak restart is detached on the host (f412d91). Windows and headless server use the same core check.
+- Status line and "check now" button in settings, and a beta-off rollback (870b02c).
+
+**CLIENT**
+- Pending-link page (`awaiting_link`) on desktop: confirmed "delete and exit" returns to setup (1a180c3, carried from §20).
+- Desktop says goodbye on quit (7170907): a keepalive `bye` is sent, and peers park the device until it reconnects. Commit message only; not re-checked in code in this pass.
+- App password minimum 8 characters (`AppLock.MIN_PASSWORD_LENGTH`); mandatory server PIN at 600,000 iterations (47bb856).
+- `targetSdk` 35 and `compileSdk` 35 for client and server app (47bb856). Edge-to-edge opt-out.
+- AppLock PBKDF2 600,000 (c798a6f). Legacy 120,000 still read.
+- Chat: 100-item history pages with date pill (f7313f6); desktop 200-bubble cap (8e5cbd5); slide-in animation for new messages (176468d, ccbb9aa).
+- Calls: split mic/speaker pills with device picker (c72b2a8, 541de9f, 55341bf). Desktop: speaker pick mid-call no longer silences the call (15e1444).
+- Desktop stickers and parity features (bbd98f3): sticker fetch from the phone, reactions, forward, picker, storage.
+
+**REPO / TOOLING**
+- Source split (c7af0f6; compile fixes in b10034e): `Linux/src/ui/chat.rs` → `ui/chat/`; core `attachments.rs`, `call.rs`, `network.rs`, `server_client.rs`, `jni_exports.rs` → directories (§1.1); Android `SettingsFragment.kt`, `ChatActivity.kt`, `GroupChatActivity.kt` → `Settings*.kt`, `ChatActivity*.kt`, `GroupChatActivity*.kt`; server `store.rs`/`lib.rs` split as above.
+- Comments and log/error strings: Turkish → English (d752646, the many `docs:` commits). Protocol spec (`Description.md`) and this document are in English.
+- Review files moved to `reviews/archive/root` (47bb856). Personal config and screenshot untracked (`.gitignore`).
+- Release CI (50bb608): pre-release tags (`-`) build debug artifacts; plain tags build release. Release APKs are still unsigned by Gradle; `sign-release.sh` signs them.
+- Version bump touches: `p2p_messenger_android/app/build.gradle` (versionCode + versionName), `p2p_messenger_android_server/app/build.gradle`, `Linux/Cargo.toml`, `Linux/data/com.p2p.messenger.Typeon.metainfo.xml`, `p2p_messenger_android/app/src/main/cpp/rust/Cargo.toml`, `typeon-server/Cargo.toml`, plus the lock files. `tools/bump-version.sh` does this.
+
+**NOT VERIFIED in this pass:** the desktop `bye` behaviour, the Windows client status after the split, and every server `SCHEMA_VERSION` 5 migration step (read `store/mod.rs` before touching it).
