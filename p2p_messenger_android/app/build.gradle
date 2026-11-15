@@ -12,8 +12,8 @@ android {
         // minSdk 28: v3 signing-key rotation (--rotation-min-sdk-version 28) requires it; Android 8.0/8.1 only check v1/v2 signatures made with the old key.
         minSdk 28
         targetSdk 35
-        versionCode 66
-        versionName "7.4.6-beta.2"
+        versionCode 67
+        versionName "7.5.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
