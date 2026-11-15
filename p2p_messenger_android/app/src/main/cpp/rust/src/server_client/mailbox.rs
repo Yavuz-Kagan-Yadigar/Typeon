@@ -1,0 +1,595 @@
+//! Mailboxes: registration with proofs, deposits, fetch, acks, holds.
+
+use super::*;
+
+impl P2PCore {
+    // -----------------------------------------------------------------
+    // Bucket IDs
+    // -----------------------------------------------------------------
+
+    /// Every store-and-forward mailbox this device reads: id -> the secret its `Register` proof is made from
+    /// (`mailbox_proof`), and the key that opens its envelopes (`MailboxKey`).
+    ///
+    /// The single source for `Register`, `Fetch`, and opening a batch.
+    ///
+    /// A first-contact mailbox is made from a pairing secret (`first_contact_secrets`), one mailbox per secret.
+    /// Its proof key comes from this device's signing key. Someone who holds the code can compute the id but still
+    /// cannot register it.
+    pub(super) fn own_server_mailboxes(&self) -> HashMap<String, (Vec<u8>, MailboxKey)> {
+        let mut idx = HashMap::new();
+        if let Some(fp) = &self.own_mailbox_topic_fp {
+            if let Some(keys) = self.own_device_keys.get(fp) {
+                let owner_secret = keys.sign_sk_ed25519.to_bytes().to_vec();
+                for secret in self.first_contact_secrets() {
+                    idx.insert(server_seal::first_contact_mailbox_id(&secret, fp), (owner_secret.clone(), MailboxKey::FirstContact(secret)));
+                }
+            }
+        }
+        for (peer_fp, state) in &self.ratchets {
+            let Some((mailbox, secret)) = self.session_mailbox(peer_fp) else { continue };
+            // Rotation window: the other side may still seal with the OLD root key if it has not applied our last
+            // rotation yet.
+            let mut keys = vec![state.root_handle_now()];
+            keys.extend(state.prev_root_key.clone());
+            idx.insert(mailbox, (secret.to_vec(), MailboxKey::Session(keys, peer_fp.clone())));
+        }
+        idx
+    }
+
+    /// The server mailbox of the session with `peer_fp`, and its proof secret. It is stable, derived from the two
+    /// devices' long-term KEM keys (`server_seal::session_mailbox_secret`), not from the rotating root key. The id
+    /// is made from the proof key (`key_bound_mailbox_id`).
+    /// PROTOCOL BREAK: older clients use a different id.
+    pub(super) fn session_mailbox(&self, peer_fp: &str) -> Option<(String, [u8; 32])> {
+        let own_fp = self.own_mailbox_topic_fp.as_ref()?;
+        let own = self.own_device_keys.get(own_fp)?;
+        let peer = self.known_remote_devices.get(peer_fp).or_else(|| self.own_devices.get(peer_fp))?;
+        let secret = server_seal::session_mailbox_secret(&own.kem_sk_x25519, &peer.kem_pubkey_x25519, own_fp, peer_fp).ok()?;
+        Some((key_bound_mailbox_id(&secret)?, secret))
+    }
+
+    /// The `MailboxProof` of `mailbox` for this enrollment at `server_id`.
+    pub(super) fn mailbox_proof(secret: &[u8], mailbox: &str, enrollment_id: &[u8], server_id: &str) -> Option<server_proto::MailboxProof> {
+        let (signing, signing_pq) = mailbox_proof_keys(secret, mailbox)?;
+        let input = server_proto::register_signing_input(mailbox, enrollment_id, server_id);
+        let sig_pq: MlDsaSignature<MlDsa87> = signing_pq.sign(&input);
+        Some(server_proto::MailboxProof {
+            mailbox: mailbox.to_string(),
+            pk: signing.verifying_key().to_bytes().to_vec(),
+            pk_pq: signing_pq.verifying_key().encode().to_vec(),
+            sig: signing.sign(&input).to_bytes().to_vec(),
+            sig_pq: sig_pq.encode().to_vec(),
+        })
+    }
+
+    /// `Register` for `add`, with a proof for each ID of `prove` (at most `MAX_REGISTER_PROOFS`; the server asks
+    /// again for the rest).
+    pub(super) fn send_register(&mut self, server_id: &str, peer_id: PeerId, mut add: Vec<String>, drop: Vec<String>, prove: &[String]) {
+        let enrollment_id = self.servers.iter().find(|s| s.server_id == server_id).and_then(|s| s.enrollment_id.clone());
+        let proofs: Vec<server_proto::MailboxProof> = match &enrollment_id {
+            // Mailbox secrets are fetched only when there is something to prove.
+            Some(eid) if !prove.is_empty() => {
+                let mut secrets: HashMap<String, Vec<u8>> =
+                    self.own_server_mailboxes().into_iter().map(|(id, (secret, _))| (id, secret)).collect();
+                secrets.extend(crate::call::relay_listen_keys().into_iter().filter_map(|k| Some((key_bound_mailbox_id(&k)?, k))));
+                prove.iter()
+                    .take(server_proto::MAX_REGISTER_PROOFS)
+                    .filter_map(|id| Self::mailbox_proof(secrets.get(id)?, id, eid, server_id))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        // An ID that needs a proof and got none (over the cap, or no longer our mailbox) waits for the next sweep.
+        // Sent bare, the server would ask for the proof again, endlessly.
+        add.retain(|id| !prove.contains(id) || proofs.iter().any(|p| &p.mailbox == id));
+        if add.is_empty() && drop.is_empty() {
+            return;
+        }
+        info!("Server mailbox registration: +{} -{} (proof: {})", add.len(), drop.len(), proofs.len());
+        let (ids, dropped) = (add.clone(), drop.clone());
+        if let Some(id) = self.send_server_request(peer_id, ServerRequest::Register { add, drop, proofs }) {
+            self.server_inflight.insert(id, ServerInflight::Register { server_id: server_id.to_string(), ids, dropped });
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Sending
+    // -----------------------------------------------------------------
+
+    /// Tries to deposit the envelope to every server that is routing and connected.
+    ///
+    /// `true` means it was deposited to at least one server (the RPC is queued). The caller (`try_publish_raw`)
+    /// counts that as sent. The end-to-end guarantee is still the peer's `Ack`.
+    pub(crate) fn try_server_deposit(
+        &mut self,
+        target_fp: &str,
+        topic: &str,
+        envelope: &NetworkEnvelope,
+        bytes: &[u8],
+        first_attempt_at: u64,
+    ) -> bool {
+        if self.servers.is_empty() {
+            return false;
+        }
+        // A first-contact topic names only the public fingerprint. Its mailbox ID needs the pairing secret we hold
+        // for the target. With no secret there is no server path (gossip and the direct path still apply).
+        //
+        // Everything sent to that mailbox (Handshake, IdentityExchange, and a Message before a session exists) is
+        // sealed with that secret and, when the target's device record is known, to its KEM keys. The server sees
+        // no first-contact identity metadata. A session mailbox is sealed with the session's root key. Otherwise the
+        // header's `sender_device_fingerprint` would be readable on the server.
+        let sealed = if topic.starts_with("p2p_msg_") {
+            let Some(secret) = self.first_contact_secret_for(target_fp) else { return false };
+            let mailbox = server_seal::first_contact_mailbox_id(&secret, target_fp);
+            let kem = self.known_remote_devices.get(target_fp)
+                .filter(|d| d.kem_pubkey_x25519.len() == 32 && d.kem_pubkey_mlkem.len() == 1568)
+                .map(|d| (d.kem_pubkey_x25519.as_slice(), d.kem_pubkey_mlkem.as_slice()));
+            server_seal::seal_first_contact(&secret, &mailbox, kem, bytes).map(|s| (mailbox, s))
+        } else {
+            // Only a `Message` goes to a session topic (see `try_publish_raw_via`).
+            let NetworkEnvelope::Message(m) = envelope else { return false };
+            let Some((mailbox, _)) = self.session_mailbox(target_fp) else { return false };
+            let root = self.ratchets.get(target_fp).map(|r| match &r.prev_root_key {
+                Some(prev) if m.header.rotation_kyber_ciphertext.is_some() => prev.clone(),
+                _ => r.root_handle_now(),
+            });
+            match root {
+                Some(root_key) => server_seal::seal_envelope(&root_key, &mailbox, &m.header.sender_device_fingerprint, bytes).map(|s| (mailbox, s)),
+                None => Err("no ratchet session key".to_string()),
+            }
+        };
+        let (mailbox, sealed) = match sealed {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Could not seal envelope, skipping server: {}", e);
+                return false;
+            }
+        };
+
+        if sealed.len() > MAX_DEPOSIT_BYTES {
+            // Wire cap (see `MAX_DEPOSIT_BYTES`). It is better not to try and to fall back to gossip than to send a
+            // silently truncated, corrupt packet.
+            warn!("Envelope exceeds server cap ({} bytes), handing to gossipsub", sealed.len());
+            return false;
+        }
+
+        // See `SERVER_DEPOSIT_BACKOFF_MS`. A server that refused a deposit for quota or rate reasons gets no new
+        // deposits for a while. Otherwise every poll turn would produce the same error, a busy loop.
+        let now_ms = mono_ms();
+        let candidates: Vec<String> = self
+            .servers
+            .iter()
+            .filter(|s| s.route_messages)
+            .filter(|s| {
+                self.server_rt
+                    .get(&s.server_id)
+                    .map(|r| r.connected && r.enrolled && now_ms >= r.deposit_backoff_until
+                        // The server's own item limit. Over it the answer is TooLarge, which used to back off
+                        // every deposit.
+                        && r.limits.as_ref().map_or(true, |l| sealed.len() as u64 <= l.max_item_bytes as u64))
+                    .unwrap_or(false)
+            })
+            // "Not on this server" and "mailbox full here" are remembered per server, so one server's answer does not
+            // close the others.
+            .filter(|s| {
+                self.server_unknown_mailboxes
+                    .get(&(s.server_id.clone(), mailbox.clone()))
+                    .map_or(true, |until| now_ms >= *until)
+            })
+            .map(|s| s.server_id.clone())
+            .collect();
+        if candidates.is_empty() {
+            // Once a minute. Every retry of every pending packet comes through here.
+            static LAST_LOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            if now_ms.saturating_sub(LAST_LOG_MS.load(std::sync::atomic::Ordering::Relaxed)) >= 60_000 {
+                LAST_LOG_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                info!(
+                    "Server skipped (no connected+registered server for this mailbox; {} configured)",
+                    self.servers.len()
+                );
+            }
+            return false;
+        }
+
+        // A `Message` ID is per mailbox. A group text goes to every member under one ID, and the second member's
+        // copy was skipped as already done.
+        let dedup_key = match envelope {
+            NetworkEnvelope::Message(_) => format!("{}|{}", mailbox, deposit_dedup_key(envelope, bytes)),
+            _ => deposit_dedup_key(envelope, bytes),
+        };
+        let mut any = false;
+        for server_id in candidates {
+            // Already on this server's disk: re-deposit (see `P2PCore.server_deposited`). We still count it as
+            // deposited. For the caller the result is the same, and the envelope is on the server.
+            if self.already_deposited(&server_id, &dedup_key) {
+                any = true;
+                continue;
+            }
+            let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { continue };
+            let req = ServerRequest::Deposit { mailbox: mailbox.clone(), sealed: sealed.clone() };
+            // The envelope TYPE goes into the log. Without it, a loop of the same two envelopes being deposited
+            // forever cannot be traced. On a real device this happened, and the type had to be guessed (handshake?
+            // IdentityExchange? DeviceAddNotice?).
+            info!(
+                "Handing to server: mailbox={} bytes={} type={}",
+                mailbox_log_id(&mailbox),
+                sealed.len(),
+                envelope_kind(envelope)
+            );
+            if let Some(id) = self.send_server_request(peer_id, req) {
+                // Mark NOW, before the reply. The reply over Tor takes seconds, and in that window
+                // `awaiting_confirmation` deposited the same envelope again (measured on a device: the same message_id
+                // twice, 5.7 s apart). If the deposit fails, `handle_server_failure` reverts the mark. The mark is now
+                // independent of the envelope type (see `deposit_dedup_key`).
+                self.note_server_deposit(&server_id, &dedup_key);
+                self.server_inflight.insert(
+                    id,
+                    ServerInflight::Deposit {
+                        server_id,
+                        mailbox: mailbox.clone(),
+                        envelope: envelope.clone(),
+                        target_fp: target_fp.to_string(),
+                        first_attempt_at,
+                        dedup_key: dedup_key.clone(),
+                        cancelled: false,
+                    },
+                );
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// See `P2PCore.server_deposited`. Records a successful deposit and bounds the map.
+    pub(crate) fn note_server_deposit(&mut self, server_id: &str, dedup_key: &str) {
+        let now = current_time_ms();
+        self.server_deposited.insert((server_id.to_string(), dedup_key.to_string()), now);
+        if self.server_deposited.len() > MAX_SERVER_DEPOSIT_MEMORY {
+            self.server_deposited
+                .retain(|_, t| now.saturating_sub(*t) < SERVER_DEPOSIT_MEMORY_MS);
+            // If still full (all entries recent), drop the oldest.
+            if self.server_deposited.len() > MAX_SERVER_DEPOSIT_MEMORY {
+                let mut by_age: Vec<((String, String), u64)> =
+                    self.server_deposited.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                by_age.sort_by_key(|(_, t)| *t);
+                let drop_count = by_age.len() - MAX_SERVER_DEPOSIT_MEMORY;
+                for (k, _) in by_age.into_iter().take(drop_count) {
+                    self.server_deposited.remove(&k);
+                }
+            }
+        }
+    }
+
+    /// Has this envelope already been deposited to this server recently?
+    pub(super) fn already_deposited(&self, server_id: &str, dedup_key: &str) -> bool {
+        let key = (server_id.to_string(), dedup_key.to_string());
+        self.server_deposited
+            .get(&key)
+            .map(|t| current_time_ms().saturating_sub(*t) < SERVER_DEPOSIT_MEMORY_MS)
+            .unwrap_or(false)
+    }
+
+    /// Forgets the "already deposited to this server" memory for a `message_id`.
+    ///
+    /// `already_deposited`
+    /// looked only at `message_id`, not at the ciphertext. A regenerated copy (see `retry_unconfirmed_messages` and
+    /// `regen_pending_for_peer`) keeps the SAME `message_id` but has a COMPLETELY NEW ciphertext. The old memory
+    /// therefore blocked that fresh copy from the server for 12 hours (see `SERVER_DEPOSIT_MEMORY_MS`). The server,
+    /// where the recipient could reach it while offline, kept only the OLD copy, which could no longer be decrypted
+    /// after a ratchet rotation. The fresh copy went only over gossip, which fails when the recipient is offline.
+    /// Clearing the memory on regeneration lets the new ciphertext reach the mailbox. If the recipient gets both
+    /// copies, `message_exists_with_id` deduplicates them.
+    ///
+    /// When a user cancels a pending message, the server copy is also WITHDRAWN.
+    /// Before, cancel cleared only the local queue. If the packet had been deposited, it stayed on the server for
+    /// 30 days while the recipient was offline and was eventually delivered. So "I changed my mind" had no effect.
+    /// The server deletes only the row where `depositor == us`, so this path cannot be used to delete someone else's mail.
+    pub(crate) fn cancel_server_deposit(&mut self, message_id: &str) {
+        // No location yet for a Deposit still in flight: flag it, and the `Deposited` arm withdraws it.
+        for inflight in self.server_inflight.values_mut() {
+            if let ServerInflight::Deposit { envelope: NetworkEnvelope::Message(m), cancelled, .. } = inflight {
+                if m.header.message_id == message_id {
+                    *cancelled = true;
+                }
+            }
+        }
+        // Keyed `(server, "mailbox|message_id")`: one entry per target.
+        let targets: Vec<(String, String, String, u64)> = self
+            .server_deposit_locations
+            .iter()
+            .filter(|((_, key), _)| location_message_id(key) == message_id)
+            .map(|((sid, key), (mailbox, seq))| (sid.clone(), key.clone(), mailbox.clone(), *seq))
+            .collect();
+        for (server_id, key, mailbox, seq) in targets {
+            self.server_deposit_locations.remove(&(server_id.clone(), key));
+            let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { continue };
+            let req = ServerRequest::Cancel { mailbox, seqs: vec![seq] };
+            if let Some(id) = self.send_server_request(peer_id, req) {
+                self.server_inflight.insert(id, ServerInflight::Cancel { server_id });
+            }
+        }
+    }
+
+    /// Only the "already deposited" marks: the old copy is still on the server, and a cancel must still find it.
+    pub(crate) fn forget_server_deposit(&mut self, message_id: &str) {
+        self.server_deposited.retain(|(_, key), _| location_message_id(key) != message_id);
+    }
+
+    pub(super) fn server_fetch(&mut self, server_id: &str, peer_id: PeerId, own_ids: &HashSet<String>) {
+        // Nothing is taken before the storage keys are loaded: a fetched item would wait in `deferred_incoming`,
+        // where it can be evicted. Nor while fetched mail waits for its rate budget: the backlog stays one batch.
+        if !self.storage_keys_ready() || self.server_mail_deferred() {
+            return;
+        }
+        // If a `Fetch` is already in flight, do not send a second one (see `ServerRuntime.fetch_inflight`).
+        if self.server_rt.get(server_id).map(|r| r.fetch_inflight).unwrap_or(false) {
+            return;
+        }
+        // Cursors of mailboxes that are no longer ours (a deleted session or contact).
+        let stale: Vec<(String, String)> = self
+            .server_cursors
+            .keys()
+            .filter(|(sid, mb)| sid == server_id && !own_ids.contains(mb))
+            .cloned()
+            .collect();
+        for key in stale {
+            self.server_cursors.remove(&key);
+            if let Some(conn) = &self.db {
+                let _ = conn.execute("DELETE FROM server_cursors WHERE server_id = ?1 AND mailbox_id = ?2", params![key.0, key.1]);
+            }
+        }
+        // The same stable part `server_sweep` registers when over the cap. Refused IDs are skipped there too, or a
+        // registered ID past them fell out of every `Fetch`.
+        let (cap, refused) = self.server_rt.get(server_id).map_or((1, HashSet::new()), |rt| (Self::mailbox_cap(rt), rt.refused.clone()));
+        let mut ids: Vec<&String> = own_ids.iter().filter(|id| !refused.contains(*id)).collect();
+        ids.sort();
+        ids.truncate(cap);
+        let cursors: Vec<(String, u64)> = ids
+            .into_iter()
+            .map(|mb| {
+                let seq = self.server_cursors.get(&(server_id.to_string(), mb.clone())).copied().unwrap_or(0);
+                (mb.clone(), seq)
+            })
+            .collect();
+        if cursors.is_empty() {
+            return;
+        }
+        if let Some(rt) = self.server_rt.get_mut(server_id) {
+            rt.fetch_due_at = mono_ms() + SERVER_FETCH_SWEEP_INTERVAL_MS;
+        }
+        let req = ServerRequest::Fetch {
+            cursors,
+            max_items: MAX_FETCH_BATCH_ITEMS,
+            max_bytes: MAX_FETCH_BATCH_BYTES,
+        };
+        if let Some(id) = self.send_server_request(peer_id, req) {
+            self.server_inflight.insert(id, ServerInflight::Fetch { server_id: server_id.to_string() });
+            // Set only for a request that actually went out. Set before a failed send, it stayed true, and nothing was
+            // fetched until the next reconnect.
+            if let Some(rt) = self.server_rt.get_mut(server_id) {
+                rt.fetch_inflight = true;
+            }
+        }
+    }
+
+    /// The server's mailbox cap (from the `Welcome`/`Enrolled` limits, or the protocol default before those). A longer
+    /// list is refused whole.
+    pub(super) fn mailbox_cap(rt: &ServerRuntime) -> usize {
+        rt.limits.as_ref().map_or_else(|| ServerLimits::default().max_mailboxes, |l| l.max_mailboxes).max(1) as usize
+    }
+
+    /// Acks what the batches of earlier calls brought, once that mail has gone through `process_incoming_envelope`.
+    /// `poll_events` calls this after its incoming loop. `drive_server_sync` calls it too, for the turns before.
+    /// Acked before processing, a crash in between would lose the only copy.
+    pub(crate) fn commit_server_fetches(&mut self) {
+        // Fetched mail still waits for its rate budget. Acked now, a crash before it is processed would lose it.
+        if self.server_mail_deferred() {
+            return;
+        }
+        let now = mono_ms();
+        // This turn's items were processed. Failures were reported (`server_item_failed`). Held and passed items that
+        // the cursor went past are done.
+        let cursors = &self.server_cursors;
+        // Items still deferred (keys not ready) keep their record, so a later failure can still hold them
+        // (`server_item_failed`).
+        let deferred: std::collections::HashSet<[u8; 32]> =
+            self.deferred_incoming.iter().filter(|(s, _)| s.is_none()).map(|(_, r)| Sha256::digest(r).into()).collect();
+        for (sid, rt) in self.server_rt.iter_mut() {
+            rt.taken.retain(|d, _| deferred.contains(d));
+            let below = |mb: &String, seq: u64| cursors.get(&(sid.clone(), mb.clone())).map_or(true, |c| *c < seq);
+            rt.held.retain(|mb, (seq, _)| below(mb, *seq));
+            rt.passed.retain(|(mb, seq)| below(mb, *seq));
+        }
+        let due: Vec<String> = self
+            .server_rt
+            .iter()
+            .filter(|(_, rt)| !rt.unacked.is_empty() && rt.connected && rt.enrolled && now >= rt.ack_retry_at)
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        for sid in due {
+            // One Ack in flight per server: a late `Ok` cannot persist an older position after a newer one.
+            if self.server_inflight.values().any(|i| matches!(i, ServerInflight::Ack { .. }) && i.server_id() == sid) {
+                continue;
+            }
+            let Some(rt) = self.server_rt.get_mut(&sid) else { continue };
+            let Some(peer_id) = rt.peer_id else { continue };
+            let cap = Self::mailbox_cap(rt);
+            let keys: Vec<String> = rt.unacked.keys().take(cap).cloned().collect();
+            let acks: Vec<(String, u64)> = keys.into_iter().filter_map(|k| rt.unacked.remove_entry(&k)).collect();
+            match self.send_server_request(peer_id, ServerRequest::Ack { acks: acks.clone() }) {
+                Some(id) => {
+                    self.server_inflight.insert(id, ServerInflight::Ack { server_id: sid, acks });
+                }
+                None => self.restage_acks(&sid, acks),
+            }
+        }
+    }
+
+    /// An `Ack` that did not go through: retry after one sweep interval.
+    pub(super) fn restage_acks(&mut self, server_id: &str, acks: Vec<(String, u64)>) {
+        let Some(rt) = self.server_rt.get_mut(server_id) else { return };
+        for (mailbox, seq) in acks {
+            let e = rt.unacked.entry(mailbox).or_insert(0);
+            *e = (*e).max(seq);
+        }
+        rt.ack_retry_at = mono_ms() + SERVER_SWEEP_INTERVAL_MS;
+    }
+
+    /// `seq` of `mailbox` did not open, or failed to process. `true`: it holds the mailbox's cursor (not acked, so
+    /// the server keeps it). `false`: it has failed for `SERVER_HOLD_GRACE_MS` and is passed over for good.
+    pub(crate) fn hold_server_item(&mut self, server_id: &str, mailbox: &str, seq: u64, now: u64) -> bool {
+        let Some(rt) = self.server_rt.get_mut(server_id) else { return false };
+        let e = rt.held.entry(mailbox.to_string()).or_insert((seq, now));
+        // A lower item holds the cursor: this one waits behind it and must not restart that item's timer. Otherwise
+        // two failing items would keep resetting each other.
+        if seq > e.0 {
+            return true;
+        }
+        if seq < e.0 {
+            *e = (seq, now);
+        }
+        if now.saturating_sub(e.1) < SERVER_HOLD_GRACE_MS {
+            return true;
+        }
+        warn!("Server item could not be opened/processed for {} min, skipping (mailbox={})", SERVER_HOLD_GRACE_MS / 60_000, mailbox_log_id(mailbox));
+        rt.held.remove(mailbox);
+        rt.passed.insert((mailbox.to_string(), seq));
+        false
+    }
+
+    /// 5 min, doubling to 30 min while the server keeps refusing or not answering deposits. A `Deposited` resets it.
+    pub(super) fn back_off_deposits(rt: &mut ServerRuntime) {
+        rt.deposit_backoff_until = mono_ms()
+            + (SERVER_DEPOSIT_BACKOFF_MS << rt.deposit_failures.min(3)).min(SERVER_DEPOSIT_BACKOFF_MAX_MS);
+        rt.deposit_failures = rt.deposit_failures.saturating_add(1);
+    }
+
+    /// A fetch soon for a held item, not at the next safety sweep.
+    pub(super) fn refetch_held(&mut self, server_id: &str, now: u64) {
+        if let Some(rt) = self.server_rt.get_mut(server_id) {
+            rt.fetch_due_at = rt.fetch_due_at.min(now + SERVER_HOLD_REFETCH_MS);
+        }
+    }
+
+    /// `process_incoming_envelope` failed on a fetched item (`raw`, as handed to `incoming`). Its mailbox's cursor
+    /// goes back before it, so this turn's Ack does not let the server delete it. It is fetched again
+    /// (`hold_server_item`). `poll_events` calls this for each `Err` of a packet with no source peer.
+    pub(crate) fn server_item_failed(&mut self, raw: &[u8]) {
+        let digest: [u8; 32] = Sha256::digest(raw).into();
+        let found = self.server_rt.iter_mut().find_map(|(sid, rt)| rt.taken.remove(&digest).map(|t| (sid.clone(), t)));
+        let Some((server_id, (mailbox, seq))) = found else { return };
+        let now = mono_ms();
+        if !self.hold_server_item(&server_id, &mailbox, seq, now) {
+            return;
+        }
+        let key = (server_id.clone(), mailbox.clone());
+        if let Some(c) = self.server_cursors.get_mut(&key) {
+            *c = (*c).min(seq - 1);
+        }
+        if let Some(rt) = self.server_rt.get_mut(&server_id) {
+            if let Some(e) = rt.unacked.get_mut(&mailbox) {
+                *e = (*e).min(seq - 1);
+            }
+        }
+        self.refetch_held(&server_id, now);
+    }
+
+    /// Immediately hands an envelope that could not be deposited to the server to gossip.
+    pub(super) fn requeue_failed_deposit(&mut self, inflight: &ServerInflight) {
+        if let ServerInflight::Deposit { envelope, target_fp, first_attempt_at, cancelled, .. } = inflight {
+            // Withdrawn by the user, or confirmed in the meantime: nothing to resend.
+            if *cancelled {
+                return;
+            }
+            let envelope = envelope.clone();
+            let target_fp = target_fp.clone();
+            // NOT `publish_envelope`: that one queues the entry with `current_time_ms()`, and would reset the envelope's age on
+            // every server round trip. See the `first_attempt_at` note of `ServerInflight::Deposit`. This is the second half of the endless queue cycle.
+            if let Err(e) = self.publish_envelope_at(&target_fp, &envelope, *first_attempt_at) {
+                warn!("Server failed, gossipsub also failed right away (queued): {}", e);
+            }
+        }
+        if let ServerInflight::BlobPut { blob_id, chunk_index, server_id, .. } = inflight {
+            // Drop from the in-flight set. It is requested again on the next turn.
+            if let Some(up) = self.server_blob_uploads.iter_mut().find(|u| u.file_id == *blob_id) {
+                up.inflight.remove(chunk_index);
+                // Timeout or error means the path was overloaded. Halve the window. Backing off is necessary before retries eat
+                // the bandwidth and push throughput lower still (measured: with a fixed window of 16, throughput fell from 180 KB/s to about 50 KB/s).
+                up.window = (up.window / 2).max(BLOB_WINDOW_MIN);
+                warn!("Chunk timeout/error — window set to {}", up.window);
+            }
+            // One of the parallel circuits may have died: a dead connection swallows 1/N of the requests. Do not decide on a
+            // single event. One timeout on Tor is noise (see `note_bulk_timeout`). Only the server this chunk went to is affected.
+            if let Some(p) = self.server_rt.get(server_id).and_then(|r| r.peer_id) {
+                self.note_bulk_timeout(p);
+            }
+        }
+    }
+
+}
+
+/// A mailbox ID is a read capability. Logs show 24 bits of its hash, never a part of the ID itself.
+/// The signing keys of a mailbox's `Register` proof (`server_seal::mailbox_proof_seeds`).
+pub(super) fn mailbox_proof_keys(secret: &[u8], mailbox: &str) -> Option<(SigningKey, MlDsaSigningKey<MlDsa87>)> {
+    let (seed, seed_pq) = server_seal::mailbox_proof_seeds(secret, mailbox).ok()?;
+    let seed_pq: ml_dsa::Seed = seed_pq.as_slice().try_into().ok()?;
+    Some((SigningKey::from_bytes(&seed), MlDsaSigningKey::<MlDsa87>::from_seed(&seed_pq)))
+}
+
+/// The server ID of a mailbox whose readers all hold `secret` (a session box: the session secret; a call relay box: the pair key).
+/// It is a hash of the box's proof key (`server_proto::key_bound_mailbox_id`). The sender, who holds the same secret, computes it too.
+/// The server refuses a `Register` from any other key, so knowing the ID does not make a reader.
+///
+/// Memoized per secret: an ML-DSA-87 key is derived for each, and this runs for every session on each sweep, fetch and deposit.
+// ponytail: the memo is dropped whole past 4096 entries. Use an LRU if a device ever holds that many live sessions.
+pub(crate) fn key_bound_mailbox_id(secret: &[u8]) -> Option<String> {
+    static MEMO: std::sync::Mutex<Option<HashMap<[u8; 32], String>>> = std::sync::Mutex::new(None);
+    let tag: [u8; 32] = Sha256::digest(secret).into();
+    if let Some(id) = MEMO.lock().ok()?.get_or_insert_with(HashMap::new).get(&tag) {
+        return Some(id.clone());
+    }
+    let (signing, signing_pq) = mailbox_proof_keys(secret, server_proto::KEY_BOUND_MAILBOX_PREFIX)?;
+    let hash = server_proto::mailbox_key_hash(&signing.verifying_key().to_bytes(), &signing_pq.verifying_key().encode());
+    let id = server_proto::key_bound_mailbox_id(&hash);
+    let mut memo = MEMO.lock().ok()?;
+    let memo = memo.get_or_insert_with(HashMap::new);
+    if memo.len() >= 4096 {
+        memo.clear();
+    }
+    memo.insert(tag, id.clone());
+    Some(id)
+}
+
+pub(super) fn mailbox_log_id(id: &str) -> String {
+    hex::encode(&Sha256::digest(id.as_bytes())[..3])
+}
+
+/// Short type name of an envelope, for logging. See `try_server_deposit`.
+/// The "have I already deposited this envelope to this server?" key.
+///
+/// Before this was fixed, `already_deposited` and `note_server_deposit` recognized only the `NetworkEnvelope::Message` arm (`m.header.message_id`)
+/// and returned `false` for every other type. `Handshake` and `IdentityExchange` cannot enter `awaiting_confirmation`, so their only safety net was
+/// the `pending_envelopes` queue, which is retried on EVERY poll turn. They were re-deposited to the server about once a second. Each was about 15 KB,
+/// so the depositor's `bytes_mail` quota (256 MB) filled within a few hours. From then on every server delivery of that device, to ANY peer, got
+/// `QuotaExceeded`. Secondary devices were hit hardest, since reaching them almost always goes through a fresh handshake or the server.
+///
+/// For `Message` the key is still the `message_id` (so the same message re-serialized is also deduplicated). For other types it is a digest of the
+/// envelope bytes, which is stable because the queue retries by cloning the same envelope.
+pub(crate) fn deposit_dedup_key(envelope: &NetworkEnvelope, bytes: &[u8]) -> String {
+    match envelope {
+        NetworkEnvelope::Message(m) => m.header.message_id.clone(),
+        _ => {
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            format!("raw:{}", hex::encode(&hasher.finalize()[..16]))
+        }
+    }
+}
+
+pub(crate) fn envelope_kind(envelope: &NetworkEnvelope) -> String {
+    match envelope {
+        NetworkEnvelope::Handshake(_) => "Handshake".to_string(),
+        NetworkEnvelope::IdentityExchange(_) => "IdentityExchange".to_string(),
+        NetworkEnvelope::Message(m) => format!("Message/{}", m.header.message_id.chars().take(8).collect::<String>()),
+    }
+}

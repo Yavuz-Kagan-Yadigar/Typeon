@@ -111,7 +111,15 @@ mod wipe_coverage_tests {
         // Built from parts: see the trap described in the test above.
         let marker = ["CREATE TABLE IF NOT", " EXISTS "].concat();
         let mut missing = Vec::new();
-        for src in [lib, include_str!("server_client.rs"), include_str!("whiteboard.rs")] {
+        for src in [
+            lib,
+            include_str!("server_client/mod.rs"),
+            include_str!("server_client/connection.rs"),
+            include_str!("server_client/mailbox.rs"),
+            include_str!("server_client/archive.rs"),
+            include_str!("server_client/blobs.rs"),
+            include_str!("whiteboard.rs"),
+        ] {
             for part in src.split(marker.as_str()).skip(1) {
                 let table: String = part.chars().take_while(|c| c.is_ascii_lowercase() || *c == '_').collect();
                 if !table.is_empty() && !wbody.contains(&format!("\"{}\"", table)) {
