@@ -1896,5 +1896,17 @@ mod fable_review_tests {
         assert!(me.call.is_some());
         me.end_call();
         assert_eq!(me.group_call_offer(&gid), 2, "after leaving, Attend shows again");
+
+        // The caller never gets an Invite of its own call: leaving it while
+        // others stay still leaves an offer, from a participant's keys.
+        let own_gid = "group-attend-caller-01".to_string();
+        let mut g = Group::new(own_gid.clone(), "g".into(), my_id.clone(), 1);
+        g.sync_members(&[other_id.clone(), my_id.clone()], 1);
+        me.groups.insert(own_gid.clone(), g);
+        let own_call = me.start_group_call(own_gid.clone(), false).unwrap();
+        me.handle_call_signal(&other_fp, &other_id, own_call, CallAction::Accept, Some(own_gid.clone()), false, vec![3; 32], vec![4; 8], current_time_ms(), Vec::new());
+        assert_eq!(me.group_call_offer(&own_gid), 0, "in the call");
+        me.end_call();
+        assert_eq!(me.group_call_offer(&own_gid), 1, "left, the call goes on");
     }
 }

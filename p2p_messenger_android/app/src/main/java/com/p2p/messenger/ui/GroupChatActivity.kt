@@ -416,10 +416,10 @@ class GroupChatActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) { ownIdentityId }
         refreshContactCacheAsync()
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
-        // Sender names in the main colour of each member's whiteboard pen, at 60 % saturation.
+        // Sender names in the main colour of each member's whiteboard pen, at 40 % saturation.
         whiteboard.onParticipants = { ids ->
             val colors = ids.withIndex().associate { (i, id) ->
-                id to androidx.core.graphics.ColorUtils.HSLToColor(floatArrayOf(360f * i / ids.size, 0.6f, 0.55f))
+                id to androidx.core.graphics.ColorUtils.HSLToColor(floatArrayOf(360f * i / ids.size, 0.4f, 0.55f))
             }
             if (colors != adapter.senderColors) {
                 adapter.senderColors = colors

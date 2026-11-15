@@ -115,6 +115,18 @@ impl P2PCore {
             self.call_signal(&fp, &s, action);
         }
         media_stop();
+        // Left a group call that goes on: "Attend" shows at once, from the
+        // keys of someone still in it, not after the next re-invite reaches us.
+        if let (Some(gid), "local", CallPhase::Active) = (&s.group_id, reason, s.phase) {
+            if let Some((fp, (key, sid))) = s.keys.iter().find(|(fp, _)| s.joined.contains(*fp)) {
+                group_offers().insert(gid.clone(), GroupOffer {
+                    call_id: s.call_id.clone(), video: s.video, peer_fp: fp.clone(),
+                    media_key: key.clone(), stream_id: sid.clone(),
+                    participants: s.invited.clone(), at: Instant::now(),
+                });
+                self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
+            }
+        }
         self.last_call_end = Some((s.call_id, reason.to_string()));
     }
 
