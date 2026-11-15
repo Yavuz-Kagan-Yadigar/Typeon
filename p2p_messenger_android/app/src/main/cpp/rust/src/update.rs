@@ -255,6 +255,10 @@ fn sha256_file(path: &Path) -> Option<String> {
 /// `{v}` standing for the version (`typeon-client-{v}.apk`). Returns the verified file and its version, or
 /// `None` when this app is up to date or was checked less than a day ago (`force` skips that wait).
 pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: bool) -> Result<Option<(String, PathBuf)>, String> {
+    // One check per process: two at once (switch flipped twice, periodic + immediate work) wrote the same
+    // `.part` file.
+    static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = RUNNING.lock().await;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let stamp = dir.join("last-check");
     if !force {
