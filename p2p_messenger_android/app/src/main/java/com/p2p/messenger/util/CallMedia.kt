@@ -287,7 +287,7 @@ object CallMedia {
                 // Lane behind: shed the oldest; a video hole needs a keyframe.
                 lane.queue.poll()
                 lane.queue.offer(f)
-                if (kind == KIND_VIDEO) P2PLib.callRequestKeyframe(slot)
+                if (kind == KIND_VIDEO) { videoSinks[slot]?.skipped(); P2PLib.callRequestKeyframe(slot) }
             }
         }
     }
@@ -443,7 +443,11 @@ object CallMedia {
         fun feed(frame: ByteArray, off: Int) {
             for (pkt in unpackBundle(frame, off)) {
                 drain()
-                val i = dec.dequeueInputBuffer(2_000)
+                // Own lane thread: wait for a buffer instead of dropping the
+                // packet (each drop was a 20 ms hole in the audio).
+                var i = dec.dequeueInputBuffer(5_000)
+                var tries = 0
+                while (i < 0 && tries++ < 8) { drain(); i = dec.dequeueInputBuffer(5_000) }
                 if (i >= 0) {
                     dec.getInputBuffer(i)!!.apply { clear(); put(pkt) }
                     dec.queueInputBuffer(i, 0, pkt.size, pts, 0)
@@ -962,6 +966,8 @@ object CallMedia {
         private var createdAt = -1000L
         /** Frames the current decoder has rendered. */
         private var rendered = 0
+        /** A frame was skipped: feed nothing until the next keyframe. */
+        private var waitKey = false
         private val info = MediaCodec.BufferInfo()
 
         /** feed() runs on the receive thread, release() on the UI thread. */
@@ -1011,15 +1017,22 @@ object CallMedia {
                 if (rot % 180 == 0) onSize(w, h) else onSize(h, w)
             }
             val c = codec ?: return
+            // After a skipped frame every P-frame decodes to garbage.
+            if (waitKey) { if (!key) { askKeyframe(); return }; waitKey = false }
             val len = f.size - off - 6
             render(c)
-            // Never block the shared receive thread on one decoder: audio and
-            // the other participants' video queue up behind it.
-            val i = c.dequeueInputBuffer(2_000)
+            // Own lane thread: wait up to ~100 ms for an input buffer. A frame
+            // dropped here left the decoder with a hole until the next keyframe.
+            var i = c.dequeueInputBuffer(5_000)
+            var tries = 0
+            while (i < 0 && tries++ < 20) { render(c); i = c.dequeueInputBuffer(5_000) }
             if (i >= 0) {
                 c.getInputBuffer(i)!!.apply { clear(); put(f, off + 6, len) }
                 c.queueInputBuffer(i, 0, len, pts, 0)
                 pts += 41_000
+            } else {
+                waitKey = true
+                askKeyframe()
             }
             render(c)
         }
@@ -1059,6 +1072,10 @@ object CallMedia {
             codec = null
             w = 0
         }
+
+        /** A frame for this sink was dropped before it got here. */
+        @Synchronized
+        fun skipped() { waitKey = true }
 
         @Synchronized
         fun hevcNeverRendered() = mime == MediaFormat.MIMETYPE_VIDEO_HEVC && rendered == 0

@@ -102,7 +102,7 @@ pub(super) fn media_stats() -> serde_json::Value {
         "direct_links": m.direct.len(), "relay_links": m.relays.len(),
         "backlog": backlog_of(&m),
         "tx_queue_ms": reported_queue(&m),
-        "rx_queue_ms": m.remotes.values().map(|r| r.queue_ms()).max().unwrap_or(0),
+        "rx_queue_ms": m.remotes.values().map(|r| r.last_queue).max().unwrap_or(0),
         "rx_delay_ms": m.remotes.values().map(|r| r.delay_ewma as i64).max().unwrap_or(0),
         "bytes_out": m.bytes_out, "bytes_in": m.bytes_in,
     })
@@ -172,6 +172,7 @@ pub(super) fn media_send_to(kind: u8, payload: &[u8], only: Option<&str>) -> boo
         .map(|(_, t)| (t.peer, t.relay_via, t.mailbox.clone(), seal_packet(&t.key, &m.sid, m.seq, kind, payload)))
         .collect();
     let mut any = false;
+    let dropped_before = m.dropped;
     for (peer, relay_via, mailbox, packet) in targets {
         if let Some(p) = peer {
             let res = m.direct.get(&p).map(|l| {
@@ -207,6 +208,13 @@ pub(super) fn media_send_to(kind: u8, payload: &[u8], only: Option<&str>) -> boo
             m.via_relay += 1;
             any = true;
         }
+    }
+    // A dropped video frame leaves that receiver's decoder with a hole: every
+    // later frame is garbage to it until a keyframe (GOP is 10 s).
+    let now = current_time_ms();
+    if kind == KIND_VIDEO && m.dropped != dropped_before && now.saturating_sub(m.keyframe_at) >= KEYFRAME_MIN_MS {
+        m.keyframe_asked = true;
+        m.keyframe_at = now;
     }
     if any {
         m.sent += 1;
@@ -281,7 +289,7 @@ pub(super) fn media_on_packet_via(packet: &[u8], via: Option<PeerId>) {
     let report = (r.want_keyframe || now.saturating_sub(r.last_report_ms) >= REPORT_EVERY_MS).then(|| {
         r.last_report_ms = now;
         let mut p = sid.to_vec();
-        p.extend_from_slice(&(r.queue_ms().min(u16::MAX as u32) as u16).to_be_bytes());
+        p.extend_from_slice(&(r.take_queue_ms().min(u16::MAX as u32) as u16).to_be_bytes());
         p.push(r.want_keyframe as u8 | (r.want_avc as u8) << 1);
         r.want_keyframe = false;
         p

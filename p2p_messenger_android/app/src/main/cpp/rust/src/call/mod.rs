@@ -132,6 +132,9 @@ const REPORT_TTL_MS: u64 = 3_000;
 /// encoder in keyframe-per-frame mode.
 const KEYFRAME_MIN_MS: u64 = 1_000;
 
+/// How often the one-way delay base is re-measured, see `Remote::delay_min`.
+const BASE_WINDOW: Duration = Duration::from_secs(30);
+
 const HEADER_LEN: usize = 17;
 const TAG_LEN: usize = 16;
 
@@ -270,8 +273,19 @@ struct Remote {
     /// values carry the clock difference between the phones; `ewma - min` does
     /// not, and is the queue building up somewhere on the path.
     delay_ewma: f64,
+    /// Lowest delay in the current `BASE_WINDOW`; `base_prev` in the one
+    /// before. The base is the lower of the two: a slower path (new Tor
+    /// circuit, clock step) becomes the new base within 30-60 s instead of
+    /// reading as queue for the rest of the call.
     delay_min: f64,
+    base_prev: f64,
+    base_since: Instant,
     samples: u64,
+    /// Lowest delay since the last report. A standing queue delays every
+    /// packet in the window; one big frame (a keyframe) only the few behind it.
+    win_min: f64,
+    /// Queue last reported, for the stats.
+    last_queue: u32,
     /// Link the last frame came over (`None` direct, else the relay server).
     /// A route change re-baselines `delay_min`.
     via: Option<PeerId>,
@@ -290,20 +304,36 @@ impl Remote {
     fn new(fp: &str, slot: u8, key: [u8; 32], sid: [u8; 8]) -> Self {
         Remote {
             fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0, last_rx: None,
-            delay_ewma: 0.0, delay_min: 0.0, samples: 0, via: None, last_report_ms: 0, want_keyframe: false, want_avc: false,
+            delay_ewma: 0.0, delay_min: 0.0, base_prev: f64::INFINITY, base_since: Instant::now(), samples: 0, win_min: f64::INFINITY, last_queue: 0, via: None, last_report_ms: 0, want_keyframe: false, want_avc: false,
             muted: false, video_off: false,
         }
     }
     fn is_new(&self, seq: u64) -> bool {
         seq > self.max_seq || (self.max_seq - seq < 64 && self.seen & (1 << (self.max_seq - seq)) == 0)
     }
-    fn queue_ms(&self) -> u32 {
-        (self.delay_ewma - self.delay_min).max(0.0) as u32
+    /// Standing queue over the window since the last call, then a new window.
+    fn take_queue_ms(&mut self) -> u32 {
+        if self.win_min.is_finite() {
+            self.last_queue = (self.win_min - self.delay_min.min(self.base_prev)).max(0.0) as u32;
+        }
+        self.win_min = f64::INFINITY;
+        self.last_queue
+    }
+    fn rotate_base(&mut self) {
+        self.base_prev = self.delay_min;
+        self.delay_min = f64::INFINITY;
+        self.base_since = Instant::now();
     }
     fn record_delay(&mut self, delay: f64) {
+        if self.base_since.elapsed() >= BASE_WINDOW {
+            self.rotate_base();
+        }
+        self.win_min = if self.samples == 0 { delay } else { self.win_min.min(delay) };
         if self.samples == 0 {
             self.delay_ewma = delay;
             self.delay_min = delay;
+            self.base_prev = f64::INFINITY;
+            self.base_since = Instant::now();
         } else {
             self.delay_ewma = self.delay_ewma * 0.9 + delay * 0.1;
             self.delay_min = self.delay_min.min(delay);

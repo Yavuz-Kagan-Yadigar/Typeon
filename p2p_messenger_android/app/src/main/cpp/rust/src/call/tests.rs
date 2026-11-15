@@ -94,3 +94,27 @@ fn send_recv_through_the_static() {
     media_on_packet(&seal_packet(&[3u8; 32], &[9u8; 8], 2, 1, b"x"));
     assert!(media_recv(0).is_none());
 }
+
+#[test]
+fn one_late_frame_is_not_a_standing_queue() {
+    let mut r = Remote::new("", 0, [0; 32], [0; 8]);
+    for d in [100.0, 100.0, 900.0, 700.0, 100.0] {
+        r.record_delay(d);
+    }
+    // A keyframe burst inside the window: the window minimum sees no queue.
+    assert_eq!(r.take_queue_ms(), 0);
+    for d in [600.0, 650.0, 620.0] {
+        r.record_delay(d);
+    }
+    // Every packet of the window late: that is a queue.
+    assert_eq!(r.take_queue_ms(), 500);
+    // Empty window: the last value stands.
+    assert_eq!(r.take_queue_ms(), 500);
+    // The path stays at 600 ms: after two base windows that is the new base.
+    r.rotate_base();
+    r.record_delay(600.0);
+    assert_eq!(r.take_queue_ms(), 500);
+    r.rotate_base();
+    r.record_delay(600.0);
+    assert_eq!(r.take_queue_ms(), 0);
+}
