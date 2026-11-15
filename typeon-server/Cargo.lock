@@ -6845,7 +6845,7 @@ dependencies = [
 
 [[package]]
 name = "typeon-server"
-version = "7.4.5"
+version = "7.4.6-beta.1"
 dependencies = [
  "android_logger",
  "ciborium",

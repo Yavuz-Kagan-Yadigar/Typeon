@@ -1,6 +1,6 @@
 [package]
 name = "typeon-server"
-version = "7.4.5"
+version = "7.4.6-beta.1"
 edition = "2021"
 description = "Typeon — blind store-and-forward server (mailbox, encrypted archive, attachment blobs)"
 license = "GPL-3.0-or-later"
