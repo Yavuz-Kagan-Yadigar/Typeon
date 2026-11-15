@@ -5,7 +5,7 @@ on:
   workflow_dispatch:   # build only, artifacts stay on the run (no release)
 
 permissions:
-  contents: write
+  contents: read   # build jobs run third-party build scripts; only `release` gets write
 
 # Every tag, pre-release ("-" tag) or not, ships release builds: a debug APK is debuggable (`run-as` reads
 # the app data) and carries DebugDbKeyReceiver, so it must never reach a user's phone.
@@ -146,6 +146,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, server, windows, flatpak, sign]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: every app carries the tag's version (the self-updater compares against it)

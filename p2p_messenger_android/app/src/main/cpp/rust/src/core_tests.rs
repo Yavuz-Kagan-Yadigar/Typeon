@@ -1896,6 +1896,12 @@ mod fable_review_tests {
         assert!(me.call.is_some());
         me.end_call();
         assert_eq!(me.group_call_offer(&gid), 2, "after leaving, Attend shows again");
+        // Another call ending here replaces `last_call_end`: the left call's
+        // re-invite still must not ring.
+        me.last_call_end = Some(("some-other-call".into(), "local".into()));
+        signal(&mut me, &other_fp, &other_id, CallAction::Invite);
+        assert!(me.call.is_none(), "a left group call never rings again");
+        assert_eq!(me.group_call_offer(&gid), 2);
 
         // The caller never gets an Invite of its own call: leaving it while
         // others stay still leaves an offer, from a participant's keys.
@@ -1910,12 +1916,23 @@ mod fable_review_tests {
         assert_eq!(me.group_call_offer(&own_gid), 1, "left, the call goes on");
 
         // The last participant leaves: Ended drops the offer at once, and a
-        // late Invite of that call does not bring it back.
+        // later Invite of that call (the Ended came from someone who only lost
+        // sight of the others) brings Attend back but never rings.
         signal(&mut me, &other_fp, &other_id, CallAction::Ended);
         assert_eq!(me.group_call_offer(&gid), 0);
         signal(&mut me, &other_fp, &other_id, CallAction::Invite);
-        assert_eq!(me.group_call_offer(&gid), 0);
+        assert_eq!(me.group_call_offer(&gid), 2);
         assert!(me.call.is_none());
+
+        // My other device joins the call: no Attend here until it leaves.
+        let ev = signal(&mut me, "sibling-device", &my_id, CallAction::Joined);
+        assert_eq!(me.group_call_offer(&gid), 0, "a sibling is in it");
+        assert!(ev["type"] != "call");
+        signal(&mut me, "sibling-device", &my_id, CallAction::Hangup);
+        assert_eq!(me.group_call_offer(&gid), 2, "the sibling left");
+        // Joined from anyone but my own identity does nothing.
+        signal(&mut me, &other_fp, &other_id, CallAction::Joined);
+        assert_eq!(me.group_call_offer(&gid), 2);
 
         // Ended also stops a ring of that call.
         let ring = "call-attend-2".to_string();

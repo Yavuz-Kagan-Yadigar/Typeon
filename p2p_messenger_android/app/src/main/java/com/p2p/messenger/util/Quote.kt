@@ -62,6 +62,11 @@ object Quote {
     /** Inserts a quote at the cursor, on its own line. */
     fun insert(edit: EditText, messageId: String, preview: String) {
         val text = edit.text
+        // The same message is never quoted twice: a scroll that clips the swipe-to-reply gesture can fire it more than once.
+        if (MARKER.findAll(text).any { it.groupValues[1] == clean(messageId) }) {
+            edit.requestFocus()
+            return
+        }
         val at = edit.selectionStart.coerceIn(0, text.length)
         val before = if (at > 0 && text[at - 1] != '\n') "\n" else ""
         val after = if (at < text.length && text[at] == '\n') "" else "\n"

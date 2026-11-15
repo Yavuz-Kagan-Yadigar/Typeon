@@ -1334,6 +1334,9 @@ pub enum CallAction {
     Busy,
     /// Sent by the last participant of a group call to every member device: the call is over, drop its "Attend".
     Ended,
+    /// To my own other devices only: this device joined the group call. They stop ringing and hide its
+    /// "Attend" until this device sends them a Hangup of the call.
+    Joined,
 }
 
 /// Handshake packet. It carries the hybrid KEM step of the initial handshake. The Kyber

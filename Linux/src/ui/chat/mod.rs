@@ -683,11 +683,11 @@ pub fn demo_bubbles() -> gtk::Widget {
         // screen. The grouping logic itself (`insert_entry`) is NOT here. Only its RESULT (the corner classes and the notch) is
         // applied by hand.
     let samples: [(bool, &str); 8] = [
-        (true, "ya abi"),
-        (true, "yalan ya"),
-        (true, "dümen ya"),
+        (true, "hey"),
+        (true, "you there?"),
+        (true, "short one"),
         (true, "a slightly longer message"),
-        (true, "noldu lan o kadar css mss dedin"),
+        (true, "and one more to close the run"),
         (false, "hi"),
         (
             false,

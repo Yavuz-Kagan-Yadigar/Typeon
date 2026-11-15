@@ -975,7 +975,7 @@ object CallMedia {
         private var statFrames = 0L
         private var statAt = android.os.SystemClock.elapsedRealtime()
         /** A frame was skipped: feed nothing until the next keyframe. */
-        private var waitKey = false
+        @Volatile private var waitKey = false
         private val info = MediaCodec.BufferInfo()
 
         /** feed() runs on the receive thread, release() on the UI thread. */
@@ -1086,8 +1086,8 @@ object CallMedia {
             w = 0
         }
 
-        /** A frame for this sink was dropped before it got here. */
-        @Synchronized
+        /** A frame for this sink was dropped before it got here. Not synchronized: the
+         *  receive thread calls it, and feed() can hold the lock ~100 ms waiting for a buffer. */
         fun skipped() { waitKey = true }
 
         @Synchronized

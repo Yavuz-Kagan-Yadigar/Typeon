@@ -61,6 +61,8 @@ impl P2PCore {
         media_start(*s.my_key, s.my_sid);
         self.call = Some(s);
         self.call_broadcast(CallAction::Invite);
+        // My other devices never get an Invite of it: no "Attend" there either.
+        self.silence_siblings(CallAction::Joined);
         info!("Group call started: {} video={}", &call_id[..8], video);
         Ok(call_id)
     }
@@ -82,16 +84,18 @@ impl P2PCore {
         // Register the relay addresses now (see `relay_listen_keys`).
         self.server_sweep_at = 0;
         self.call_broadcast(CallAction::Accept);
-        self.silence_siblings();
+        // A group call: siblings also hide its "Attend"; a 1:1 call they only stop ringing.
+        let joined = if self.call.as_ref().map_or(false, |s| s.group_id.is_some()) { CallAction::Joined } else { CallAction::Busy };
+        self.silence_siblings(joined);
         Ok(())
     }
 
     /// Answered or rejected here: my other devices that ring for the same
     /// call stop (see the sibling check in the Reject/Busy/Hangup arm).
-    fn silence_siblings(&mut self) {
+    fn silence_siblings(&mut self, action: CallAction) {
         let Some((cid, gid, video)) = self.call.as_ref().map(|s| (s.call_id.clone(), s.group_id.clone(), s.video)) else { return };
         for fp in self.sibling_active_devices() {
-            self.send_call_signal(&fp, &cid, gid.clone(), video, CallAction::Busy, None, Vec::new());
+            self.send_call_signal(&fp, &cid, gid.clone(), video, action, None, Vec::new());
         }
     }
 
@@ -102,8 +106,11 @@ impl P2PCore {
 
     /// `end_call`, with the reason `call_state_json` reports afterwards.
     pub(super) fn end_call_with(&mut self, reason: &str) {
-        if self.call.as_ref().map_or(false, |s| s.phase == CallPhase::Incoming) {
-            self.silence_siblings();
+        match self.call.as_ref().map(|s| (s.phase, s.group_id.is_some())) {
+            Some((CallPhase::Incoming, _)) => self.silence_siblings(CallAction::Busy),
+            // Left a group call: my other devices show its "Attend" again.
+            Some((CallPhase::Active | CallPhase::Outgoing, true)) => self.silence_siblings(CallAction::Hangup),
+            _ => {}
         }
         let Some(s) = self.call.take() else { return };
         let (action, to) = if s.phase == CallPhase::Incoming {
@@ -128,6 +135,11 @@ impl P2PCore {
                 });
                 self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
             }
+        }
+        // A group call keeps re-inviting every device not in it; `last_call_end`
+        // holds only the latest call, so the next call's end would let it ring again.
+        if s.group_id.is_some() {
+            never_ring_again(&s.call_id);
         }
         self.last_call_end = Some((s.call_id, reason.to_string()));
     }
@@ -156,6 +168,9 @@ impl P2PCore {
         let offers = group_offers();
         let Some(o) = offers.get(group_id).filter(|o| o.at.elapsed() < Duration::from_millis(OFFER_TTL_MS)) else { return 0 };
         if self.call.as_ref().map_or(false, |s| s.call_id == o.call_id && s.phase != CallPhase::Incoming) {
+            return 0;
+        }
+        if sibling_calls().contains(&o.call_id) {
             return 0;
         }
         if o.video { 2 } else { 1 }
@@ -279,11 +294,9 @@ impl P2PCore {
                     if !is_member(self, gid) {
                         return noop();
                     }
-                    // An Invite that arrives after the call's `Ended` must not bring the offer back.
-                    let ended = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|(id, who)| *id == call_id && who == ENDED);
-                    if ended {
-                        return noop();
-                    }
+                    // An Invite after the call's `Ended` brings "Attend" back (the
+                    // Ended may have come from a participant that only lost sight of
+                    // the others), but never rings: see the `early_hangup` check below.
                     let offer = GroupOffer {
                         call_id: call_id.clone(), video, peer_fp: peer_fp.to_string(),
                         media_key: Zeroizing::new(media_key.clone()), stream_id: stream_id.clone(),
@@ -301,7 +314,7 @@ impl P2PCore {
                     .unwrap_or_else(|p| p.into_inner())
                     .iter()
                     .filter(|(id, _)| *id == call_id)
-                    .fold((false, false), |(c, e), (_, fp)| (c || fp == peer_fp, e || fp == peer_fp || fp.is_empty()));
+                    .fold((false, false), |(c, e), (_, fp)| (c || fp == peer_fp, e || fp == peer_fp || fp.is_empty() || fp == ENDED));
                 if caller_hung_up {
                     if let Some(gid) = &group_id {
                         group_offers().remove(gid);
@@ -436,7 +449,11 @@ impl P2PCore {
                 }
                 noop()
             }
-            CallAction::Reject | CallAction::Busy | CallAction::Hangup => {
+            CallAction::Reject | CallAction::Busy | CallAction::Hangup | CallAction::Joined => {
+                let from_me = self.my_identity_id().as_deref() == Some(sender_identity_id);
+                if action == CallAction::Joined && !from_me {
+                    return noop();
+                }
                 // The device that kept the offer alive left. The call may go
                 // on without it: the next inviter (`is_call_inviter`) renews
                 // the offer within the grace, else it expires then.
@@ -449,7 +466,25 @@ impl P2PCore {
                 }
                 // My other device answered or rejected this call: stop ringing
                 // here, nothing to tell anyone. Never ends a call I am in.
-                if self.my_identity_id().as_deref() == Some(sender_identity_id) {
+                if from_me {
+                    if let Some(gid) = &group_id {
+                        let changed = {
+                            let mut calls = sibling_calls();
+                            let had = calls.contains(&call_id);
+                            if action == CallAction::Joined && !had {
+                                if calls.len() >= 16 {
+                                    calls.pop_front();
+                                }
+                                calls.push_back(call_id.clone());
+                            } else if action == CallAction::Hangup && had {
+                                calls.retain(|c| *c != call_id);
+                            }
+                            had != calls.contains(&call_id)
+                        };
+                        if changed {
+                            self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
+                        }
+                    }
                     if !self.call.as_ref().map_or(true, |s| s.call_id == call_id) {
                         return noop();
                     }
@@ -673,6 +708,9 @@ impl P2PCore {
                         "peer": self.canonical_peer_key(&s.peer_fp), "ended": true, "missed": true,
                     }).to_string());
                 }
+                if s.group_id.is_some() {
+                    never_ring_again(&s.call_id);
+                }
                 self.last_call_end = Some((s.call_id, "missed".to_string()));
                 return;
             }
@@ -776,4 +814,14 @@ impl P2PCore {
         })
         .to_string()
     }
+}
+
+/// An Invite of `call_id` from anyone no longer rings here ("" = any sender in
+/// `EARLY_HANGUP`); its "Attend" offer is still kept.
+fn never_ring_again(call_id: &str) {
+    let mut early = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner());
+    if early.len() >= 16 {
+        early.pop_front();
+    }
+    early.push_back((call_id.to_string(), String::new()));
 }
