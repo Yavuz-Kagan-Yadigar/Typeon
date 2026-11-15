@@ -416,10 +416,14 @@ class GroupChatActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) { ownIdentityId }
         refreshContactCacheAsync()
         whiteboard = WhiteboardPanel(this, findViewById(R.id.whiteboardHost), findViewById(R.id.whiteboardHandle))
-        // Sender names in the main colour of each member's whiteboard pen, at 40 % saturation.
+        // Sender names in the hue of each member's whiteboard pen (HSV): dark theme
+        // 30 % saturation, value 100 % in the dark theme and 50 % in the light one.
         whiteboard.onParticipants = { ids ->
+            val dark = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+            val value = if (dark) 1f else 0.5f
             val colors = ids.withIndex().associate { (i, id) ->
-                id to androidx.core.graphics.ColorUtils.HSLToColor(floatArrayOf(360f * i / ids.size, 0.4f, 0.55f))
+                id to android.graphics.Color.HSVToColor(floatArrayOf(360f * i / ids.size, 0.3f, value))
             }
             if (colors != adapter.senderColors) {
                 adapter.senderColors = colors
