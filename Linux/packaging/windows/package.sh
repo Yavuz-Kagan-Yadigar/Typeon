@@ -1,5 +1,5 @@
 #!/bin/sh
-# Release build + portable zip: typeon-windows-<version>.zip in Linux/target/.
+# Release build (debug with TYPEON_WIN_DEBUG=1) + portable zip: typeon-windows-<version>.zip in Linux/target/.
 # Layout follows the MSYS2 prefix (bin/, lib/, share/) so GLib, GTK and
 # GStreamer find their data relative to their DLLs with no env variables.
 set -eu
@@ -11,16 +11,20 @@ OBJDUMP="$LLVM/bin/llvm-objdump"
 VER=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -n1)
 OUT="$ROOT/target/windows-package/Typeon"
 
-"$HERE/build.sh" --release
-
 rm -rf "$OUT"
 mkdir -p "$OUT/bin" "$OUT/lib/gstreamer-1.0" "$OUT/share/glib-2.0/schemas" "$OUT/share/icons"
-cp "$ROOT/target/x86_64-pc-windows-gnullvm/release/typeon.exe" "$OUT/bin/"
 # Debug build with a console window, for RUST_LOG=info diagnostics on Windows.
 "$HERE/build.sh"
 cp "$ROOT/target/x86_64-pc-windows-gnullvm/debug/typeon.exe" "$OUT/bin/typeon-debug.exe"
 # Debug assertions + console stay; the 700 MB of DWARF does not.
 "$LLVM/bin/llvm-strip" --strip-debug "$OUT/bin/typeon-debug.exe"
+# TYPEON_WIN_DEBUG=1 (pre-releases): typeon.exe is that debug build too.
+if [ "${TYPEON_WIN_DEBUG:-}" = 1 ]; then
+    cp "$OUT/bin/typeon-debug.exe" "$OUT/bin/typeon.exe"
+else
+    "$HERE/build.sh" --release
+    cp "$ROOT/target/x86_64-pc-windows-gnullvm/release/typeon.exe" "$OUT/bin/"
+fi
 cp "$SYS/bin/ffmpeg.exe" "$OUT/bin/"   # video metadata strip (util.rs)
 
 # GStreamer plugins the app uses: calls (call_media.rs), voice messages
