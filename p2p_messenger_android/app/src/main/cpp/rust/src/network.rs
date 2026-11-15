@@ -105,23 +105,23 @@ impl P2PCore {
         if let Some(swarm) = &self.swarm {
             // Node mode and Tor take effect on the next process start.
             if node_mode != self.node_mode_enabled || tor_enabled != self.tor_enabled {
-                warn!("start_network: ağ zaten çalışıyor, yeni ayarlar (node={}, tor={}) yeniden başlatmada geçerli olur", node_mode, tor_enabled);
+                warn!("start_network: network already running, new settings (node={}, tor={}) take effect on restart", node_mode, tor_enabled);
             }
             return Ok(swarm.local_peer_id().to_string());
         }
         // The node is onion-only (`tor::DialReject` on TCP). Without Tor the swarm could
         // dial nothing, and the app would sit offline without an error.
         if !tor_enabled {
-            return Err("Tor kapalı: ağ yalnızca Tor üzerinden çalışır".to_string());
+            return Err("Tor is off: network runs over Tor only".to_string());
         }
         // The swarm needs the storage keys. The gate opens only after they load. Handshakes
         // built before that could create sessions that cannot be stored, and the two sides
         // would fall out of step. The caller loads the keys and retries.
         if !self.storage_keys_ready() {
-            return Err("Depolama anahtarları yüklenmedi".to_string());
+            return Err("Storage keys not loaded".to_string());
         }
         // Persistent keypair (PeerId). See `load_or_generate_libp2p_keypair`.
-        let app_files_dir = self.app_files_dir.clone().ok_or("initDatabase önce çağrılmalı")?;
+        let app_files_dir = self.app_files_dir.clone().ok_or("initDatabase must be called first")?;
         let keypair = load_or_generate_libp2p_keypair(&app_files_dir);
 
         // With Tor on, start the arti onion service (bootstraps in the background). It
@@ -134,7 +134,7 @@ impl P2PCore {
                 Ok(h) => Some(h),
                 // Do not continue without Tor. The node is onion-only, so the swarm could dial
                 // nothing and would put a loopback address in the QR code. The caller retries.
-                Err(e) => return Err(format!("Tor başlatılamadı: {}", e)),
+                Err(e) => return Err(format!("Tor network failed to start: {}", e)),
             }
         } else {
             None
@@ -321,7 +321,7 @@ impl P2PCore {
         // See `DEFAULT_BOOTSTRAP_RELAYS`. An empty list is a no-op.
         for addr in DEFAULT_BOOTSTRAP_RELAYS {
             if let Err(e) = self.add_known_relay_address(addr) {
-                error!("Varsayılan bootstrap röle eklenemedi ({}): {}", addr, e);
+                error!("Could not add default bootstrap relay ({}): {}", addr, e);
             }
         }
 
@@ -372,7 +372,7 @@ impl P2PCore {
 
     pub(crate) fn set_metered(&mut self, metered: bool) {
         if self.metered != metered {
-            info!("Ölçülü ağ: {}", metered);
+            info!("Metered network: {}", metered);
         }
         self.metered = metered;
     }
@@ -384,7 +384,7 @@ impl P2PCore {
             return;
         }
         self.power_save = enabled;
-        info!("Güç tasarrufu modu: {}", if enabled { "açık" } else { "kapalı" });
+        info!("Power saving mode: {}", if enabled { "on" } else { "off" });
         // On leaving the mode, pull pending probes forward, so liveness is checked as soon
         // as the user opens the screen, not after 60 s.
         if !enabled {
@@ -538,7 +538,7 @@ impl P2PCore {
         let connected_peers = self.swarm.as_ref().map(|s| s.connected_peers().count()).unwrap_or(0);
         let busy = self.has_pending_work();
         if busy {
-            log::debug!("Çekirdek meşgul: {}", self.busy_reasons());
+            log::debug!("Core busy: {}", self.busy_reasons());
         }
         // Coming out of power save: true until every link's pulled-forward keepalive probe
         // is answered (the UI shows a spinner). 10 s cap, so a dead link cannot keep it
@@ -595,7 +595,7 @@ impl P2PCore {
             }
         }
         if !self.known_relay_peers.contains_key(&peer_id) {
-            info!("Röle adayı kaydedildi: {} {}", crate::log_id(&peer_id), addr);
+            info!("Relay candidate recorded: {} {}", crate::log_id(&peer_id), addr);
         }
         self.known_relay_peers.insert(peer_id, (addr, current_time_ms()));
     }
@@ -645,10 +645,10 @@ impl P2PCore {
             }
             match swarm.listen_on(addr.clone().with(MultiaddrProtocol::P2pCircuit)) {
                 Ok(lid) => {
-                    info!("Röle rezervasyonu isteniyor: röle={}", crate::log_id(&pid));
+                    info!("Relay reservation requested: relay={}", crate::log_id(&pid));
                     self.relay_listeners.insert(*pid, (lid, now));
                 }
-                Err(e) => warn!("Röle rezervasyonu istenemedi (röle={}): {}", crate::log_id(&pid), e),
+                Err(e) => warn!("Could not request relay reservation (relay={}): {}", crate::log_id(&pid), e),
             }
         }
     }
@@ -721,9 +721,9 @@ impl P2PCore {
                 match swarm.dial(opts) {
                     Ok(()) => {
                         self.bulk_dials.insert(cid, *peer);
-                        info!("Toplu aktarım için fazladan bağlantı açılıyor: peer={} (mevcut {})", crate::log_id(&peer), have)
+                        info!("Opening extra connection for batch transfer: peer={} (current {})", crate::log_id(&peer), have)
                     }
-                    Err(e) => warn!("Fazladan bağlantı açılamadı: {}", e),
+                    Err(e) => warn!("Could not open extra connection: {}", e),
                 }
             }
         }
@@ -741,7 +741,7 @@ impl P2PCore {
                     swarm.close_connection(*cid);
                 }
             }
-            info!("Toplu aktarım bitti, {} fazladan bağlantı kapatılıyor: peer={}", conns.len(), crate::log_id(&peer));
+            info!("Batch transfer done, closing {} extra connections: peer={}", conns.len(), crate::log_id(&peer));
             self.extra_conns.remove(&peer);
             self.bulk_dials.retain(|_, p| *p != peer);
             // Health is per transfer. The next transfer starts from a clean state.
@@ -779,14 +779,14 @@ impl P2PCore {
         if drops >= BULK_MAX_DROPS_BEFORE_GIVEUP {
             h.giveup_until = now + BULK_GIVEUP_COOLDOWN_MS;
             warn!(
-                "Paralel aktarım bu eşte {} kez geri çekildi, tek devreye dönülüyor: peer={}",
+                "Parallel transfer backed off {} times with this peer, reverting to single connection: peer={}",
                 drops, crate::log_id(&peer)
             );
-            self.drop_extra_connections(peer, "Paralellikten vazgeçildi", usize::MAX);
+            self.drop_extra_connections(peer, "Parallelism abandoned", usize::MAX);
             return;
         }
         // Drop ONE circuit, not all of them.
-        self.drop_extra_connections(peer, "Tekrarlayan parça zaman aşımı", 1);
+        self.drop_extra_connections(peer, "Repeated chunk timeout", 1);
     }
 
     /// Closes the extra connections of one peer (see `extra_conns`). Called when a timeout
@@ -817,7 +817,7 @@ impl P2PCore {
             }
         }
         warn!(
-            "{} — {} fazladan bağlantı kapatıldı ({} kaldı): peer={}",
+            "{} — closed {} extra connections ({} left): peer={}",
             reason, victims.len(), remaining, crate::log_id(&peer)
         );
     }
@@ -847,7 +847,7 @@ impl P2PCore {
         let Some(swarm) = &mut self.swarm else { return };
         if let Some(addr) = direct_addr {
             if let Err(e) = swarm.dial(addr) {
-                error!("Doğrudan dial başarısız: {}", e);
+                error!("Direct dial failed: {}", e);
             }
         }
         for (relay_peer_id, (relay_addr, _)) in &self.known_relay_peers {
@@ -861,7 +861,7 @@ impl P2PCore {
                 .with(MultiaddrProtocol::P2pCircuit)
                 .with(MultiaddrProtocol::P2p(target_peer_id));
             if let Err(e) = swarm.dial(circuit_addr) {
-                error!("Röle üzerinden dial başarısız (röle={}): {}", crate::log_id(&relay_peer_id), e);
+                error!("Dial via relay failed (relay={}): {}", crate::log_id(&relay_peer_id), e);
             }
         }
     }
@@ -989,7 +989,7 @@ impl P2PCore {
             // sweep (15 s, 3 s in the fast window) sent a new one.
             if !already_queued && first_sweep_of_minute {
                 if let Err(e) = self.send_identity_exchange(&fp) {
-                    error!("Bağlanma IdentityExchange'i (periyodik tarama) gönderilemedi, yeniden denenecek: {}", e);
+                    error!("IdentityExchange could not be sent on connect (periodic scan), will retry: {}", e);
                 }
             }
         }
@@ -1056,13 +1056,13 @@ impl P2PCore {
         // group update). Returns `Permanent` so the retry queue never takes the envelope.
         if self.is_blocked_device(target_device_fingerprint) {
             return Err(PublishFailure::Permanent(
-                "Alıcı engellenmiş — gönderilmedi".to_string(),
+                "Recipient is blocked; not sent".to_string(),
             ));
         }
         if self.known_remote_devices.get(target_device_fingerprint)
             .map_or(false, |d| self.deleted_identities.contains(&d.identity_id))
         {
-            return Err(PublishFailure::Permanent("Alıcı hesabını sildi — gönderilmedi".to_string()));
+            return Err(PublishFailure::Permanent("Recipient deleted their account; not sent".to_string()));
         }
         let bytes = ciborium_bytes(envelope).map_err(PublishFailure::Permanent)?;
         // Every path caps at 1 MiB (gossipsub `max_transmit_size`, the cbor
@@ -1072,7 +1072,7 @@ impl P2PCore {
         // Headroom: gossipsub measures the whole protobuf frame (topic, seqno,
         // ...) against the cap, so an envelope of exactly 1 MiB never went out.
         if bytes.len() + 4096 > MAX_ENVELOPE_BYTES {
-            return Err(PublishFailure::Permanent(format!("Zarf çok büyük ({} bayt)", bytes.len())));
+            return Err(PublishFailure::Permanent(format!("Envelope too large ({} bytes)", bytes.len())));
         }
         let mailbox_topic = || format!("p2p_msg_{}", target_device_fingerprint);
         // A ratchet session normally routes by the rotating topic derived from `root_key` (see `topic_for_root_key`). Two exceptions
@@ -1130,7 +1130,7 @@ impl P2PCore {
         if deposited {
             Ok(())
         } else {
-            Err(PublishFailure::Transient("Hedefe bağlantı yok ve sunucu kopyası bırakılamadı".to_string()))
+            Err(PublishFailure::Transient("Not found: no connection to target and server copy could not be left".to_string()))
         }
     }
 
@@ -1221,7 +1221,7 @@ impl P2PCore {
             // See `PublishFailure`. A permanent error (for example `MessageTooLarge`) must not enter the acknowledgement queue.
             // Mark it Failed now and notify the UI, since a retry can never succeed.
             Err(PublishFailure::Permanent(e)) => {
-                error!("Gönderim KALICI olarak başarısız (yeniden denenmeyecek): {}", e);
+                error!("Send PERMANENTLY failed (will not retry): {}", e);
                 // A refresh of an entry that is already tracked: drop the old
                 // entry too, or it stays due and is re-encrypted every turn.
                 self.awaiting_confirmation.remove(message_id);
@@ -1236,7 +1236,7 @@ impl P2PCore {
                 return;
             }
             Err(PublishFailure::Transient(e)) => {
-                error!("İlk gönderim denemesi başarısız (onay alınana kadar yeniden denenecek): {}", e);
+                error!("First send attempt failed (will retry until confirmed): {}", e);
                 if let NetworkEnvelope::Message(m) = &envelope {
                     self.set_message_status(&m.header.message_id, MessageSendStatus::Pending);
                 }
@@ -1408,7 +1408,7 @@ impl P2PCore {
                 if matches!(regen_content, Some(
                     MessageContent::SiblingEcho { .. } | MessageContent::ReadStateSync { .. }
                     | MessageContent::DeviceSync(_) | MessageContent::WbDigest { .. })) {
-                    info!("Paket {} (senkron -> {}) tazelenmeden bırakıldı", message_id, &peer_fp[..peer_fp.len().min(8)]);
+                    info!("Packet {} (sync -> {}) left without refresh", message_id, &peer_fp[..peer_fp.len().min(8)]);
                     self.awaiting_confirmation.remove(&message_id);
                     self.remove_durable_retry(&message_id);
                     continue;
@@ -1421,7 +1421,7 @@ impl P2PCore {
                         // `message_id` and `original_sent_at` (see `send_message_content_inner`). The UI bubble and the `awaiting_confirmation` entry
                         // stay continuous. The pending-messages screen lists only Text, so this log line is the only place the other kinds show up.
                         let kind = content.kind();
-                        warn!("Paket {} ({} -> {}) onaylanmadan azami yaşı aştı, TAZELENİP AYNI kimlikle yeniden deneniyor",
+                        warn!("Packet {} ({} -> {}) exceeded max age without confirmation, REFRESHING and retrying with the SAME id",
                             message_id, kind, &peer_fp[..peer_fp.len().min(8)]);
                         if let Err(e) = self.send_message_content_inner(
                             peer_fp.clone(), &content, None,
@@ -1431,7 +1431,7 @@ impl P2PCore {
                             // `next_retry_at <= now`, and every `poll_events` turn (once a second) tried to regenerate it again.
                             // That went on for two days, with a ratchet step on every turn. Now the backoff is pushed forward: retries
                             // continue at a reasonable pace, and the `TEXT_RETRY_GIVE_UP_MS` ceiling still applies.
-                            error!("Tazeleme gönderim denemesi başarısız, geri çekilme aralığıyla yeniden denenecek: {}", e);
+                            error!("Refresh send attempt failed, will retry with backoff: {}", e);
                             if let Some(pending) = self.awaiting_confirmation.get_mut(&message_id) {
                                 pending.retry_interval_ms =
                                     (pending.retry_interval_ms * 2).min(ACK_RETRY_MAX_MS);
@@ -1480,9 +1480,9 @@ impl P2PCore {
                     self.attachment_events.push(status_event.to_string());
                 }
                 if give_up_for_real {
-                    error!("Paket {} {} ms (TEXT_RETRY_GIVE_UP_MS) boyunca onaylanmadı, KESİN olarak vazgeçiliyor", message_id, TEXT_RETRY_GIVE_UP_MS);
+                    error!("Packet {} not confirmed for {} ms (TEXT_RETRY_GIVE_UP_MS), giving up for good", message_id, TEXT_RETRY_GIVE_UP_MS);
                 } else {
-                    error!("Paket {} onaylanmadan azami yaşı ({} ms) aştı, vazgeçiliyor (muhtemelen ratchet rotasyonu geçti)", message_id, MAX_UNCONFIRMED_AGE_MS);
+                    error!("Packet {} exceeded max age ({} ms) without confirmation, giving up (probably ratchet rotation passed)", message_id, MAX_UNCONFIRMED_AGE_MS);
                 }
                 continue;
             }
@@ -1522,7 +1522,7 @@ impl P2PCore {
                 }
                 // See `PublishFailure`. A permanent error means this envelope can never be published again. Do not let it keep the queue busy.
                 Err(PublishFailure::Permanent(e)) => {
-                    error!("Bekleyen paket {} KALICI yayın hatasıyla bırakılıyor: {}", message_id, e);
+                    error!("Pending packet {} dropped with PERMANENT publish error: {}", message_id, e);
                     self.awaiting_confirmation.remove(&message_id);
                     self.remove_durable_retry(&message_id);
                     if let NetworkEnvelope::Message(m) = &envelope {
@@ -1573,14 +1573,14 @@ impl P2PCore {
             return;
         }
         info!(
-            "Rotasyon sonrası bekleyenler yenileniyor (peer={}): {} paket taze zincirle yeniden şifreleniyor, {} kurtarılamaz paket bırakılıyor",
+            "Pending packets renewed after rotation (peer={}): {} packets re-encrypted with fresh chain, {} unrecoverable packets dropped",
             crate::log_id(&peer_fp), regen.len(), drop_ids.len()
         );
         for id in drop_ids {
             // reported like the age arm of `retry_unconfirmed_messages`
             // (FileOffer/ProfileUpdate/HistorySync… cannot be re-encrypted).
             if let Some(NetworkEnvelope::Message(m)) = self.awaiting_confirmation.remove(&id).map(|p| p.envelope) {
-                warn!("Rotasyon: yeniden üretilemeyen paket {} bırakıldı (Failed)", crate::log_id(&id));
+                warn!("Rotation: packet {} could not be regenerated, dropped (Failed)", crate::log_id(&id));
                 self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
                 self.attachment_events.push(serde_json::json!({
                     "type": "status", "peer": self.canonical_peer_key(&peer_fp), "message_id": m.header.message_id, "status": "error"
@@ -1593,7 +1593,7 @@ impl P2PCore {
                 peer_fp.to_string(), &content, None,
                 Some(id.clone()), Some(original_sent_at), Some(retry_interval_ms),
             ) {
-                error!("Rotasyon sonrası yeniden şifreleme başarısız (normal yaş-aşımı yolu devralır): {}", e);
+                error!("Re-encryption after rotation failed (normal age-expiry path takes over): {}", e);
                 // See `retry_unconfirmed_messages`: or the stale stamp retries it every turn.
                 if let Some(pending) = self.awaiting_confirmation.get_mut(&id) {
                     pending.chain_stamp.clear();
@@ -1619,7 +1619,7 @@ impl P2PCore {
     /// this message. No send happens here (same battery reason). It only pulls `next_retry_at` to now, and the next `poll_events` turn
     /// (once a second, already running) makes the real attempt.
     pub(crate) fn retry_pending_message_now(&mut self, message_id: &str) -> Result<(), String> {
-        let pending = self.awaiting_confirmation.get_mut(message_id).ok_or("Bekleyen mesaj bulunamadı")?;
+        let pending = self.awaiting_confirmation.get_mut(message_id).ok_or("Pending message not found")?;
         pending.next_retry_at = current_time_ms();
         Ok(())
     }
@@ -1650,7 +1650,7 @@ impl P2PCore {
     /// Cancel button for one row of the pending-messages list in Settings. Drops the message permanently, so it is never retried: it is marked
     /// Failed, and the user can resend it from the chat screen through the existing `retryMessage` flow.
     pub(crate) fn cancel_pending_message(&mut self, message_id: &str) -> Result<(), String> {
-        let pending = self.awaiting_confirmation.remove(message_id).ok_or("Bekleyen mesaj bulunamadı")?;
+        let pending = self.awaiting_confirmation.remove(message_id).ok_or("Pending message not found")?;
         self.remove_durable_retry(message_id);
         // See `cancel_server_deposit`. Cancelling must also withdraw the server copy. Otherwise "I changed my mind" had no effect, and the
         // packet could still be delivered 30 days later.

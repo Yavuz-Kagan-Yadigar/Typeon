@@ -129,12 +129,12 @@ impl TorHandle {
                 match client.bootstrap().await {
                     Ok(()) => {
                         set_status(&status, TorStatus::Ready);
-                        log::info!("Tor: ağ değişikliği sonrası bootstrap teyit edildi");
+                        log::info!("Tor: bootstrap confirmed after network change");
                         break;
                     }
                     Err(e) => {
                         set_status(&status, TorStatus::Bootstrapping);
-                        log::warn!("Tor: ağ değişikliği sonrası bootstrap henüz tamam değil ({delay:?} sonra yeniden): {e}");
+                        log::warn!("Tor: bootstrap not complete after network change (retrying in {delay:?}): {e}");
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(std::time::Duration::from_secs(60));
                     }
@@ -152,7 +152,7 @@ impl TorHandle {
     /// libp2p listens on (see the fixed-port setting in network.rs).
     pub fn launch(state_dir: &str, cache_dir: &str, local_port: u16) -> Result<TorHandle, String> {
         let runtime = TokioRustlsRuntime::current()
-            .map_err(|e| format!("TokioRustlsRuntime alınamadı: {e}"))?;
+            .map_err(|e| format!("TokioRustlsRuntime could not be obtained: {e}"))?;
 
         trim_dir_cache(cache_dir);
 
@@ -182,7 +182,7 @@ impl TorHandle {
                 .map_err(|e| (format!("Onion config: {e}"), false))?;
             let (service, rend_requests) = client
                 .launch_onion_service(svc_config)
-                .map_err(|e| (format!("Onion service başlatılamadı: {e}"), state_suspect(&e)))?;
+                .map_err(|e| (format!("Onion service could not be started: {e}"), state_suspect(&e)))?;
             Ok((client, service, rend_requests))
         };
         // Every error kind other than "corrupted data in persistent state" is handled as well. Otherwise another kind of corruption would skip
@@ -244,13 +244,13 @@ impl TorHandle {
                                 *onion_bg.lock().unwrap_or_else(|p| p.into_inner()) = Some(hsid.to_string());
                             }
                             set_status(&status_bg, TorStatus::Ready);
-                            log::info!("Tor: bootstrap tamam, onion service yayında");
+                            log::info!("Tor: bootstrap done, onion service published");
                             break;
                         }
                         Err(e) => {
                             // Still retrying: same status as the notify loop.
                             set_status(&status_bg, TorStatus::Bootstrapping);
-                            log::error!("Tor bootstrap başarısız ({delay:?} sonra yeniden denenecek): {e}");
+                            log::error!("Tor bootstrap failed (retrying in {delay:?}): {e}");
                             drop((client_bg, service_bg));
                             tokio::time::sleep(delay).await;
                             delay = (delay * 2).min(std::time::Duration::from_secs(60));
@@ -271,7 +271,7 @@ impl TorHandle {
                 let mut stream_requests = Box::pin(handle_rend_requests(rend_requests));
                 while let Some(stream_request) = stream_requests.next().await {
                     let Ok(slot) = slots.clone().try_acquire_owned() else {
-                        log::warn!("Tor: gelen akış sınırı dolu, istek düşürüldü");
+                        log::warn!("Tor: incoming stream limit reached, request dropped");
                         continue;
                     };
                     tokio::spawn(async move {
@@ -281,7 +281,7 @@ impl TorHandle {
                 }
                 // The inbound path is gone, so stop reporting Ready.
                 *status_br.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Failed;
-                log::info!("Tor: gelen akış köprüsü sonlandı");
+                log::info!("Tor: incoming stream bridge ended");
             });
         }
 
@@ -333,7 +333,7 @@ fn trim_dir_cache(cache_dir: &str) {
     let files = match files {
         Ok(f) => f,
         Err(e) => {
-            log::warn!("Tor dizin önbelleği budanamadı: {e}");
+            log::warn!("Tor directory cache could not be pruned: {e}");
             return;
         }
     };
@@ -341,7 +341,7 @@ fn trim_dir_cache(cache_dir: &str) {
         let _ = std::fs::remove_file(dir.join("dir_blobs").join(f));
     }
     if !files.is_empty() {
-        log::info!("Tor dizin önbelleği budandı: {} eski konsensüs silindi", files.len());
+        log::info!("Tor directory cache pruned: {} old consensus files deleted", files.len());
     }
 }
 
@@ -376,7 +376,7 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
     let mut tor_stream = match stream_request.accept(Connected::new_empty()).await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("Tor: gelen akış kabul edilemedi: {e}");
+            log::error!("Tor: incoming stream could not be accepted: {e}");
             return;
         }
     };
@@ -390,7 +390,7 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
     let mut tcp = match tokio::net::TcpStream::connect(("127.0.0.1", local_port)).await {
         Ok(t) => t,
         Err(e) => {
-            log::error!("Tor: yerel libp2p portuna ({local_port}) bağlanılamadı: {e}");
+            log::error!("Tor: could not connect to local libp2p port ({local_port}): {e}");
             return;
         }
     };
@@ -400,7 +400,7 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
 
     // Copy both ways until the connection closes. DataStream implements tokio AsyncRead/Write (the tor-proto tokio feature).
     if let Err(e) = tokio::io::copy_bidirectional(&mut tor_stream, &mut tcp).await {
-        log::debug!("Tor köprü akışı sonlandı: {e}");
+        log::debug!("Tor bridge stream ended: {e}");
     }
 }
 

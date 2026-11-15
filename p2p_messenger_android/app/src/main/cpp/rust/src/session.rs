@@ -107,7 +107,7 @@ impl P2PCore {
             .min(if self.radio_saver() { RECONNECT_BACKOFF_SAVER_MAX_MS } else { RECONNECT_BACKOFF_MAX_MS });
         self.reconnect_backoff.insert(fp.to_string(), (now + delay, attempts));
         info!(
-            "try_reconnect_device: kopmuş peer'a yeniden bağlanılıyor (deneme #{}, force={}, onion adayı={}): {}",
+            "try_reconnect_device: reconnecting to dropped peer (attempt #{}, force={}, onion candidate={}): {}",
             attempts, force, onion_addr.is_some(), crate::log_id(&peer_id)
         );
         // `dial_with_relay_fallback` already tries the `primary_addr` AND all known relay candidates. If there is an `.onion` candidate, it is ALSO tried
@@ -121,7 +121,7 @@ impl P2PCore {
                     .condition(libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing)
                     .build();
                 if let Err(e) = swarm.dial(opts) {
-                    error!("Onion adresine yeniden bağlanma denemesi başarısız: {}", e);
+                    error!("Reconnect to onion address failed: {}", e);
                 }
             }
         }
@@ -288,11 +288,11 @@ impl P2PCore {
                 _ => false,
             };
             if written {
-                info!("Yeni prekey üretildi (id={})", id);
+                info!("New prekey generated (id={})", id);
                 self.own_prekeys.push(OwnPrekey { signed, sk_x25519, sk_mlkem });
             } else {
                 // Not handed out: see the function note.
-                warn!("Prekey saklanamadı, bu turda kullanılmıyor");
+                warn!("Prekey could not be stored, not used this round");
             }
         }
         self.own_prekeys.last().map(|k| k.signed.clone())
@@ -342,19 +342,19 @@ impl P2PCore {
             Some(p) => { self.ratchets.insert(fp.to_string(), p); }
             None => { self.ratchets.remove(fp); }
         }
-        Err("Oturum durumu yazılamadı, el sıkışma yapılmadı".to_string())
+        Err("Session state could not be written, no handshake done".to_string())
     }
 
     pub(crate) fn initiate_handshake_with(&mut self, peer_device_fingerprint: &str) -> Result<(), String> {
         // At app start, a message sent before `setSkippedKeyEncryptionKey` has loaded the sessions found no session in memory. A new init was then created and persisted
         // over the real session the peer still used, so the two devices diverged on every restart until a re-handshake. Sending waits until the sessions are loaded.
         if !self.ratchets_loaded {
-            return Err("Oturum durumu henüz yüklenmedi".to_string());
+            return Err("Session state not loaded yet".to_string());
         }
         // No session is set up at all with a blocked person. Otherwise opening a chat from the UI or calling `ensure_handshake` would create a fresh ratchet
         // and send a handshake to the other side (see the `try_publish_raw` note for the same reasoning).
         if self.is_blocked_device(peer_device_fingerprint) {
-            return Err("Bu kişi engellenmiş".to_string());
+            return Err("This contact is blocked".to_string());
         }
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
@@ -489,11 +489,11 @@ impl P2PCore {
         if self.last_handshake_redo.get(fp).map_or(false, |(t, _)| now.saturating_sub(*t) < UNDECRYPTABLE_REDO_MIN_INTERVAL_MS) {
             return;
         }
-        warn!("Karşı taraftan {} paket çözülemedi, oturumlar ayrışmış — el sıkışma yenileniyor: {}", UNDECRYPTABLE_BEFORE_REHANDSHAKE, &fp[..fp.len().min(8)]);
+        warn!("{} packets from peer could not be decrypted, sessions diverged — refreshing handshake: {}", UNDECRYPTABLE_BEFORE_REHANDSHAKE, &fp[..fp.len().min(8)]);
         let stale = self.ratchets.get(fp).map(|s| s.root_handle_now());
         self.last_handshake_redo.insert(fp.to_string(), (now, stale));
         if let Err(e) = self.initiate_handshake_with(fp) {
-            warn!("El sıkışma yenilenemedi: {}", e);
+            warn!("Handshake could not be refreshed: {}", e);
             return;
         }
         // Pending packets were encrypted for the dead session: re-encrypt them now.
@@ -541,7 +541,7 @@ impl P2PCore {
             return;
         }
         warn!(
-            "El sıkışma tazeleniyor (peer={}) — bu oturumda karşı taraftan hiç paket alınmadı ve bekleyen mesaj {} ms'i aştı; HandshakeInit'imiz hiç ulaşmamış olabilir",
+            "Refreshing handshake (peer={}) — no packets received from peer this session and pending message exceeded {} ms; our HandshakeInit may never have arrived",
             crate::log_id(&peer_device_fingerprint), MAX_UNCONFIRMED_AGE_MS
         );
         let before = self.ratchets.get(peer_device_fingerprint).map(|s| s.root_handle_now());
@@ -557,7 +557,7 @@ impl P2PCore {
             self.regen_pending_for_peer(peer_device_fingerprint);
         }
         if let Err(e) = result {
-            warn!("Tazelenen el sıkışma hemen yayınlanamadı (kuyruğa alındı, yeniden denenecek): {}", e);
+            warn!("Refreshed handshake could not be published now (queued, will retry): {}", e);
         }
     }
 
@@ -574,7 +574,7 @@ impl P2PCore {
         // See `initiate_handshake_with`: a session made before the load is
         // overwritten by the stored one, and the two sides diverge.
         if !self.ratchets_loaded {
-            return Err("Oturum durumu henüz yüklenmedi".to_string());
+            return Err("Session state not loaded yet".to_string());
         }
         let sender =self.known_remote_devices.get(&handshake.sender_device_fingerprint).cloned()
             .ok_or("Unknown sender device; cannot verify signatures")?;
@@ -588,7 +588,7 @@ impl P2PCore {
         // See the same identity-binding fix in receive_message: the signature only proves the device signed it, not that the identity_id in the header belongs to
         // that device. Enforce the match with the stored (TOFU) binding.
         if handshake.sender_identity_id != sender.identity_id {
-            return Err("HandshakeInit sender_identity_id, kayıtlı cihaz kimliğiyle eşleşmiyor".to_string());
+            return Err("HandshakeInit sender_identity_id does not match the registered device identity".to_string());
         }
 
         // The signature covers the RECIPIENT (our fingerprint): a handshake that A sent to B cannot be replayed to C to break C's session with A.
@@ -617,7 +617,7 @@ impl P2PCore {
         let window = if stale { HANDSHAKE_MAX_AGE_MS } else { HANDSHAKE_MAX_SKEW_MS };
         if skew > window {
             return Err(format!(
-                "HandshakeInit timestamp'i pencere dışında (sapma {} ms) — muhtemel tekrar oynatma, reddedildi",
+                "HandshakeInit timestamp outside window (skew {} ms) — likely replay, rejected",
                 skew
             ));
         }
@@ -628,12 +628,12 @@ impl P2PCore {
             // A stored init older than one already accepted would put the session back on keys the sender has replaced. Any older one counts, not only one
             // past the skew window (both on the sender's clock).
             if seen.iter().any(|(ts, _)| *ts > handshake.timestamp) {
-                info!("HandshakeInit yok sayıldı (peer={}) — daha yenisi zaten kabul edildi", crate::log_id(&handshake.sender_device_fingerprint));
+                info!("HandshakeInit ignored (peer={}) — a newer one was already accepted", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
             }
             if seen.iter().any(|(_, sig)| sig == &handshake.signature_classical) {
                 info!(
-                    "HandshakeInit yok sayıldı (peer={}) — aynı imza pencerede zaten görüldü (tekrar oynatma/çift paket)",
+                    "HandshakeInit ignored (peer={}) — same signature already seen in window (replay/duplicate packet)",
                     crate::log_id(&handshake.sender_device_fingerprint)
                 );
                 return Ok(());
@@ -678,10 +678,10 @@ impl P2PCore {
                 if redo && self.last_handshake_redo.get(&sender_fp).map_or(true, |(t, _)| now.saturating_sub(*t) >= UNDECRYPTABLE_REDO_MIN_INTERVAL_MS) {
                     self.last_handshake_redo.insert(sender_fp.clone(), (now, None));
                     if let Err(e) = self.initiate_handshake_with(&sender_fp) {
-                        warn!("Prekey'siz ilk temas sonrası el sıkışma başlatılamadı: {}", e);
+                        warn!("Handshake could not be started after first contact without prekey: {}", e);
                     }
                 }
-                return Err("HandshakeInit ilk temasta prekey kullanmıyor (id 0), reddedildi".to_string());
+                return Err("HandshakeInit does not use a prekey on first contact (id 0), rejected".to_string());
             }
         }
 
@@ -719,7 +719,7 @@ impl P2PCore {
             // collision window the rule below decides instead. Two clocks: the sender's against ours. Within the skew this check already accepts above, it is
             // no proof of "older". Replays are caught by the signature list.
             if !same_round && handshake.timestamp.saturating_add(HANDSHAKE_MAX_SKEW_MS) < existing.last_rotation {
-                info!("HandshakeInit yok sayıldı (peer={}) — oturumdan eski", crate::log_id(&handshake.sender_device_fingerprint));
+                info!("HandshakeInit ignored (peer={}) — older than session", crate::log_id(&handshake.sender_device_fingerprint));
                 return Ok(());
             }
             // `we_initiated` for both: a session we only responded to is the
@@ -729,7 +729,7 @@ impl P2PCore {
             let ours_refused = handshake.sender_prekey.is_some() && self.id0_inits.contains(&handshake.sender_device_fingerprint);
             if !awaiting_link && !ours_refused && we_initiated && (existing_unused || same_round) && own_fp < handshake.sender_device_fingerprint {
                 info!(
-                    "Eşzamanlı el sıkışma çakışması (peer={}) — kendi initiator state'imiz korunuyor (küçük fingerprint kuralı)",
+                    "Simultaneous handshake collision (peer={}) — keeping our initiator state (smaller fingerprint rule)",
                     crate::log_id(&handshake.sender_device_fingerprint)
                 );
                 return Ok(());
@@ -751,7 +751,7 @@ impl P2PCore {
                     // set up from this packet: start it from our side, which
                     // also hands the peer our current prekey.
                     let fp = handshake.sender_device_fingerprint.clone();
-                    warn!("HandshakeInit bilinmeyen prekey kullanıyor (peer={}, id={}) — el sıkışma bizden yenileniyor", &fp[..fp.len().min(8)], handshake.recipient_prekey_id);
+                    warn!("HandshakeInit uses unknown prekey (peer={}, id={}) — handshake refreshed from our side", &fp[..fp.len().min(8)], handshake.recipient_prekey_id);
                     if self.last_handshake_redo.get(&fp).map_or(true, |(t, _)| now.saturating_sub(*t) >= UNDECRYPTABLE_REDO_MIN_INTERVAL_MS) {
                         let stale = self.ratchets.get(&fp).map(|s| s.root_handle_now());
                         self.last_handshake_redo.insert(fp.clone(), (now, stale));
@@ -759,7 +759,7 @@ impl P2PCore {
                             self.regen_pending_for_peer(&fp);
                         }
                     }
-                    return Err("HandshakeInit bilinmeyen bir prekey'e şifrelenmiş".to_string());
+                    return Err("HandshakeInit encrypted to an unknown prekey".to_string());
                 }
             }
         };
@@ -809,7 +809,7 @@ impl P2PCore {
             // in between, the disk held the old state without its skipped keys.
             if !self.persist_ratchet_state(peer_device_fingerprint) {
                 self.ratchets.insert(peer_device_fingerprint.to_string(), snapshot);
-                return Err("Oturum durumu yazılamadı, rotasyon duyurulmadı".to_string());
+                return Err("Session state could not be written, rotation not announced".to_string());
             }
             // We triggered the rotation. The skipped keys of the old chain were moved into the state (`old_recv`), and their copies in the table would now
             // clash with the new chain's numbers.

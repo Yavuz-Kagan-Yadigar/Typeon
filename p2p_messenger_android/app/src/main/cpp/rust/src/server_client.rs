@@ -480,7 +480,7 @@ impl P2PCore {
             .query_map([], |r| {
             let server_id: String = r.get(0)?;
             let Some(enroll_sk) = open(r.get(3)?) else {
-                warn!("Sunucu kaydı açılamadı, atlandı: {}", crate::log_id(&server_id));
+                warn!("Could not open server record, skipped: {}", crate::log_id(&server_id));
                 return Ok(None);
             };
             Ok(Some(ServerRecord {
@@ -516,7 +516,7 @@ impl P2PCore {
             }
         }
         for r in cleaned {
-            warn!("Sunucu adresinden yerel ağ adresi çıkarıldı: {}", crate::log_id(&r.server_id));
+            warn!("Local network address removed from server address: {}", crate::log_id(&r.server_id));
             self.persist_server(&r);
             if let Some(slot) = self.servers.iter_mut().find(|s| s.server_id == r.server_id) {
                 *slot = r;
@@ -571,7 +571,7 @@ impl P2PCore {
                             e.plaintext = plain;
                             return Some(e);
                         }
-                        warn!("Arşiv kuyruğu satırı açılamadı, atlandı: {}", crate::log_id(&e.record_id));
+                        warn!("Could not open archive queue row, skipped: {}", crate::log_id(&e.record_id));
                         let _ = conn.execute("DELETE FROM server_archive_queue WHERE record_id = ?1", params![e.record_id]);
                         None
                     })
@@ -615,7 +615,7 @@ impl P2PCore {
             }
         }
         if !self.servers.is_empty() {
-            info!("{} sunucu yüklendi", self.servers.len());
+            info!("{} servers loaded", self.servers.len());
         }
     }
 
@@ -627,7 +627,7 @@ impl P2PCore {
     /// most expensive kind to diagnose.
     fn persist_server(&self, rec: &ServerRecord) {
         let Some(conn) = &self.db else {
-            error!("Sunucu kaydı diske yazılamadı: veritabanı yok ({})", crate::log_id(&rec.server_id));
+            error!("Could not write server record to disk: database not found ({})", crate::log_id(&rec.server_id));
             return;
         };
         // A copy of the database must not be enough to `Rebind` the enrollment or to spend the token. It is
@@ -637,7 +637,7 @@ impl P2PCore {
             self.seal_local_blob(&rec.enroll_sk_pq),
             self.seal_local_blob(rec.token.as_bytes()),
         ) else {
-            error!("Sunucu kaydı diske yazılamadı: yerel anahtar yok ({})", crate::log_id(&rec.server_id));
+            error!("Could not write server record to disk: no local key ({})", crate::log_id(&rec.server_id));
             return;
         };
         let written = conn.execute(
@@ -650,8 +650,8 @@ impl P2PCore {
             ],
         );
         match written {
-            Ok(_) => info!("Sunucu kaydı diske yazıldı: {}", crate::log_id(&rec.server_id)),
-            Err(e) => error!("Sunucu kaydı diske YAZILAMADI ({}): {}", crate::log_id(&rec.server_id), e),
+            Ok(_) => info!("Server record written to disk: {}", crate::log_id(&rec.server_id)),
+            Err(e) => error!("Server record NOT written to disk ({}): {}", crate::log_id(&rec.server_id), e),
         }
     }
 
@@ -665,7 +665,7 @@ impl P2PCore {
             params![server_id, mailbox_id, seq.min(i64::MAX as u64) as i64],
         );
         if let Err(e) = r {
-            warn!("Sunucu imleci yazılamadı ({}/{}): {}", crate::log_id(&server_id), mailbox_log_id(mailbox_id), e);
+            warn!("Could not write server cursor ({}/{}): {}", crate::log_id(&server_id), mailbox_log_id(mailbox_id), e);
         }
     }
 
@@ -682,7 +682,7 @@ impl P2PCore {
         // not do this (see `server_proto::public_server_addrs`).
         let addrs = server_proto::public_server_addrs(&invite.addrs);
         if addrs.is_empty() {
-            return Err("Davet kodunda ulaşılabilir bir adres yok (yalnızca yerel ağ adresi)".to_string());
+            return Err("Invalid invite code: no reachable address (local network address only)".to_string());
         }
         let invite = server_proto::ServerInvite { addrs, token: invite.token };
         let parsed: Vec<Multiaddr> = invite
@@ -691,14 +691,14 @@ impl P2PCore {
             .filter_map(|a| a.parse::<Multiaddr>().ok())
             .collect();
         if parsed.is_empty() {
-            return Err("Geçersiz sunucu adresi".to_string());
+            return Err("Invalid server address".to_string());
         }
         // All addresses must belong to the same server: the `/p2p/<peer_id>` suffix proves it. An address with
         // a different PeerId means a broken code or a merge attempt. Adding it silently would connect to the
         // wrong server.
-        let peer_id = extract_peer_id(&parsed[0]).ok_or("Adres bir /p2p/<peer_id> son eki içermeli")?;
+        let peer_id = extract_peer_id(&parsed[0]).ok_or("Invalid address: must end with /p2p/<peer_id>")?;
         if parsed.iter().any(|a| extract_peer_id(a) != Some(peer_id)) {
-            return Err("Davet kodundaki adresler farklı sunuculara işaret ediyor".to_string());
+            return Err("Invalid invite code: addresses point to different servers".to_string());
         }
         let server_id = peer_id.to_string();
 
@@ -717,7 +717,7 @@ impl P2PCore {
             // client, and the archive key does not depend on the enrollment (see `archive_root_key`). The SAME token
             // pasted again (a double tap) does nothing.
             if existing.token == invite.token && !invite.token.is_empty() {
-                return Err("Bu sunucu zaten ekli".to_string());
+                return Err("This server is already added".to_string());
             }
             let mut rec = existing;
             rec.address = invite.addrs.join(",");
@@ -781,31 +781,31 @@ impl P2PCore {
     /// use, indefinitely. The deletion cannot be PROVED (see SECURITY.md). Not asking, though, would mean choosing to keep it.
     pub(crate) fn remove_server(&mut self, server_id: &str) -> Result<(), String> {
         let Some(idx) = self.servers.iter().position(|s| s.server_id == server_id) else {
-            return Err("Sunucu bulunamadı".to_string());
+            return Err("Server not found".to_string());
         };
         // The purge is one request with no retry. Sent to an unreachable server it is lost, and the sealed archive
         // stays there for good. Turning history off first is the explicit "remove anyway".
         let reachable = self.server_rt.get(server_id).map_or(false, |r| r.connected && r.enrolled);
         if self.servers[idx].store_history && self.archive_root_key.is_some() && !reachable {
-            return Err("Sunucuya ulaşılamıyor, arşiv silinemedi. Bağlanınca tekrar deneyin ya da önce geçmiş saklamayı kapatın".to_string());
+            return Err("Server not reachable over network, archive not deleted. Try again when connected, or turn off history storage first".to_string());
         }
         // The row goes first. A failed delete would leave the server gone in memory but back at the next launch.
         let no_servers_left = self.servers.len() == 1;
         if let Some(conn) = &self.db {
             conn.execute("DELETE FROM servers WHERE server_id = ?1", params![server_id])
-                .map_err(|e| format!("Sunucu silinemedi: {e}"))?;
+                .map_err(|e| format!("Could not delete server: {e}"))?;
         }
         // Before `server_archived_convs` is cleared: it lists the conversations deleted since they were archived.
         self.purge_server_archive(server_id);
         if let Some(conn) = &self.db {
             if let Err(e) = conn.execute("DELETE FROM server_cursors WHERE server_id = ?1", params![server_id]) {
-                warn!("Sunucu imleçleri silinemedi: {}", e);
+                warn!("Could not delete server cursors: {}", e);
             }
             if no_servers_left {
                 // The revisions too. No archive is left that they could guard.
                 for t in ["server_archived_convs", "server_archive_queue", "server_blob_uploads", "server_archive_revs"] {
                     if let Err(e) = conn.execute(&format!("DELETE FROM {t}"), []) {
-                        warn!("{} silinemedi: {}", t, e);
+                        warn!("Could not delete {}: {}", t, e);
                     }
                 }
             }
@@ -918,7 +918,7 @@ impl P2PCore {
         for chunk in buckets.chunks(cap) {
             let req = ServerRequest::ArchivePurge { purge_secrets: chunk.to_vec() };
             if self.send_server_request(peer_id, req).is_none() {
-                warn!("Arşiv silme isteği gönderilemedi: {}", crate::log_id(server_id));
+                warn!("Could not send archive delete request: {}", crate::log_id(server_id));
                 return;
             }
         }
@@ -926,7 +926,7 @@ impl P2PCore {
 
     pub(crate) fn set_server_routing(&mut self, server_id: &str, enabled: bool) -> Result<(), String> {
         let Some(rec) = self.servers.iter_mut().find(|s| s.server_id == server_id) else {
-            return Err("Sunucu bulunamadı".to_string());
+            return Err("Server not found".to_string());
         };
         rec.route_messages = enabled;
         let rec = rec.clone();
@@ -937,7 +937,7 @@ impl P2PCore {
             self.server_blob_uploads.clear();
             if let Some(conn) = &self.db {
                 if let Err(e) = conn.execute("DELETE FROM server_blob_uploads", []) {
-                    warn!("Blob yükleme kuyruğu silinemedi: {}", e);
+                    warn!("Could not delete blob upload queue: {}", e);
                 }
             }
         }
@@ -957,7 +957,7 @@ impl P2PCore {
 
     pub(crate) fn set_server_history(&mut self, server_id: &str, enabled: bool) -> Result<(), String> {
         if !self.servers.iter().any(|s| s.server_id == server_id) {
-            return Err("Sunucu bulunamadı".to_string());
+            return Err("Server not found".to_string());
         }
         // One history server: the upload queue is global, and a record leaves it on the first `Ok`. With two servers
         // each would hold part of the history.
@@ -1102,7 +1102,7 @@ impl P2PCore {
         if add.is_empty() && drop.is_empty() {
             return;
         }
-        info!("Sunucuya kutu kaydı: +{} -{} (kanıt: {})", add.len(), drop.len(), proofs.len());
+        info!("Server mailbox registration: +{} -{} (proof: {})", add.len(), drop.len(), proofs.len());
         let (ids, dropped) = (add.clone(), drop.clone());
         if let Some(id) = self.send_server_request(peer_id, ServerRequest::Register { add, drop, proofs }) {
             self.server_inflight.insert(id, ServerInflight::Register { server_id: server_id.to_string(), ids, dropped });
@@ -1152,13 +1152,13 @@ impl P2PCore {
             });
             match root {
                 Some(root_key) => server_seal::seal_envelope(&root_key, &mailbox, &m.header.sender_device_fingerprint, bytes).map(|s| (mailbox, s)),
-                None => Err("oturum anahtarı yok".to_string()),
+                None => Err("no ratchet session key".to_string()),
             }
         };
         let (mailbox, sealed) = match sealed {
             Ok(v) => v,
             Err(e) => {
-                warn!("Zarf mühürlenemedi, sunucu atlanıyor: {}", e);
+                warn!("Could not seal envelope, skipping server: {}", e);
                 return false;
             }
         };
@@ -1166,7 +1166,7 @@ impl P2PCore {
         if sealed.len() > MAX_DEPOSIT_BYTES {
             // Wire cap (see `MAX_DEPOSIT_BYTES`). It is better not to try and to fall back to gossip than to send a
             // silently truncated, corrupt packet.
-            warn!("Zarf sunucu tavanını aşıyor ({} bayt), gossipsub'a bırakılıyor", sealed.len());
+            warn!("Envelope exceeds server cap ({} bytes), handing to gossipsub", sealed.len());
             return false;
         }
 
@@ -1201,7 +1201,7 @@ impl P2PCore {
             if now_ms.saturating_sub(LAST_LOG_MS.load(std::sync::atomic::Ordering::Relaxed)) >= 60_000 {
                 LAST_LOG_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                 info!(
-                    "Sunucu atlandı (bu kutu için bağlı+kayıtlı sunucu yok; {} yapılandırılmış)",
+                    "Server skipped (no connected+registered server for this mailbox; {} configured)",
                     self.servers.len()
                 );
             }
@@ -1228,7 +1228,7 @@ impl P2PCore {
             // forever cannot be traced. On a real device this happened, and the type had to be guessed (handshake?
             // IdentityExchange? DeviceAddNotice?).
             info!(
-                "Sunucuya bırakılıyor: kutu={} bayt={} tür={}",
+                "Handing to server: mailbox={} bytes={} type={}",
                 mailbox_log_id(&mailbox),
                 sealed.len(),
                 envelope_kind(envelope)
@@ -1385,7 +1385,7 @@ impl P2PCore {
             self.server_deposit_locations.retain(|(_, key), _| pending.contains(location_message_id(key)));
             let dropped = before - self.server_deposit_locations.len();
             if dropped > 0 {
-                info!("Sunucu yatırma konumu kaydından {} bayat girdi temizlendi", dropped);
+                info!("Cleaned {} stale entries from server deposit location record", dropped);
             }
         }
 
@@ -1501,7 +1501,7 @@ impl P2PCore {
                 ids.sort_by_key(|id| (!relay_ids.contains(id), id.clone()));
                 ids.truncate(cap);
                 wanted = ids.into_iter().collect();
-                warn!("Sunucu kutu sınırı aşıldı: {} > {} ({})", total, cap, crate::log_id(&rec.server_id));
+                warn!("Server mailbox limit exceeded: {} > {} ({})", total, cap, crate::log_id(&rec.server_id));
             }
             if let Some(rt) = self.server_rt.get_mut(&rec.server_id) {
                 let ours = rt.last_error.as_deref().map_or(false, |e| e.starts_with(TOO_MANY_MAILBOXES));
@@ -1680,7 +1680,7 @@ impl P2PCore {
         if now.saturating_sub(e.1) < SERVER_HOLD_GRACE_MS {
             return true;
         }
-        warn!("Sunucu öğesi {} dk açılamadı/işlenemedi, atlanıyor (kutu={})", SERVER_HOLD_GRACE_MS / 60_000, mailbox_log_id(mailbox));
+        warn!("Server item could not be opened/processed for {} min, skipping (mailbox={})", SERVER_HOLD_GRACE_MS / 60_000, mailbox_log_id(mailbox));
         rt.held.remove(mailbox);
         rt.passed.insert((mailbox.to_string(), seq));
         false
@@ -1971,7 +1971,7 @@ impl P2PCore {
                     rt.registered.clear();
                     rt.last_error = None;
                 }
-                info!("Sunucuya kaydolundu: {}", crate::log_id(&server_id));
+                info!("Registered with server: {}", crate::log_id(&server_id));
                 self.server_sweep_at = 0;
                 // Partial downloads can continue from the server's copy.
                 self.resume_incomplete_downloads_for(&std::collections::HashSet::new(), true);
@@ -2005,7 +2005,7 @@ impl P2PCore {
                         rt.registered.remove(&id);
                     }
                     if !refused.is_empty() {
-                        warn!("Sunucu {} kutuyu reddetti ({})", refused.len(), crate::log_id(&server_id));
+                        warn!("Server refused {} mailboxes ({})", refused.len(), crate::log_id(&server_id));
                         rt.last_error = Some(format!("{TOO_MANY_MAILBOXES}: the server refused some, those chats use the direct path only"));
                         rt.refused.extend(refused);
                         rt.refused_retry_at = mono_ms() + SERVER_REFUSED_RETRY_MS;
@@ -2035,7 +2035,7 @@ impl P2PCore {
                     rt.deposit_failures = 0;
                 }
                 self.server_unknown_streak.remove(&(server_id.clone(), mailbox.clone()));
-                info!("Sunucu zarfı sakladı: kutu={} seq={}", mailbox_log_id(&mailbox), seq);
+                info!("Server stored envelope: mailbox={} seq={}", mailbox_log_id(&mailbox), seq);
                 if cancelled {
                     if let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) {
                         let req = ServerRequest::Cancel { mailbox, seqs: vec![seq] };
@@ -2116,7 +2116,7 @@ impl P2PCore {
                     let Some(raw) = opened else {
                         // Not acked, and the cursor stays before it. An Ack is cumulative and the server deletes what it covers.
                         // Passed over only after `SERVER_HOLD_GRACE_MS`.
-                        warn!("Sunucudan gelen zarf açılamadı (kutu={})", mailbox_log_id(&item.mailbox_id));
+                        warn!("Could not open envelope from server (mailbox={})", mailbox_log_id(&item.mailbox_id));
                         if self.hold_server_item(&server_id, &item.mailbox_id, item.seq, now) {
                             blocked.insert(item.mailbox_id.clone());
                             held_any = true;
@@ -2142,7 +2142,7 @@ impl P2PCore {
                 }
 
                 if count > 0 {
-                    info!("Sunucudan {} zarf çekildi ({} bayt)", count, bytes);
+                    info!("Fetched {} envelopes from server ({} bytes)", count, bytes);
                 }
                 // The cursor moves in memory now (no second processing). It goes to disk and to the server (`Ack`) only
                 // once `incoming` was processed: `commit_server_fetches`, then the Ack's `Ok`. Forward only: a `Push` of an
@@ -2244,7 +2244,7 @@ impl P2PCore {
                     (None, _) => false,
                 };
                 if more && !moved {
-                    warn!("Sunucu arşiv sayfası ilerlemedi, bu kova bırakıldı");
+                    warn!("Server archive page did not advance, bucket dropped");
                 }
                 if let (true, true, Some(bucket), Some(before)) = (more && moved, pages + 1 < ARCHIVE_FETCH_MAX_PAGES, bucket_more, oldest) {
                     self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, window, next, pages + 1);
@@ -2279,7 +2279,7 @@ impl P2PCore {
                         .map(|u| (u.window, u.inflight.len()))
                         .unwrap_or((0, 0));
                     info!(
-                        "Blob aktarımı: {} parça, ortalama gidiş-dönüş {} ms, pencere {}, havada {}",
+                        "Blob transfer: {} chunks, average round trip {} ms, window {}, in flight {}",
                         self.blob_rtt_count,
                         self.blob_rtt_sum / self.blob_rtt_count,
                         w, inflight
@@ -2298,7 +2298,7 @@ impl P2PCore {
             (ServerInflight::BlobFinish { blob_id, .. }, ServerResponse::Err(code))
                 if !matches!(code, ServerErrorCode::NotEnrolled | ServerErrorCode::RateLimited | ServerErrorCode::Internal) =>
             {
-                warn!("Sunucu blob'u kabul etmedi ({:?}), yükleme bırakıldı: {}", code, blob_id);
+                warn!("Server did not accept blob ({:?}), upload dropped: {}", code, blob_id);
                 self.finish_blob_upload(&blob_id);
             }
 
@@ -2308,7 +2308,7 @@ impl P2PCore {
             // An unexpected match means a protocol mismatch. It is treated as no answer, so the request's own clean-up runs
             // (a `Fetch` would otherwise leave `fetch_inflight` set for good, and an `Ack` would lose its positions).
             (inflight, other) => {
-                warn!("Sunucudan beklenmeyen yanıt: {:?} -> {:?}", std::mem::discriminant(&inflight), std::mem::discriminant(&other));
+                warn!("Unexpected response from server: {:?} -> {:?}", std::mem::discriminant(&inflight), std::mem::discriminant(&other));
                 self.handle_server_failure(inflight);
             }
         }
@@ -2358,12 +2358,12 @@ impl P2PCore {
         match &inflight {
             // The same chunk gets the same answer. Give the upload up; the direct peer path still serves the file.
             ServerInflight::BlobPut { blob_id, .. } if permanent => {
-                warn!("Sunucu parçayı kabul etmedi ({:?}), yükleme bırakıldı: {}", code, blob_id);
+                warn!("Server did not accept chunk ({:?}), upload dropped: {}", code, blob_id);
                 self.finish_blob_upload(blob_id);
             }
             // Drop the head record, or it blocks every record behind it.
             ServerInflight::ArchivePut { records, .. } if permanent => {
-                warn!("Sunucu arşiv partisini kabul etmedi ({:?}), ilk kayıt bırakıldı", code);
+                warn!("Server did not accept archive batch ({:?}), first record dropped", code);
                 self.drop_archive_records(&records[..records.len().min(1)]);
             }
             // The server keeps the IDs it took and names none. The refused ones (over its cap, a full mailbox) would be
@@ -2381,7 +2381,7 @@ impl P2PCore {
             // Positions the server did not take: again later, unless it will never take them.
             ServerInflight::Ack { acks, .. } => {
                 if permanent {
-                    warn!("Sunucu Ack'i reddetti ({:?}), {} kutu", code, acks.len());
+                    warn!("Server refused Ack ({:?}), {} mailboxes", code, acks.len());
                 } else {
                     self.restage_acks(&server_id, acks.clone());
                 }
@@ -2392,14 +2392,14 @@ impl P2PCore {
         // As in `handle_server_failure`: the caller of a restore already got "OK", and the rest of this conversation's
         // buckets is not requested.
         if let ServerInflight::ArchiveFetch { .. } | ServerInflight::ArchiveProbe { .. } = &inflight {
-            warn!("Sunucu geçmiş isteğini reddetti ({:?}), geri yükleme eksik", code);
+            warn!("Server rejected history request ({:?}), restore incomplete", code);
             self.reopen_fetch_window(&inflight);
             self.attachment_events.push(serde_json::json!({"type": "history_restore_incomplete"}).to_string());
         }
 
         match code {
             ServerErrorCode::UnknownMailbox => {
-                warn!("Sunucu kutuyu tanımıyor (alıcı bu sunucuda değil)");
+                warn!("Server does not know mailbox (recipient not on this server)");
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
                     // Deposits in flight together all get this answer, so back off one step per pause.
                     let key = (server_id.clone(), mailbox.clone());
@@ -2447,7 +2447,7 @@ impl P2PCore {
                 self.requeue_failed_deposit(&inflight);
             }
             ServerErrorCode::Revoked => {
-                warn!("Sunucu kaydımızı iptal etti: {}", crate::log_id(&server_id));
+                warn!("Server revoked our registration: {}", crate::log_id(&server_id));
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.enrolled = false;
                     rt.last_error = Some("The operator revoked this enrollment".to_string());
@@ -2477,14 +2477,14 @@ impl P2PCore {
                         let streak = self.server_unknown_streak.entry(key.clone()).or_insert(0);
                         let ttl = (SERVER_DEPOSIT_BACKOFF_MS << (*streak).min(6)).min(SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS);
                         *streak += 1;
-                        warn!("Sunucu kutusu dolu, bu kutuya yatırma {} sn durduruldu: {}", ttl / 1000, mailbox_log_id(mailbox));
+                        warn!("Server mailbox full, deposits to this mailbox paused for {} s: {}", ttl / 1000, mailbox_log_id(mailbox));
                         self.server_unknown_mailboxes.insert(key, now + ttl);
                     }
                 }
                 self.requeue_failed_deposit(&inflight);
             }
             other => {
-                warn!("Sunucu hatası: {:?}", other);
+                warn!("Server error: {:?}", other);
                 // Any refused `Deposit` backs off too: its mark is gone (see above), so without this the retry would deposit
                 // again at once. Deposits (and the blob chunks behind the same gate) only. A refused `Register` or archive
                 // request must not stop all message deposits to the server for 5 minutes, again and again.
@@ -2546,7 +2546,7 @@ impl P2PCore {
         }
         // The caller of a restore already got "OK": tell the UI the result is partial.
         if let ServerInflight::ArchiveFetch { .. } | ServerInflight::ArchiveProbe { .. } = &inflight {
-            warn!("Sunucu geçmiş isteği yanıtsız kaldı, geri yükleme eksik");
+            warn!("Server history request got no response, restore incomplete");
             self.reopen_fetch_window(&inflight);
             self.attachment_events.push(serde_json::json!({"type": "history_restore_incomplete"}).to_string());
         }
@@ -2608,7 +2608,7 @@ impl P2PCore {
             // NOT `publish_envelope`: that one queues the entry with `current_time_ms()`, and would reset the envelope's age on
             // every server round trip. See the `first_attempt_at` note of `ServerInflight::Deposit`. This is the second half of the endless queue cycle.
             if let Err(e) = self.publish_envelope_at(&target_fp, &envelope, *first_attempt_at) {
-                warn!("Sunucu başarısız oldu, gossipsub da hemen başaramadı (kuyruğa alındı): {}", e);
+                warn!("Server failed, gossipsub also failed right away (queued): {}", e);
             }
         }
         if let ServerInflight::BlobPut { blob_id, chunk_index, server_id, .. } = inflight {
@@ -2618,7 +2618,7 @@ impl P2PCore {
                 // Timeout or error means the path was overloaded. Halve the window. Backing off is necessary before retries eat
                 // the bandwidth and push throughput lower still (measured: with a fixed window of 16, throughput fell from 180 KB/s to about 50 KB/s).
                 up.window = (up.window / 2).max(BLOB_WINDOW_MIN);
-                warn!("Parça zaman aşımı/hatası — pencere {} yapıldı", up.window);
+                warn!("Chunk timeout/error — window set to {}", up.window);
             }
             // One of the parallel circuits may have died: a dead connection swallows 1/N of the requests. Do not decide on a
             // single event. One timeout on Tor is noise (see `note_bulk_timeout`). Only the server this chunk went to is affected.
@@ -2632,17 +2632,17 @@ impl P2PCore {
         let Some(rec) = self.servers.iter().find(|s| s.server_id == server_id).cloned() else { return };
         let Some(peer_id) = self.server_rt.get(server_id).and_then(|r| r.peer_id) else { return };
         let Ok(sk_bytes): Result<[u8; 32], _> = rec.enroll_sk.as_slice().try_into() else {
-            error!("Sunucu kayıt anahtarı bozuk: {}", crate::log_id(&server_id));
+            error!("Server enrollment key invalid (corrupt): {}", crate::log_id(&server_id));
             return;
         };
         let signing = SigningKey::from_bytes(&sk_bytes);
         let Ok(seed): Result<ml_dsa::Seed, _> = rec.enroll_sk_pq.as_slice().try_into() else {
             // A row may have been saved before server support was added (see the `enroll_sk_pq` migration). The user must add the
             // server with a new invite code. We do NOT silently fall back to the classical signature.
-            error!("Sunucu kayıt anahtarının PQ bileşeni yok: {}", crate::log_id(&server_id));
+            error!("Server enrollment key has no PQ component: {}", crate::log_id(&server_id));
             if let Some(rt) = self.server_rt.get_mut(server_id) {
                 rt.last_error =
-                    Some("Kayıt anahtarı eski biçimde — sunucuyu yeni bir davet koduyla ekleyin".to_string());
+                    Some("Enrollment key is in the old format — add the server again with a new invite code".to_string());
             }
             return;
         };
@@ -2884,7 +2884,7 @@ impl P2PCore {
             conn.execute(&format!("{head}, ('ark_purge', ?3){todo}"), params![hex::encode(new), retired, purge])
         };
         if let Err(e) = result {
-            error!("Arşiv anahtarı değişikliği yazılamadı: {}", e);
+            error!("Could not write archive key change: {}", e);
         }
     }
 
@@ -3063,7 +3063,7 @@ impl P2PCore {
             // History server down for a long time: the queue does not grow without end.
             let over = self.server_archive_queue.len().saturating_sub(MAX_SERVER_ARCHIVE_QUEUE);
             if over > 0 {
-                warn!("Arşiv kuyruğu dolu, en eski {} kayıt sunucuya gitmeyecek", over);
+                warn!("Archive queue full, oldest {} records will not reach server", over);
                 self.drop_archive_queue_head(over);
             }
         }
@@ -3116,7 +3116,7 @@ impl P2PCore {
             ) {
                 // A record that alone breaks the budget never goes. It leaves with this batch (counted in `consumed`) and is dropped.
                 Ok(sealed) if sealed.len() > budget => {
-                    warn!("Arşiv kaydı sunucu için çok büyük, atlandı: {} bayt", sealed.len());
+                    warn!("Archive record too large for server, skipped: {} bytes", sealed.len());
                 }
                 // Checked with this record included. The next batch starts with it.
                 Ok(sealed) if sealed_bytes + sealed.len() > budget => break,
@@ -3130,7 +3130,7 @@ impl P2PCore {
                     })
                 }
                 Err(e) => {
-                    warn!("Arşiv kaydı mühürlenemedi: {}", e);
+                    warn!("Could not seal archive record: {}", e);
                 }
             }
             consumed += 1;
@@ -3235,11 +3235,11 @@ impl P2PCore {
     pub(crate) fn fetch_server_history(&mut self, chat_key: &str, is_group: bool, _before_ms: u64) -> Result<(), String> {
         let conv_key = if is_group {
             if !self.groups.contains_key(chat_key) {
-                return Err("Grup bulunamadı".to_string());
+                return Err("Group not found".to_string());
             }
             chat_key.to_string()
         } else {
-            self.identity_id_for_device(chat_key).ok_or("Bu cihazın kimliği bilinmiyor")?
+            self.identity_id_for_device(chat_key).ok_or("This device's identity is unknown")?
         };
         let before = if is_group {
             self.history_fetch_cursor(&conv_key, "", Some(chat_key))
@@ -3263,7 +3263,7 @@ impl P2PCore {
         if !sent {
             // Nothing went out: the month stays for the next press.
             self.history_fetch_pages.remove(&conv_key);
-            return Err("Geçmiş istenecek kaynağa ulaşılamıyor".to_string());
+            return Err("Can't reach a history source over the network".to_string());
         }
         self.meta_put(&format!("hfetch:{}", conv_key), &after.to_string());
         Ok(())
@@ -3280,13 +3280,13 @@ impl P2PCore {
     /// persistent conversation index. We can generate the buckets ourselves, and probing an absent bucket is a no-op on the server.
     pub(crate) fn restore_all_server_history(&mut self) -> Result<u32, String> {
         if self.archive_root_key.is_none() {
-            return Err("Kök arşiv anahtarı yok — bu cihaz sunucudaki geçmişi çözemez".to_string());
+            return Err("Root archive key not found — this device cannot decrypt history on the server".to_string());
         }
         let Some(server_id) = self.history_server() else {
-            return Err("Geçmiş saklayan, bağlı bir sunucu yok".to_string());
+            return Err("Not found: no connected server stores history".to_string());
         };
         let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else {
-            return Err("Sunucuya bağlı değil".to_string());
+            return Err("No network connection to server".to_string());
         };
 
         let mut convs: Vec<(String, bool)> = self.groups.keys().map(|g| (g.clone(), true)).collect();
@@ -3322,14 +3322,14 @@ impl P2PCore {
             ) {
                 Ok(p) => p,
                 Err(e) => {
-                    warn!("Sunucu arşiv kaydı çözülemedi: {}", e);
+                    warn!("Could not decrypt server archive record: {}", e);
                     continue;
                 }
             };
             let archived: crate::ArchivedMessage = match ciborium::from_reader(plaintext.as_slice()) {
                 Ok(a) => a,
                 Err(e) => {
-                    warn!("Sunucu arşiv kaydı ayrıştırılamadı: {}", e);
+                    warn!("Could not parse server archive record: {}", e);
                     continue;
                 }
             };
@@ -3354,12 +3354,12 @@ impl P2PCore {
             let Some(record_id) = archived.message_id.clone()
                 .filter(|mid| archive_wire_id(&ark, conv_key, mid) == rec.record_id)
             else {
-                warn!("Sunucu arşiv kaydının kimliği tutmuyor, atlandı");
+                warn!("Server archive record identity mismatch, skipped");
                 continue;
             };
             // Checked after the tag verification: an unauthenticated `rev` must not be stored.
             if !self.note_archive_rev(conv_key, &record_id, rec.rev) {
-                warn!("Sunucu arşiv kaydı reddedildi: görülenden eski revizyon");
+                warn!("Server archive record rejected: older revision than seen");
                 continue;
             }
             // Per chat, as `archive.rs` does: a sibling-crafted record must not hide a row of another chat.
@@ -3404,7 +3404,7 @@ impl P2PCore {
                         archived.reply_to_preview.as_deref(),
                         archived.sent_at_ms,
                     ),
-                    None => Err("Bu kimliğin aktif cihazı çözülemedi".to_string()),
+                    None => Err("Could not resolve active device for this identity: unknown peer device".to_string()),
                 }
             };
             match result {
@@ -3412,7 +3412,7 @@ impl P2PCore {
                     merged += 1;
                     oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
                 }
-                Err(e) => warn!("Sunucu arşiv satırı yazılamadı: {}", e),
+                Err(e) => warn!("Could not write server archive row: {}", e),
             }
         }
         // The user fetched rows back. From the oldest one written on, they are no longer "cleared".
@@ -3683,7 +3683,7 @@ impl P2PCore {
             return;
         };
         if up.restarts >= MAX_BLOB_RESTARTS {
-            warn!("Sunucu blob'u tekrar tekrar kaybetti, yükleme bırakıldı: {}", file_id);
+            warn!("Server lost blob again and again, upload dropped: {}", file_id);
             self.finish_blob_upload(file_id);
             return;
         }
@@ -3950,12 +3950,12 @@ mod tests {
         assert_eq!(
             deposit_dedup_key(&env, bytes),
             deposit_dedup_key(&env, bytes),
-            "ayni zarf ayni anahtari vermeli, yoksa tekilleştirme hic calismaz"
+            "same envelope must yield the same key, otherwise deduplication never works"
         );
         assert_ne!(
             deposit_dedup_key(&env, bytes),
             deposit_dedup_key(&env, b"baska-baytlar"),
-            "farkli zarf farkli anahtar almali, yoksa gercek bir zarf yutulur"
+            "different envelopes must yield different keys, otherwise a real envelope gets swallowed"
         );
         assert!(deposit_dedup_key(&env, bytes).starts_with("raw:"));
     }

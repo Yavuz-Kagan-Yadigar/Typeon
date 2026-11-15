@@ -72,7 +72,7 @@ fn seal(mut key: [u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Stri
     OsRng.fill_bytes(&mut out);
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&out), Payload { msg: plaintext, aad })
-        .map_err(|_| "Mühürlenemedi".to_string())?;
+        .map_err(|_| "Could not seal".to_string())?;
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
@@ -82,11 +82,11 @@ fn open(mut key: [u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String>
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     key.zeroize();
     if sealed.len() <= NONCE_LEN {
-        return Err("Mühürlü veri çok kısa".to_string());
+        return Err("Sealed data too short".to_string());
     }
     cipher
         .decrypt(Nonce::from_slice(&sealed[..NONCE_LEN]), Payload { msg: &sealed[NONCE_LEN..], aad })
-        .map_err(|_| "Mühür açılamadı (yanlış anahtar veya bozuk veri)".to_string())
+        .map_err(|_| "Seal could not be opened (wrong key or corrupt data)".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ pub fn session_mailbox_secret(
 /// does not give the id.
 pub fn first_contact_mailbox_id(secret: &[u8], device_fingerprint: &str) -> String {
     let info = [&b"p2pmsg-v0.5-first-contact-mailbox:"[..], device_fingerprint.as_bytes()].concat();
-    let id: [u8; 16] = derive(secret, &info).expect("HKDF expand 16 bayt için asla başarısız olmaz");
+    let id: [u8; 16] = derive(secret, &info).expect("HKDF expand for 16 bytes never fails");
     format!("mb_{}", hex::encode(id))
 }
 
@@ -291,7 +291,7 @@ pub fn open_first_contact(
             let (header, body) = rest.split_at(crate::ratchet::KEM_HEADER_LEN);
             open(crate::ratchet::kem_key_from(own_x25519_secret, own_kyber_secret, header)?, mailbox_id.as_bytes(), body)
         }
-        _ => Err("Bilinmeyen ilk temas mührü".to_string()),
+        _ => Err("Unknown first-contact seal".to_string()),
     }
 }
 
@@ -395,12 +395,12 @@ mod tests {
         let pk = |s: &x25519_dalek::StaticSecret| x25519_dalek::PublicKey::from(s).as_bytes().to_vec();
         let (fa, fb) = ("a".repeat(64), "b".repeat(64));
         let ab = session_mailbox_secret(&a, &pk(&b), &fa, &fb).unwrap();
-        assert_eq!(ab, session_mailbox_secret(&b, &pk(&a), &fb, &fa).unwrap(), "iki uc ayni kutuyu bulmali");
+        assert_eq!(ab, session_mailbox_secret(&b, &pk(&a), &fb, &fa).unwrap(), "both sides must find the same box");
         assert_ne!(ab, session_mailbox_secret(&a, &pk(&c), &fa, &fb).unwrap());
         // Seeds of a key-bound id do not depend on the id itself.
         assert_eq!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mk_0123").unwrap());
         assert_ne!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mb_0123").unwrap());
-        assert!(session_mailbox_secret(&a, &[0u8; 32], &fa, &fb).is_err(), "sifir nokta reddedilmeli");
+        assert!(session_mailbox_secret(&a, &[0u8; 32], &fa, &fb).is_err(), "zero point must be rejected");
         assert!(session_mailbox_secret(&a, &[1u8; 31], &fa, &fb).is_err());
     }
 
@@ -419,7 +419,7 @@ mod tests {
         let root_key = [7u8; 32];
         let payload = b"merhaba dunya";
         let sealed = seal_envelope(&root_key, "mb_1", "alice", payload).unwrap();
-        assert_ne!(&sealed[12..], payload, "sifreli metin duz metne esit olmamali");
+        assert_ne!(&sealed[12..], payload, "ciphertext must not equal plaintext");
         let opened = open_envelope(&root_key, "mb_1", "alice", &sealed).unwrap();
         assert_eq!(opened, payload);
         // Not in another mailbox, and not back to its sender, who would open
@@ -439,7 +439,7 @@ mod tests {
         let root_key = [7u8; 32];
         let a = seal_envelope(&root_key, "mb", "fp", b"ayni girdi").unwrap();
         let b = seal_envelope(&root_key, "mb", "fp", b"ayni girdi").unwrap();
-        assert_ne!(a, b, "ayni duz metin iki kez ayni sifreli metni vermemeli");
+        assert_ne!(a, b, "same plaintext twice must not give the same ciphertext");
     }
 
     #[test]
@@ -500,12 +500,12 @@ mod tests {
         let ark = [1u8; 32];
         let a = server_archive_bucket(&ark, "conv-x", 600).unwrap();
         assert_eq!(a, server_archive_bucket(&ark, "conv-x", 600).unwrap());
-        assert_ne!(a, server_archive_bucket(&ark, "conv-x", 601).unwrap(), "donem degisince kova degismeli");
+        assert_ne!(a, server_archive_bucket(&ark, "conv-x", 601).unwrap(), "bucket must change when the period changes");
         let secret = server_archive_purge_secret(&ark, "conv-x", 600).unwrap();
         assert_eq!(crate::server_proto::archive_bucket_for_purge_secret(&secret).as_deref(), Some(a.as_str()));
         assert!(!secret.contains(&a[3..]), "the id must not reveal the secret");
-        assert_ne!(a, server_archive_bucket(&ark, "conv-y", 600).unwrap(), "farkli sohbet farkli kova");
-        assert_ne!(a, server_archive_bucket(&[2u8; 32], "conv-x", 600).unwrap(), "farkli ARK farkli kova");
+        assert_ne!(a, server_archive_bucket(&ark, "conv-y", 600).unwrap(), "different chat, different bucket");
+        assert_ne!(a, server_archive_bucket(&[2u8; 32], "conv-x", 600).unwrap(), "different ARK, different bucket");
         assert!(a.starts_with("ar_"));
         assert!(!a.contains("conv-x"));
     }

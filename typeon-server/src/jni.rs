@@ -53,7 +53,7 @@ lazy_static::lazy_static! {
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
     // An empty string falls back to a default (for example `blob_dir`). A failed read must at least show up in the log.
     env.get_string(s).map(|v| v.into()).unwrap_or_else(|e| {
-        log::warn!("JNI dizesi okunamadı, boş sayıldı: {e}");
+        log::warn!("JNI string could not be read, treated as empty: {e}");
         // A pending Java exception aborts the next JNI call.
         let _ = env.exception_clear();
         String::new()
@@ -73,7 +73,7 @@ fn guarded<'local>(env: &mut JNIEnv<'local>, body: impl FnOnce(JNIEnv<'local>) -
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(inner)))
         .unwrap_or_else(|p| {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
-            log::error!("JNI çağrısında panic: {}", msg.as_deref().unwrap_or("?"));
+            log::error!("Panic in JNI call: {}", msg.as_deref().unwrap_or("?"));
             out(env, "Error: internal error (panic)".to_string())
         })
 }
@@ -176,7 +176,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
             config.limits.max_archive_bytes = per_device * 3 / 10;
             config.limits.max_mail_bytes = per_device / 10;
             info!(
-                "Disk bütçesi {} MB — cihaz başına kota: blob {} MB, arşiv {} MB, posta {} MB",
+                "Disk budget {} MB — per-device quota: blob {} MB, archive {} MB, mail {} MB",
                 budget / (1024 * 1024),
                 config.limits.max_blob_bytes / (1024 * 1024),
                 config.limits.max_archive_bytes / (1024 * 1024),
@@ -196,7 +196,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         if let Some(mut handle) = previous {
             if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {
                 // Starting anyway would run a second core on the same DB and Tor state.
-                log::warn!("Önceki sunucu döngüsü 20 sn içinde kapanmadı, başlatılmadı");
+                log::warn!("Previous server loop did not stop within 20 s, not started");
                 *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
                 return out(&mut env, "Error: previous server still shutting down, retry shortly".to_string());
             }
@@ -223,9 +223,9 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         let handle = RUNTIME.spawn(async move {
             // The `oneshot` also ends if the sender is dropped. A channel error counts as a shutdown signal.
             if let Err(e) = core.run_until(async { let _ = stop_rx.await; }).await {
-                log::error!("Sunucu döngüsü durdu: {e}");
+                log::error!("Server loop stopped: {e}");
             }
-            log::info!("Sunucu döngüsü sonlandı.");
+            log::info!("Server loop ended.");
         });
         *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
 
@@ -276,12 +276,12 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
         let running = LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(mut handle) = running {
             if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {
-                log::warn!("Sunucu döngüsü 20 sn içinde kapanmadı");
+                log::warn!("Server loop did not stop within 20 s");
                 *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
                 return out(&mut env, "Error: server loop did not stop within 20 s".to_string());
             }
         }
-        info!("Sunucu durduruldu (JNI).");
+        info!("Server stopped (JNI).");
         out(&mut env, "OK".to_string())
     })
 }

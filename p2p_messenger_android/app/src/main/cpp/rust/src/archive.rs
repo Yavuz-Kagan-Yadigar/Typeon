@@ -67,7 +67,7 @@ impl P2PCore {
         if sent_to_any {
             Ok(())
         } else {
-            Err("Ulaşılabilir grup üyesi yok".to_string())
+            Err("No reachable group member".to_string())
         }
     }
 
@@ -313,7 +313,7 @@ impl P2PCore {
                 // Silently dropping this caused a real bug. On the Linux client, incoming messages were decrypted without error but were never written to the archive, so
                 // the UI showed "No messages yet" and the chat did not even open. Finding the cause took hours, because this line was missing.
                 warn!(
-                    "Geçmiş anahtarı yüklenmemiş — mesaj arşive YAZILMIYOR (peer={}, yön={})",
+                    "History key not loaded — message NOT written to archive (peer={}, direction={})",
                     crate::log_id(&peer_device_fingerprint), direction
                 );
                 return Err("history key not loaded".to_string());
@@ -633,20 +633,20 @@ impl P2PCore {
         // could park one edit per invented message id.
         // not acked, so the sender's retry tries again later.
         if self.pending_edits_deletes.len() >= 512 && !self.pending_edits_deletes.contains_key(target_message_id) {
-            warn!("Erken Edit tamponu dolu (hedef sayısı) — atlandı (target={})", target_message_id);
+            warn!("Early Edit buffer full (target count) — skipped (target={})", target_message_id);
             return;
         }
         // And per sender: one contact filled all 512 with invented targets
         // and everybody else's early edits were dropped.
         if self.pending_edits_deletes.values().flatten().filter(|e| e.1 == peer_fp).count() >= 64 {
-            warn!("Erken Edit tamponu dolu (gönderen) — atlandı (target={})", target_message_id);
+            warn!("Early Edit buffer full (sender) — skipped (target={})", target_message_id);
             return;
         }
         // And in bytes: the counts alone let edits of about 1 MiB text each park hundreds of MB. ponytail: scan per buffered packet. Fine at these caps.
         let edit_bytes = |c: &MessageContent| match c { MessageContent::Edit { new_text, .. } => new_text.len(), _ => 0 };
         let held: usize = self.pending_edits_deletes.values().flatten().map(|e| edit_bytes(&e.4)).sum();
         if held + edit_bytes(&content) > 16 * 1024 * 1024 {
-            warn!("Erken Edit tamponu dolu (bayt) — atlandı (target={})", target_message_id);
+            warn!("Early Edit buffer full (bytes) — skipped (target={})", target_message_id);
             return;
         }
         let buf = self.pending_edits_deletes.entry(target_message_id.to_string()).or_default();
@@ -666,7 +666,7 @@ impl P2PCore {
         }
         buf.push((now, peer_fp.to_string(), sender_identity_id.to_string(), packet_message_id.to_string(), content));
         info!(
-            "Hedef mesaj henüz arşivde değil (target={}) — Edit/Delete tamponlandı, Text arşivlenince yeniden denenecek ({} bekliyor)",
+            "Target message not in archive yet (target={}) — Edit/Delete buffered, will retry when Text is archived ({} waiting)",
             target_message_id, buf.len()
         );
     }
@@ -679,7 +679,7 @@ impl P2PCore {
             Some(b) if !b.is_empty() => b,
             _ => return,
         };
-        info!("Hedef mesaj artık arşivde (target={}) — {} tamponlanmış Edit/Delete yeniden deneniyor", target_message_id, buffered.len());
+        info!("Target message now in archive (target={}) — retrying {} buffered Edit/Delete", target_message_id, buffered.len());
         for entry in buffered {
             // The same chat check the live path makes: a Text
             // with this id in another chat consumed, failed and dropped the
@@ -738,7 +738,7 @@ impl P2PCore {
         };
         if ex_member {
             self.send_ack(peer_fp, packet_message_id);
-            warn!("Grup Edit/Delete reddedildi (gönderen üye değil ya da hedef onun değil): {}", packet_message_id);
+            warn!("Group Edit/Delete rejected (sender is not a member or target is not theirs): {}", packet_message_id);
             return serde_json::json!({"type": "noop"});
         }
         match content {
@@ -771,7 +771,7 @@ impl P2PCore {
                     (None, true) => serde_json::json!({"type": "edit", "peer": chat_key, "message_id": target_message_id, "text": new_text}),
                     // See instead of publishing a type that no client handles, a diagnostic log plus `noop`.
                     (_, false) => {
-                        warn!("Edit reddedildi (sahiplik doğrulanamadı): {}", packet_message_id);
+                        warn!("Edit rejected (ownership not verified): {}", packet_message_id);
                         serde_json::json!({"type": "noop"})
                     }
                 }
@@ -818,7 +818,7 @@ impl P2PCore {
                     (None, true) => serde_json::json!({"type": "delete", "peer": chat_key, "message_id": target_message_id}),
                     // See same reason.
                     (_, false) => {
-                        warn!("Delete reddedildi (sahiplik doğrulanamadı): {}", packet_message_id);
+                        warn!("Delete rejected (ownership not verified): {}", packet_message_id);
                         serde_json::json!({"type": "noop"})
                     }
                 }
@@ -855,12 +855,12 @@ impl P2PCore {
         // An Edit that arrives after the Delete of the same message must not
         // write the text back into the tombstone.
         if deleted {
-            info!("Silinmiş mesaja gelen Edit yok sayıldı (target={})", target_message_id);
+            info!("Edit to a deleted message ignored (target={})", target_message_id);
             return Some(false);
         }
         if edited_at_ms != 0 && stored_edit_ts != 0 && edited_at_ms <= stored_edit_ts {
             info!(
-                "Bayat Edit yok sayıldı (target={} gelen_ts={} <= saklanan_ts={})",
+                "Stale Edit ignored (target={} incoming_ts={} <= stored_ts={})",
                 target_message_id, edited_at_ms, stored_edit_ts
             );
             return Some(false);

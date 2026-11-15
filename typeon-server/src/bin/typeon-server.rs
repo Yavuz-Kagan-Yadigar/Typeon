@@ -92,7 +92,7 @@ fn take_global_flags(args: &mut Vec<String>) {
             Some(v) => v,
             None if i < args.len() => args.remove(i),
             None => {
-                eprintln!("{name} bir değer bekliyor");
+                eprintln!("{name} expects a value");
                 std::process::exit(2);
             }
         };
@@ -104,7 +104,7 @@ fn take_global_flags(args: &mut Vec<String>) {
                     let _ = STORAGE_FLAG.set(b);
                 }
                 None => {
-                    eprintln!("--storage anlaşılmadı (örnek: 20G, 512M, 1073741824): {value}");
+                    eprintln!("--storage not understood (example: 20G, 512M, 1073741824): {value}");
                     std::process::exit(2);
                 }
             }
@@ -133,7 +133,7 @@ fn env_flag(key: &str, default: bool) -> bool {
         Ok(v) if ["1", "true", "yes", "on"].contains(&v.as_str()) => true,
         Ok(v) if ["0", "false", "no", "off"].contains(&v.as_str()) => false,
         Ok(v) => {
-            eprintln!("{key}={v:?} anlaşılmadı, varsayılan ({default}) kullanılıyor");
+            eprintln!("{key}={v:?} not understood, using default ({default})");
             default
         }
         Err(_) => default,
@@ -153,10 +153,10 @@ fn build_config() -> ServerConfig {
         (Some(&bytes), _) => cfg.total_storage_budget_bytes = Some(bytes),
         (None, Ok(v)) => match parse_size(&v) {
             Some(bytes) => cfg.total_storage_budget_bytes = Some(bytes),
-            None => eprintln!("TYPEON_SERVER_BUDGET_BYTES yok sayıldı (örnek: 20G, 512M, bayt sayısı): {v}"),
+            None => eprintln!("TYPEON_SERVER_BUDGET_BYTES ignored (example: 20G, 512M, byte count): {v}"),
         },
         (None, Err(_)) => eprintln!(
-            "--storage / TYPEON_SERVER_BUDGET_BYTES yok: disk bütçesi {} GiB. Diskinize göre ayarlayın.",
+            "--storage / TYPEON_SERVER_BUDGET_BYTES not set: disk budget {} GiB. Adjust it for your disk.",
             DEFAULT_BUDGET_BYTES >> 30
         ),
     }
@@ -176,7 +176,7 @@ fn open_store() -> Store {
     match Store::open(&data_dir().join("typeon_server.db")) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Açılamadı: {e}");
+            eprintln!("Could not open: {e}");
             std::process::exit(1);
         }
     }
@@ -188,7 +188,7 @@ fn arg_num(args: &[String], index: usize, default: i64) -> i64 {
         None => default,
         Some(Ok(n)) => n,
         Some(Err(_)) => {
-            eprintln!("Sayı bekleniyor: {}", args[index]);
+            eprintln!("Number expected: {}", args[index]);
             std::process::exit(2);
         }
     }
@@ -239,7 +239,7 @@ async fn main() {
         "version" | "--version" | "-V" => println!("typeon-server {}", env!("CARGO_PKG_VERSION")),
         "help" | "--help" | "-h" => usage(),
         other => {
-            eprintln!("Bilinmeyen komut: {other}\n");
+            eprintln!("Unknown command: {other}\n");
             usage();
             std::process::exit(2);
         }
@@ -248,22 +248,22 @@ async fn main() {
 
 fn usage() {
     eprintln!(
-        "typeon-server <komut>\n\n\
-         run                                 Sunucuyu çalıştır (varsayılan)\n\
-         join-code                           Kalıcı katılım kodu (sınırsız kişi)\n\
-         join-code rotate                    Katılım kodunu döndür (eskisi geçersiz)\n\
-         invite new [etiket] [adet] [gün]    Davet kodu üret (adet 0 = sınırsız)\n\
-         invite list                         Davetleri listele\n\
-         devices list                        Kayıtlı cihazlar\n\
-         devices revoke <enrollment_id>      Bir cihazın kaydını iptal et ve engelle\n\
-         devices unblock <enrollment_id>     Engeli kaldır (cihaz yeniden kaydolabilir)\n\
-         address                             İlan edilen adresler\n\
-         updates beta on|off                 Beta sürümleri de otomatik kur (varsayılan kapalı)\n\
-         install-staged                      İndirilen imzalı güncellemeyi kur (systemd ExecStartPre, root)\n\
-         version                             Sürüm\n\n\
-         Genel seçenekler (her komutta):\n\
-         --dir <yol>                         Veri dizini (TYPEON_SERVER_DIR)\n\
-         --storage <boyut>                   Toplam disk bütçesi, örn. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n"
+        "typeon-server <command>\n\n\
+         run                                 Run the server (default)\n\
+         join-code                           Permanent join code (unlimited people)\n\
+         join-code rotate                    Rotate the join code (old one becomes invalid)\n\
+         invite new [label] [uses] [days]    Create an invite code (uses 0 = unlimited)\n\
+         invite list                         List invites\n\
+         devices list                        Enrolled devices\n\
+         devices revoke <enrollment_id>      Revoke a device enrollment and block it\n\
+         devices unblock <enrollment_id>     Remove the block (device can enroll again)\n\
+         address                             Advertised addresses\n\
+         updates beta on|off                 Also auto-install beta versions (default off)\n\
+         install-staged                      Install the downloaded signed update (systemd ExecStartPre, root)\n\
+         version                             Version\n\n\
+         Global options (for every command):\n\
+         --dir <path>                          Data directory (TYPEON_SERVER_DIR)\n\
+         --storage <size>                  Total disk budget, e.g. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n"
     );
 }
 
@@ -277,14 +277,14 @@ async fn run() {
     let core = match ServerCore::new(cfg) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Sunucu başlatılamadı: {e}");
+            eprintln!("Server could not be started: {e}");
             std::process::exit(1);
         }
     };
     println!("peer_id: {}", core.local_peer_id());
     tokio::spawn(update_loop(std::sync::Arc::downgrade(&core.tor_client())));
     if let Err(e) = core.run().await {
-        eprintln!("Sunucu hatası: {e}");
+        eprintln!("Server error: {e}");
         std::process::exit(1);
     }
 }
@@ -297,13 +297,13 @@ fn join_code(args: &[String]) {
         Ok(code) => {
             println!("{code}");
             if rotate {
-                eprintln!("\nKod döndürüldü — ESKİ kod artık geçersiz. Kayıtlı cihazlar etkilenmez.");
+                eprintln!("\nCode rotated — OLD code is no longer valid. Enrolled devices are not affected.");
             }
-            eprintln!("\nBu kodu istemcide Ayarlar > Sunucular > Sunucu ekle bölümüne yapıştırın.");
-            eprintln!("Sınırsız kişi aynı kodla katılabilir; saatlik kayıt tavanı sel koruması olarak durur.");
+            eprintln!("\nPaste this code in the client under Settings > Servers > Add server.");
+            eprintln!("Unlimited people can join with the same code; the hourly registration cap acts as flood protection.");
         }
         Err(e) => {
-            eprintln!("Katılım kodu alınamadı: {e}");
+            eprintln!("Join code could not be retrieved: {e}");
             std::process::exit(1);
         }
     }
@@ -317,23 +317,23 @@ fn invite(args: &[String]) {
             let uses = arg_num(args, 2, 1);
             let days = arg_num(args, 3, 7);
             if days < 1 {
-                eprintln!("Gün sayısı en az 1 olmalı: {days}");
+                eprintln!("Number of days must be at least 1: {days}");
                 std::process::exit(2);
             }
             // An overflow wrapped negative, which means "never expires".
             let Some(ttl_ms) = days.checked_mul(24 * 60 * 60 * 1000) else {
-                eprintln!("Gün sayısı çok büyük: {days}");
+                eprintln!("Number of days too large: {days}");
                 std::process::exit(2);
             };
             match typeon_server::create_invite(&open_store(), &label, uses, ttl_ms) {
                 Ok(code) => {
                     println!("{code}");
-                    eprintln!("\nBu kodu istemcide Ayarlar > Sunucular > Sunucu ekle bölümüne yapıştırın.");
-                    let uses_txt = if uses <= 0 { "sınırsız".to_string() } else { uses.to_string() };
-                    eprintln!("Kullanım hakkı: {uses_txt}, geçerlilik: {days} gün.");
+                    eprintln!("\nPaste this code in the client under Settings > Servers > Add server.");
+                    let uses_txt = if uses <= 0 { "unlimited".to_string() } else { uses.to_string() };
+                    eprintln!("Uses: {uses_txt}, valid for: {days} days.");
                 }
                 Err(e) => {
-                    eprintln!("Davet üretilemedi: {e}");
+                    eprintln!("Invite could not be created: {e}");
                     std::process::exit(1);
                 }
             }
@@ -341,16 +341,16 @@ fn invite(args: &[String]) {
         Some("list") => {
             for (label, uses, expires, valid) in open_store().list_invites(now_ms()) {
                 println!(
-                    "{:<20} kalan={:<9} bitiş={:<15} {}",
+                    "{:<20} left={:<9} expires={:<15} {}",
                     label,
-                    if uses < 0 { "sınırsız".to_string() } else { uses.to_string() },
-                    if expires == 0 { "yok".to_string() } else { expires.to_string() },
-                    if valid { "geçerli" } else { "geçersiz" }
+                    if uses < 0 { "unlimited".to_string() } else { uses.to_string() },
+                    if expires == 0 { "none".to_string() } else { expires.to_string() },
+                    if valid { "valid" } else { "invalid" }
                 );
             }
         }
         Some(other) => {
-            eprintln!("Bilinmeyen invite alt komutu: {other}");
+            eprintln!("Unknown invite subcommand: {other}");
             std::process::exit(2);
         }
     }
@@ -362,7 +362,7 @@ fn devices(args: &[String]) {
         Some("list") | None => {
             for e in store.list_enrollments() {
                 println!(
-                    "{} peer={} durum={:?} posta={}B arşiv={}B dosya={}B",
+                    "{} peer={} status={:?} mail={}B archive={}B files={}B",
                     hex::encode(&e.enrollment_id),
                     e.peer_id,
                     e.state,
@@ -374,35 +374,35 @@ fn devices(args: &[String]) {
         }
         Some("revoke") => {
             let Some(id_hex) = args.get(1) else {
-                eprintln!("Kullanım: devices revoke <enrollment_id_hex>");
+                eprintln!("Usage: devices revoke <enrollment_id_hex>");
                 std::process::exit(2);
             };
             let Ok(id) = hex::decode(id_hex) else {
-                eprintln!("Geçersiz enrollment_id (hex bekleniyor)");
+                eprintln!("Invalid enrollment_id (hex expected)");
                 std::process::exit(2);
             };
             match store.revoke_enrollment(&id) {
                 Ok(()) => {
                     // the public join code changes too, or the revoked device enrolls again under a fresh key.
                     let _ = typeon_server::public_join_token(&store, true);
-                    println!("İptal edildi: {id_hex} (herkese açık katılım kodu yenilendi)");
+                    println!("Revoked: {id_hex} (public join code rotated)");
                 }
                 Err(e) => {
-                    eprintln!("İptal edilemedi: {e}");
+                    eprintln!("Could not revoke: {e}");
                     std::process::exit(1);
                 }
             }
         }
         Some("unblock") => {
             let Some(e) = args.get(1).and_then(|h| hex::decode(h).ok()).and_then(|id| store.enrollment_by_id(&id)) else {
-                eprintln!("Kullanım: devices unblock <enrollment_id_hex>");
+                eprintln!("Usage: devices unblock <enrollment_id_hex>");
                 std::process::exit(2);
             };
             store.unblock_enrollment_key(&e.enroll_pk);
-            println!("Engel kaldırıldı");
+            println!("Block removed");
         }
         Some(other) => {
-            eprintln!("Bilinmeyen devices alt komutu: {other}");
+            eprintln!("Unknown devices subcommand: {other}");
             std::process::exit(2);
         }
     }

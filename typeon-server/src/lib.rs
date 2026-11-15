@@ -167,7 +167,7 @@ pub fn advertised_addrs(store: &Store) -> Result<Vec<String>, String> {
     let raw = store.meta_get(ADVERTISED_ADDRS_KEY).unwrap_or_default();
     let addrs: Vec<String> = String::from_utf8_lossy(&raw).lines().map(str::to_string).collect();
     if addrs.is_empty() {
-        return Err("Sunucunun henüz bir adresi yok — önce `typeon-server run` ile başlatın".to_string());
+        return Err("Server has no address yet — start it first with `typeon-server run`".to_string());
     }
     Ok(addrs)
 }
@@ -535,10 +535,10 @@ impl ServerCore {
             .write(true)
             .truncate(false)
             .open(config.data_dir.join("server.lock"))
-            .map_err(|e| format!("Kilit dosyası: {e}"))?;
+            .map_err(|e| format!("Lock file: {e}"))?;
         if lock.try_lock().is_err() {
             return Err(format!(
-                "Bu veri dizini ({}) başka bir sunucu işlemi tarafından kullanılıyor",
+                "This data directory ({}) is in use by another server process",
                 config.data_dir.display()
             ));
         }
@@ -556,7 +556,7 @@ impl ServerCore {
             &config.data_dir.join("arti_cache").to_string_lossy(),
             TOR_LIBP2P_PORT,
         )
-        .map_err(|e| format!("Tor başlatılamadı: {e}"))?;
+        .map_err(|e| format!("Tor could not be started: {e}"))?;
         let node_mode = config.node_mode;
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
@@ -757,7 +757,7 @@ impl ServerCore {
         mut self,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> Result<(), String> {
-        info!("Typeon sunucusu başladı");
+        info!("Typeon server started");
         debug!("peer_id={}", self.local_peer_id());
         // The timer and the signal MUST be separate local variables. `tokio::select!` creates the futures of all
         // branches in the same scope, and the swarm branch borrows `self`. Writing them inline would create a
@@ -769,7 +769,7 @@ impl ServerCore {
         let mut net_changed_rx = self.net_changed_rx.take();
         let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel(LINK_QUEUE);
         let Some(mut hash_rx) = self.hash_rx.take() else {
-            return Err("run_until çağrıldı: döngü zaten çalıştırılmış".to_string());
+            return Err("run_until called: loop already ran".to_string());
         };
         if let Some(incoming) = self.relay_incoming.take() {
             tokio::spawn(accept_relay_streams(incoming, relay_tx));
@@ -791,17 +791,17 @@ impl ServerCore {
                     }
                 } => match signal {
                     CoreSignal::NetworkChanged => {
-                        info!("Ağ değişikliği bildirildi — Tor tazeleniyor");
+                        info!("Network change reported — refreshing Tor");
                         self.notify_network_changed();
                     }
                     CoreSignal::EnrollmentsChanged => self.drop_revoked_peers(),
                 },
                 _ = &mut shutdown => {
-                    info!("Durdurma istendi, kapatılıyor.");
+                    info!("Stop requested, shutting down.");
                     return Ok(());
                 }
                 _ = &mut ctrlc => {
-                    info!("Kapatılıyor.");
+                    info!("Shutting down.");
                     return Ok(());
                 }
             }
@@ -1007,7 +1007,7 @@ impl ServerCore {
         if self.store.is_key_blocked(&enroll_pk)
             || prev.as_ref().map_or(false, |p| self.store.is_key_blocked(&p.enroll_pk))
         {
-            warn!("Engellenen anahtarla kayıt denemesi reddedildi");
+            warn!("Registration with a blocked key rejected");
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
@@ -1022,7 +1022,7 @@ impl ServerCore {
         if self.store.invite_uses_left(hash.as_slice(), now) == Some(-1) {
             let since = now - 60 * 60 * 1000;
             if self.store.count_enrollments_since(since, now) >= MAX_PUBLIC_ENROLLMENTS_PER_HOUR {
-                warn!("Herkese açık katılım kodu saatlik tavanı aştı, kayıt reddedildi");
+                warn!("Public enrollment code exceeded the hourly cap, registration rejected");
                 self.stats.rejected += 1;
                 return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
             }
@@ -1063,12 +1063,12 @@ impl ServerCore {
             Ok(true) => {}
             Ok(false) => return ServerResponse::Err(ServerErrorCode::BadInvite),
             Err(msg) => {
-                error!("Kayıt yazılamadı: {msg}");
+                error!("Registration could not be written: {msg}");
                 return ServerResponse::Err(ServerErrorCode::Internal);
             }
         }
         self.stats.enrollments += 1;
-        debug!("Yeni kayıt: {}", hex::encode(&enrollment_id));
+        debug!("New registration: {}", hex::encode(&enrollment_id));
         ServerResponse::Enrolled { enrollment_id, limits: self.config.limits.clone() }
     }
 
@@ -1119,7 +1119,7 @@ impl ServerCore {
             return ServerResponse::Err(ServerErrorCode::Revoked);
         }
         if let Err(msg) = self.store.rebind_enrollment(&enrollment_id, &peer.to_string(), now) {
-            error!("Rebind yazılamadı: {msg}");
+            error!("Rebind could not be written: {msg}");
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
         ServerResponse::Enrolled { enrollment_id, limits: self.config.limits.clone() }
@@ -1242,7 +1242,7 @@ impl ServerCore {
                         (refused.into_iter().chain(bad).collect::<Vec<String>>(), unproven)
                     }
                     Err(msg) => {
-                        error!("Register yazılamadı: {msg}");
+                        error!("Register could not be written: {msg}");
                         return ServerResponse::Err(ServerErrorCode::Internal);
                     }
                 };
@@ -1260,7 +1260,7 @@ impl ServerCore {
                     return ServerResponse::Ok;
                 }
                 if !refused.is_empty() {
-                    warn!("Register: {} kutu reddedildi (kota, okuyucu sınırı ya da anahtar), {} kanıt doğrulanmadı", refused.len(), bad_proof);
+                    warn!("Register: {} box(es) rejected (quota, reader limit or key), {} proof(s) not verified", refused.len(), bad_proof);
                 }
                 ServerResponse::Registered { proof_needed: unproven, refused }
             }
@@ -1280,7 +1280,7 @@ impl ServerCore {
                 }
                 // See `total_budget_exceeded`. The per-record quota alone does not protect the device's disk.
                 if self.total_budget_exceeded(store::mail_row_bytes(&mailbox, &sealed)) {
-                    warn!("Toplam disk bütçesi doldu, teslim reddedildi");
+                    warn!("Total disk budget full, delivery rejected");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 // Per depositor (see `depositor_item_count`). A box full of someone else's deposits must not refuse ours.
@@ -1296,7 +1296,7 @@ impl ServerCore {
                         ServerResponse::Deposited { seq }
                     }
                     Err(msg) => {
-                        error!("Deposit yazılamadı: {msg}");
+                        error!("Deposit could not be written: {msg}");
                         ServerResponse::Err(ServerErrorCode::Internal)
                     }
                 }
@@ -1333,7 +1333,7 @@ impl ServerCore {
                 let removed = self.store.cancel_own_deposits(&mailbox, &seqs, &e.enrollment_id);
                 if removed > 0 {
                     self.mail_recount_due = true;
-                    info!("Gönderen {} paketi geri çekti", removed);
+                    info!("Sender withdrew {} packets", removed);
                 }
                 ServerResponse::Ok
             }
@@ -1349,7 +1349,7 @@ impl ServerCore {
                 // `ArchivePurge` arrives. It is the largest contributor to the total ceiling.
                 let incoming: usize = records.iter().map(store::archive_row_bytes).sum();
                 if self.total_budget_exceeded(incoming) {
-                    warn!("Toplam disk bütçesi doldu, arşiv yazımı reddedildi");
+                    warn!("Total disk budget full, archive write rejected");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 match self.store.archive_put(&bucket, &records, &e.enrollment_id, now) {
@@ -1359,7 +1359,7 @@ impl ServerCore {
                         ServerResponse::Ok
                     }
                     Err(msg) => {
-                        error!("ArchivePut yazılamadı: {msg}");
+                        error!("ArchivePut could not be written: {msg}");
                         ServerResponse::Err(ServerErrorCode::Internal)
                     }
                 }
@@ -1477,7 +1477,7 @@ impl ServerCore {
         // 20 devices enrolled the real ceiling was 2.5 times the budget. Disk-full on a tablet is exactly what this
         // mechanism exists to prevent. The total is checked now too.
         if self.total_budget_exceeded(growth as usize) {
-            warn!("Toplam disk bütçesi doldu, blob parçası reddedildi");
+            warn!("Total disk budget full, blob chunk rejected");
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
         // Ownership: only the record that started a blob may write to it. A row is created only for an id nobody
@@ -1536,7 +1536,7 @@ impl ServerCore {
                 f.write_all(&data)
             });
         if let Err(err) = write {
-            error!("Blob yazılamadı: {err}");
+            error!("Blob could not be written: {err}");
             return ServerResponse::Err(ServerErrorCode::Internal);
         }
         // The bytes are on disk, so they are charged even if the bookkeeping below fails. The resent chunk then grows
@@ -1621,13 +1621,13 @@ impl ServerCore {
                 }
             },
             Some(_) => {
-                warn!("Blob hash uyuşmuyor, reddedildi: {}…", blob_id.get(..6).unwrap_or(""));
+                warn!("Blob hash mismatch, rejected: {}…", blob_id.get(..6).unwrap_or(""));
                 self.drop_blob(&blob_id);
                 ServerResponse::Err(ServerErrorCode::BadHash)
             }
             // Unreadable file: the same finish fails the same way.
             None => {
-                warn!("Blob okunamadı, reddedildi: {}…", blob_id.get(..6).unwrap_or(""));
+                warn!("Blob could not be read, rejected: {}…", blob_id.get(..6).unwrap_or(""));
                 self.drop_blob(&blob_id);
                 ServerResponse::Err(ServerErrorCode::BadHash)
             }
@@ -1642,7 +1642,7 @@ impl ServerCore {
     fn drop_blob(&self, blob_id: &str) {
         match std::fs::remove_file(self.blob_path(blob_id)) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                warn!("Blob dosyası silinemedi ({}…): {err}", blob_id.get(..6).unwrap_or(""));
+                warn!("Blob file could not be deleted ({}…): {err}", blob_id.get(..6).unwrap_or(""));
             }
             _ => self.store.blob_forget(blob_id),
         }
@@ -1675,7 +1675,7 @@ impl ServerCore {
                 // source). An unenrolled one gets `NotFound`.
         let enrolled = self.active(peer).is_some();
         if !enrolled || !self.check_rate(peer, true, 1) {
-            warn!("Dosya parçası isteği reddedildi (kayıtsız eş ya da hız sınırı)");
+            warn!("File chunk request rejected (unregistered peer or rate limit)");
             self.stats.rejected += 1;
             let reply = if enrolled { FileChunkResponse::Busy } else { FileChunkResponse::NotFound };
             let _ = self.swarm.behaviour_mut().file_chunks.send_response(channel, reply);
@@ -1773,7 +1773,7 @@ impl ServerCore {
         match ev {
             RelayEvent::Open { peer, id, tx } => match self.active(peer) {
                 Some(_) => {
-                    debug!("Arama rölesi açıldı: {peer}");
+                    debug!("Call relay opened: {peer}");
                     self.relay_links.insert(peer, (id, tx));
                 }
                 // Dropping `tx` ends the writer, which closes the stream.
@@ -1782,7 +1782,7 @@ impl ServerCore {
             RelayEvent::Closed { peer, id } => {
                 if self.relay_links.get(&peer).map(|(i, _)| *i) == Some(id) {
                     self.relay_links.remove(&peer);
-                    debug!("Arama rölesi kapandı: {peer}");
+                    debug!("Call relay closed: {peer}");
                 }
             }
             RelayEvent::Frame { peer, mailbox, data } => {
@@ -1902,7 +1902,7 @@ impl ServerCore {
             return true;
         }
         if now > expected {
-            warn!("Sistem saati {} sn ileri alındı — süreler kaydırıldı", (now - expected) / 1000);
+            warn!("System clock moved {} s forward — timers shifted", (now - expected) / 1000);
             self.store.shift_deadlines(now - expected, expected);
         }
         self.clock_anchor = Some((now, mono));
@@ -1965,22 +1965,22 @@ impl ServerCore {
 
         let now = now_ms();
         if self.clock_jumped(now, mono) {
-            warn!("Sistem saati sıçradı — TTL süpürmesi bekletiliyor");
+            warn!("System clock jumped — TTL sweep deferred");
             return;
         }
         // Tracked above even while wrong, so the step to the right time is seen and the deadlines move with it.
         if now < SANE_WALL_FLOOR_MS {
-            warn!("Sistem saati geçersiz — TTL süpürmesi atlandı");
+            warn!("System clock invalid — TTL sweep skipped");
             return;
         }
         let slept = self.store.sleep_idle_enrollments(now - ENROLLMENT_IDLE_MS);
         let removed = self.store.sweep_expired_mail(now) + slept;
         let archived = self.store.sweep_expired_archive(now);
         if archived > 0 {
-            info!("Süpürmede {archived} arşiv kaydı (13 ay) silindi");
+            info!("Sweep deleted {archived} archive records (13 months)");
         }
         if removed > 0 {
-            info!("Süpürmede {removed} teslim öğesi silindi");
+            info!("Sweep deleted {removed} delivery items");
             self.store.recount_mail_bytes();
         }
         for blob_id in self.store.blobs_to_gc(now, self.config.limits.blob_ttl_ms as i64) {
@@ -2018,7 +2018,7 @@ fn load_or_generate_keypair(store: &Store) -> Result<libp2p::identity::Keypair, 
         if let Ok(kp) = libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
             return Ok(kp);
         }
-        warn!("Kayıtlı libp2p anahtarı okunamadı, yenisi üretiliyor");
+        warn!("Stored libp2p key could not be read, generating a new one");
     }
     let kp = libp2p::identity::Keypair::generate_ed25519();
     let encoded = kp.to_protobuf_encoding().map_err(|e| e.to_string())?;

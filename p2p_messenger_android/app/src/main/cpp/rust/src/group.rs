@@ -291,13 +291,13 @@ mod tests {
         apply_change(&mut c_view, &change, 2, 2000);
 
         // WITHOUT sync_members, B stays missing. This is the bug itself:
-        assert!(!c_view.is_member("B"), "ön koşul: sync'ten önce B bilinmiyor");
+        assert!(!c_view.is_member("B"), "precondition: B unknown before sync");
 
         // Set equal to the authoritative list carried by the update.
         c_view.sync_members(&["A".to_string(), "B".to_string(), "C".to_string()], 2000);
 
         assert!(c_view.is_member("A"));
-        assert!(c_view.is_member("B"), "geç katılan üye, kendisinden ÖNCE eklenmiş üyeyi de görmeli");
+        assert!(c_view.is_member("B"), "late-joining member must also see the member added BEFORE it");
         assert!(c_view.is_member("C"));
         // C must be able to send group messages to both A and B.
         let targets = c_view.other_members("C");
@@ -365,7 +365,7 @@ mod tests {
         let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
         g.push_founder_transfer(transfer(5, "A", "B"));
         g.push_founder_transfer(transfer(5, "A", "B"));
-        assert_eq!(g.founder_chain.len(), 1, "ayni devir iki kez girmemeli");
+        assert_eq!(g.founder_chain.len(), 1, "same transfer must not apply twice");
 
         // Sirasiz eklense de surume gore siralanmali.
         g.push_founder_transfer(transfer(3, "Z", "A"));

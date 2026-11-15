@@ -26,7 +26,7 @@ object StickerImport {
 
     /** [file] is a GIF, PNG, JPEG or WebP. Returns the sticker id or "Error: ...". */
     fun importFile(file: File, origin: String? = null): String {
-        if (!file.exists() || file.length() == 0L) return "Error: dosya okunamadı"
+        if (!file.exists() || file.length() == 0L) return "Error: file could not be read"
         val head = ByteArray(4)
         val read = try { file.inputStream().use { it.read(head) } } catch (e: Exception) { return "Error: ${e.message}" }
         val magic = String(head, 0, read.coerceAtLeast(0), Charsets.ISO_8859_1)
@@ -41,7 +41,7 @@ object StickerImport {
 
     /** A still picture: one frame, no delay. */
     private fun importStill(file: File, origin: String?): String {
-        val bitmap = fit(decodeStill(file)) ?: return "Error: görsel çözülemedi"
+        val bitmap = fit(decodeStill(file)) ?: return "Error: image could not be decoded"
         try {
             return P2PLib.importStickerFrames(
                 arrayOf(toRgba(bitmap)), bitmap.width, bitmap.height, intArrayOf(0), origin

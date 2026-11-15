@@ -353,7 +353,7 @@ impl P2PCore {
                     continue;
                 }
                 if let Err(e) = self.apply_device_revoke_notice(r, "") {
-                    warn!("Senkronla gelen kendi iptalimiz uygulanmadı: {}", e);
+                    warn!("Own revocation received via sync not applied: {}", e);
                 }
             }
         }
@@ -367,12 +367,12 @@ impl P2PCore {
         // to it right away without waiting for a separate IdentityExchange.
         let device = match self.synced_device_for(&device_add.new_device_fingerprint) {
             Some(d) => d,
-            None => { error!("DeviceAddNotice: yeni cihazın anahtarları bilinmiyor"); return; }
+            None => { error!("DeviceAddNotice: new device keys unknown"); return; }
         };
         let content = MessageContent::DeviceAddNotice { device_add: device_add.clone(), device };
         for fp in targets {
             if let Err(e) = self.send_message_content(fp, &content, None) {
-                error!("DeviceAddNotice gönderimi başarısız: {}", e);
+                error!("DeviceAddNotice send failed: {}", e);
             }
         }
     }
@@ -395,7 +395,7 @@ impl P2PCore {
         for fp in targets {
             let _ = self.send_identity_exchange(&fp);
             if let Err(e) = self.send_message_content(fp, &notice, None) {
-                error!("İkincil cihaz kendini tanıtırken DeviceAddNotice başarısız: {}", e);
+                error!("DeviceAddNotice failed while secondary device introduced itself: {}", e);
             }
         }
     }
@@ -436,7 +436,7 @@ impl P2PCore {
                             self.meta_put(k, h);
                         }
                     }
-                    Err(e) => error!("DeviceSync gönderimi başarısız: {}", e),
+                    Err(e) => error!("DeviceSync send failed: {}", e),
                 }
             }
         }
@@ -627,7 +627,7 @@ impl P2PCore {
             // If no sibling device is linked, this silently sends NOTHING. The log distinguishes "the edit/delete never reached the other device"
             // here from a send failure (the `error!` below). An empty list means either no sibling device is linked, or the roster sync
             // (`sync_to_siblings`) has not completed yet.
-            warn!("echo_1to1_to_siblings: bilinen aktif kardeş cihaz yok, hiçbir şey gönderilmedi (peer={})", crate::log_id(&peer_fp));
+            warn!("echo_1to1_to_siblings: no known active sibling device, nothing sent (peer={})", crate::log_id(&peer_fp));
             return;
         }
         let identity_id = match self.known_remote_devices.get(peer_fp) {
@@ -641,7 +641,7 @@ impl P2PCore {
         };
         for fp in siblings {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
-                error!("SiblingEcho (1:1) gönderimi başarısız (sibling={}): {}", crate::log_id(&fp), e);
+                error!("SiblingEcho (1:1) send failed (sibling={}): {}", crate::log_id(&fp), e);
             }
         }
     }
@@ -651,7 +651,7 @@ impl P2PCore {
         let siblings = self.sibling_active_devices();
         if siblings.is_empty() {
             // Same debugging rationale as `echo_1to1_to_siblings`.
-            warn!("echo_group_to_siblings: bilinen aktif kardeş cihaz yok, hiçbir şey gönderilmedi (group={})", group_id);
+            warn!("echo_group_to_siblings: no known active sibling device, nothing sent (group={})", group_id);
             return;
         }
         let content = MessageContent::SiblingEcho {
@@ -661,7 +661,7 @@ impl P2PCore {
         };
         for fp in siblings {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
-                error!("SiblingEcho (grup) gönderimi başarısız (sibling={}): {}", crate::log_id(&fp), e);
+                error!("SiblingEcho (group) send failed (sibling={}): {}", crate::log_id(&fp), e);
             }
         }
     }
@@ -712,9 +712,9 @@ impl P2PCore {
         let siblings: Vec<String> = self.sibling_active_devices().into_iter()
             .filter(|fp| self.is_connected_to_device(fp) && to.map_or(true, |t| t == fp.as_str())).collect();
         if siblings.is_empty() {
-            return Err("Kardeş cihaz yok".to_string());
+            return Err("No sibling device".to_string());
         }
-        let chat = conversation_identity_id.or(group_id).ok_or("Sohbet yok")?.to_string();
+        let chat = conversation_identity_id.or(group_id).ok_or("No chat")?.to_string();
         let content = MessageContent::SiblingHistoryRequest {
             per_conversation_limit: HISTORY_SYNC_MAX_MESSAGES,
             conversation_identity_id: conversation_identity_id.map(|s| s.to_string()),
@@ -732,7 +732,7 @@ impl P2PCore {
                 sent_to_any = true;
             }
         }
-        if sent_to_any { Ok(()) } else { Err("Kardeş cihaza gönderilemedi".to_string()) }
+        if sent_to_any { Ok(()) } else { Err("Could not send to sibling device".to_string()) }
     }
 
     /// Collects the last `limit` messages from my own archive. This is the answer to a sibling's backfill request. The total number of
@@ -1267,10 +1267,10 @@ impl P2PCore {
     /// `answer_revoked_sibling` needs it to send the revoke back if that
     /// device ever writes again, and the revoke itself is kept in `own_revokes`.
     pub(crate) fn forget_revoked_linked_device(&mut self, fp: &str) -> Result<(), String> {
-        let my_id = self.my_identity_id().ok_or("Kimlik yok")?;
-        let rec = self.known_remote_devices.get(fp).ok_or("Cihaz bulunamadı")?;
+        let my_id = self.my_identity_id().ok_or("No identity")?;
+        let rec = self.known_remote_devices.get(fp).ok_or("Device not found")?;
         if rec.identity_id != my_id || rec.is_active {
-            return Err("Yalnızca iptal edilmiş bir kardeş cihaz listeden kaldırılabilir".to_string());
+            return Err("Only a revoked sibling device can be removed from the list".to_string());
         }
         self.meta_put(&format!("hidden_dev:{fp}"), "1");
         Ok(())
@@ -1281,13 +1281,13 @@ impl P2PCore {
     pub(crate) fn revoke_own_linked_device(&mut self, fp: &str) -> Result<(), String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         if fp == own_fp {
-            return Err("Bu cihazı buradan iptal edemezsiniz".to_string());
+            return Err("You cannot revoke this device from here".to_string());
         }
         let my_id = self.my_identity_id().ok_or("No identity")?;
         let is_sibling = self.known_remote_devices.get(fp)
             .map(|d| d.identity_id == my_id).unwrap_or(false);
         if !is_sibling {
-            return Err("Bu cihaz kimliğinize ait bir kardeş cihaz değil".to_string());
+            return Err("This device is not a sibling device of your identity".to_string());
         }
         let revoke = self.sign_device_revoke(fp)?;
         self.remember_own_revoke(&revoke);
@@ -1323,7 +1323,7 @@ impl P2PCore {
         targets.extend(self.sibling_active_devices());
         for t in targets {
             if let Err(e) = self.send_message_content(t, &content, None) {
-                error!("DeviceRevokeNotice gönderimi başarısız: {}", e);
+                error!("DeviceRevokeNotice send failed: {}", e);
             }
         }
         // The revoked device holds the archive key. It is inactive and has

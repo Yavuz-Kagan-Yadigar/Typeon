@@ -467,7 +467,7 @@ class P2PService : Service() {
             try {
                 P2PLib.setPowerSave(enabled)
             } catch (e: Exception) {
-                Log.w(TAG, "Güç tasarrufu modu ayarlanamadı: ${e.message}")
+                Log.w(TAG, "Power saving mode could not be set: ${e.message}")
             }
         }
     }
@@ -495,7 +495,7 @@ class P2PService : Service() {
                 pending
             )
         } catch (e: Exception) {
-            Log.w(TAG, "Doze uyandırma alarmı kurulamadı: ${e.message}")
+            Log.w(TAG, "Doze wake alarm could not be set: ${e.message}")
         }
     }
 
@@ -528,7 +528,7 @@ class P2PService : Service() {
             JSONObject(json)
         } catch (e: Exception) {
                         // If this were swallowed silently, a change in the event format would silently turn notifications off, and nobody would know why.
-            Log.w(TAG, "Olay JSON'u okunamadı: ${e.message}")
+            Log.w(TAG, "Event JSON could not be read: ${e.message}")
             return
         }
         when (obj.optString("type")) {
@@ -541,7 +541,7 @@ class P2PService : Service() {
                     android.widget.Toast.makeText(applicationContext, R.string.msg_pairing_contact_limit, android.widget.Toast.LENGTH_LONG).show()
                 }
             }
-            "core_panic" -> Log.e(TAG, "Çekirdek bir panik yakaladı (bkz. logcat 'PANIC yakalandı')")
+            "core_panic" -> Log.e(TAG, "Core caught a panic (see logcat 'PANIC caught')")
             // The restore button already said "loading": say that it stopped short.
             "history_restore_incomplete" -> android.os.Handler(android.os.Looper.getMainLooper()).post {
                 android.widget.Toast.makeText(applicationContext, R.string.msg_restore_incomplete, android.widget.Toast.LENGTH_LONG).show()
@@ -844,7 +844,7 @@ class P2PService : Service() {
             startNet()
             P2PLib.setHistoryStorageLimitBytes(getHistoryStorageLimitBytes(applicationContext))
         } catch (t: Throwable) {
-            Log.e(TAG, "Servis başlatma hatası: ${t.message}")
+            Log.e(TAG, "Service start error: ${t.message}")
         }
     }
 
@@ -873,7 +873,7 @@ class P2PService : Service() {
             }
         } catch (t: Throwable) {
             // A throw from a retried step would otherwise end the retry chain.
-            Log.e(TAG, "Ağ başlatma hatası: ${t.message}")
+            Log.e(TAG, "Network start error: ${t.message}")
             retryStart { startNet() }
         }
     }
@@ -943,7 +943,7 @@ class P2PService : Service() {
             lock.acquire(wanted)
             BatteryLog.wakeAcquired(wanted)
         } catch (e: Exception) {
-            Log.w(TAG, "Wake lock alınamadı: ${e.message}")
+            Log.w(TAG, "Wake lock could not be acquired: ${e.message}")
         }
     }
 

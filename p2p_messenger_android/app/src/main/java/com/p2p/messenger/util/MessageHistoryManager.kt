@@ -51,7 +51,7 @@ object MessageHistoryManager {
                 KeystoreCrypto.decrypt(encrypted, KeystoreCrypto.ALIAS_HISTORY)
             } catch (e: Exception) {
                 // See the TAG note (#04). NEVER regenerate here.
-                com.p2p.messenger.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
+                com.p2p.messenger.util.Log.e(TAG, "Key could not be decrypted, NOT REGENERATING", e)
                 KeystoreCrypto.reportKeyFailure(context)
                 return
             }

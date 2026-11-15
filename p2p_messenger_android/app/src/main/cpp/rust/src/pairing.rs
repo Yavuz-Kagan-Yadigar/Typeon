@@ -50,7 +50,7 @@ impl P2PCore {
                 // the app offers to create a new one.
                 let row = match row {
                     Ok(r) => r,
-                    Err(e) => { error!("own_devices satırı okunamadı: {}", e); continue; }
+                    Err(e) => { error!("Could not read own_devices row: {}", e); continue; }
                 };
                 let (fp, sign_pk_ed, sign_pk_mldsa, kem_pk_x, kem_pk_mlkem,
                      device_name, is_active, last_seen) = row;
@@ -83,7 +83,7 @@ impl P2PCore {
                 devices: device_infos,
                 primary_device,
             });
-            info!("Identity DB'den yüklendi (public key'ler) — secret key'ler henüz yüklenmedi, load_secret_bundle bekleniyor");
+            info!("Identity loaded from DB (public keys) — secret keys not loaded yet, waiting for load_secret_bundle");
         }
     }
 
@@ -226,7 +226,7 @@ impl P2PCore {
         let bundle: SecretKeyBundle = ciborium::from_reader(bundle_bytes).map_err(|e| e.to_string())?;
 
         let record = self.own_devices.get(&bundle.device_fingerprint).cloned()
-            .ok_or("Bilinmeyen cihaz — önce load_identity_from_db (public key) çalışmalı")?;
+            .ok_or("Unknown device — load_identity_from_db (public key) must run first")?;
 
         let mut sign_sk_ed_bytes: [u8; 32] = bundle.sign_sk_ed25519.as_slice().try_into().map_err(|_| "Bozuk Ed25519 secret key")?;
         let sign_sk_ed25519 = SigningKey::from_bytes(&sign_sk_ed_bytes);
@@ -236,7 +236,7 @@ impl P2PCore {
         // The ML-DSA secret key is stored as a 32-byte seed (see the generate_identity note), and is regenerated deterministically with `from_seed`.
         let sign_sk_mldsa_seed: ml_dsa::Seed = bundle.sign_sk_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA secret key")?;
         let sign_sk_mldsa = MlDsaSigningKey::<MlDsa87>::from_seed(&sign_sk_mldsa_seed);
-        let sign_pk_mldsa_encoded: EncodedVerifyingKey<MlDsa87> = record.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA public key")?;
+        let sign_pk_mldsa_encoded: EncodedVerifyingKey<MlDsa87> = record.sign_pubkey_mldsa.as_slice().try_into().map_err(|_| "Invalid ML-DSA public key (corrupt)")?;
         let sign_pk_mldsa = MlDsaVerifyingKey::<MlDsa87>::decode(&sign_pk_mldsa_encoded);
 
         let mut kem_sk_x_bytes: [u8; 32] = bundle.kem_sk_x25519.as_slice().try_into().map_err(|_| "Bozuk X25519 secret key")?;
@@ -255,7 +255,7 @@ impl P2PCore {
             || kem_pk_x25519.as_bytes().to_vec() != record.kem_pubkey_x25519
             || mlkem_ek_to_bytes(kem_sk_mlkem.encapsulation_key()) != record.kem_pubkey_mlkem
         {
-            return Err("Secret key paketi bu cihazın kayıtlı public key'leriyle eşleşmiyor".to_string());
+            return Err("Secret key bundle does not match this device's stored public keys".to_string());
         }
 
         self.own_device_keys.insert(bundle.device_fingerprint.clone(), DeviceKeys {
@@ -383,9 +383,9 @@ impl P2PCore {
         OsRng.fill_bytes(&mut nonce);
         all.push((nonce.to_vec(), now + PAIRING_WINDOW_MS));
         let v: Vec<String> = all.iter().map(|(n, until)| format!("{}:{}", hex::encode(n), until)).collect();
-        let conn = self.db.as_ref().ok_or("Veritabanı açık değil, eşleşme kodu üretilemedi")?;
+        let conn = self.db.as_ref().ok_or("DB not open, could not generate pairing code")?;
         conn.execute("INSERT OR REPLACE INTO app_meta (k, v) VALUES (?1, ?2)", params!["pairing_nonces", v.join(",")])
-            .map_err(|e| format!("Eşleşme kodu kaydedilemedi: {}", e))?;
+            .map_err(|e| format!("Could not save pairing code: {}", e))?;
         bump_first_contact_gen("pairing_nonces");
         Ok(nonce.to_vec())
     }
@@ -660,10 +660,10 @@ impl P2PCore {
         if !self.own_revokes().iter().any(|r| r.revoked_device_fingerprint == fp) {
             return;
         }
-        info!("İptal edilmiş kardeş cihaz hâlâ gönderiyor, iptal yeniden iletiliyor: {}", crate::log_id(fp));
+        info!("Revoked sibling device still sending, forwarding revocation again: {}", crate::log_id(fp));
         match self.send_identity_exchange_fresh(fp) {
             Ok(()) => { self.last_identity_exchange_reply.insert(key, now); }
-            Err(e) => warn!("İptal yeniden iletilemedi: {}", e),
+            Err(e) => warn!("Could not forward revocation: {}", e),
         }
     }
 
@@ -713,13 +713,13 @@ impl P2PCore {
     pub(crate) fn peek_qr_packet(&self, cbor_data: &[u8]) -> Result<serde_json::Value, String> {
         let packet = QrPacket::from_cbor(cbor_data)?;
         if packet.pairing_nonce.len() != 16 {
-            return Err("Geçersiz kişi kodu (nonce)".to_string());
+            return Err("Invalid contact code (nonce)".to_string());
         }
         if !is_fingerprint_hex(&packet.identity_id) || !is_fingerprint_hex(&packet.device_fingerprint) {
-            return Err("Geçersiz kişi kodu".to_string());
+            return Err("Invalid contact code".to_string());
         }
         if self.my_identity_id().as_deref() == Some(packet.identity_id.as_str()) || self.own_devices.contains_key(&packet.device_fingerprint) {
-            return Err("Kendi kodunuzu kişi olarak ekleyemezsiniz".to_string());
+            return Err("You cannot add your own code as a contact".to_string());
         }
         let short = |id: &str| hex::decode(id).map(|raw| identity::format_short_code(&raw)).unwrap_or_default();
         // the name in a code is the code author's choice; for an
@@ -744,7 +744,7 @@ impl P2PCore {
     /// finish in the background, and the chat screen shows "connecting".
     pub(crate) fn pair_with_code(&mut self, identity_id: String, device_fingerprint: String, device_name: &str, rendezvous_node: &str, known_relays: &[String], nonce: &[u8]) -> Result<(String, String, String), String> {
         if nonce.len() != 16 {
-            return Err("Geçersiz kişi kodu (nonce)".to_string());
+            return Err("Invalid contact code (nonce)".to_string());
         }
         // Peer-chosen text: it is returned to the UI as the chat title.
         let device_name = sanitize_display_name(device_name).unwrap_or_default();
@@ -761,7 +761,7 @@ impl P2PCore {
         self.register_contact_from_pairing(identity_id.clone(), device_fingerprint.clone(), device_name.clone())?;
         if known_active {
             if let Err(e) = self.send_identity_exchange_fresh(&device_fingerprint) {
-                error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+                error!("IdentityExchange send temporarily failed (will retry): {}", e);
             }
             return Ok((identity_id, device_fingerprint, device_name));
         }
@@ -784,7 +784,7 @@ impl P2PCore {
         // Not fatal: the contact is registered, and `publish_envelope` queues
         // the packet and retries it from `poll_events`.
         if let Err(e) = self.send_identity_exchange_fresh(&device_fingerprint) {
-            error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+            error!("IdentityExchange send temporarily failed (will retry): {}", e);
         }
         // Multi-device (1.7 delta): the new contact is propagated to my sibling devices too (a no-op for a single device).
         self.sync_to_siblings();
@@ -915,17 +915,17 @@ impl P2PCore {
         // Our own packet, reflected back: with its signed DeviceAdd it used to
         // be stored as a sibling of ourselves.
         if self.own_device_keys.contains_key(&exchange.device_fingerprint) {
-            return Err("IdentityExchange kendi cihazımızdan geldi, yok sayıldı".to_string());
+            return Err("IdentityExchange from our own device, unknown sender, ignored".to_string());
         }
         // Key lengths and fingerprint, see `identity::keys_match_fingerprint`.
         if !exchange.keys_match_fingerprint() {
-            return Err(format!("IdentityExchange anahtarları fingerprint ile tutarsız: {}", exchange.device_fingerprint));
+            return Err(format!("IdentityExchange keys mismatch fingerprint: {}", exchange.device_fingerprint));
         }
         // same window as a HandshakeInit (it also waits in the mailbox).
         let now = current_time_ms();
         let window = if exchange.timestamp < now { HANDSHAKE_MAX_AGE_MS } else { HANDSHAKE_MAX_SKEW_MS };
         if now.abs_diff(exchange.timestamp) > window {
-            return Err("IdentityExchange timestamp'i pencere dışında, reddedildi".to_string());
+            return Err("IdentityExchange timestamp outside window, rejected".to_string());
         }
         // Signed by the device itself: the packet travels unsealed, and the
         // fingerprint covers neither `device_name` nor `identity_id`. A
@@ -939,7 +939,7 @@ impl P2PCore {
             ),
             &exchange.signature, &exchange.signature_pq,
             &exchange.sign_pubkey_ed25519, &exchange.sign_pubkey_mldsa,
-        ).map_err(|e| format!("IdentityExchange imzası geçersiz: {}", e))?;
+        ).map_err(|e| format!("IdentityExchange signature invalid: {}", e))?;
         // No `record_peer_id_if_known` here. The signature proves who WROTE the packet, not who DELIVERED it. A matching fingerprint only proves the
         // public keys are consistent. The keys are public, so any contact who knows this device could build this packet and get its own PeerId mapped
         // to it, then take our direct sends to the device and fake AckBatch receipts. The signed Handshake that follows maps the connection, and a
@@ -981,7 +981,7 @@ impl P2PCore {
                     .and_then(|cid| self.contacts.get(cid))
                     .map_or(false, |c| c.is_known_active(&fp));
                 if !paired_again {
-                    return Err("IdentityExchange iptal edilmiş bir cihazdan geldi, yok sayıldı".to_string());
+                    return Err("IdentityExchange from a revoked device, ignored".to_string());
                 }
             }
         }
@@ -990,7 +990,7 @@ impl P2PCore {
         // verifies, and would make it a device of the contact again.
         // (The link the user is making now may bring back a device revoked earlier.)
         if !is_pending_link && self.owner_revoked(&exchange.identity_id, &fp) {
-            return Err("IdentityExchange sahibinin iptal ettiği bir cihazdan geldi, yok sayıldı".to_string());
+            return Err("IdentityExchange from a device its owner withdrew: unknown source, ignored".to_string());
         }
         // Checked before `as_sibling` is computed: a sibling that introduces
         // itself with its signed DeviceAdd is a sibling from this first packet.
@@ -1051,15 +1051,15 @@ impl P2PCore {
                 // accepted where the signer is already known (`signed`), and rejected as a first device.
                 if exchange.identity_id != fp {
                     if !Self::identity_proved_by_root(exchange) {
-                        return Err("IdentityExchange kimlik iddiası cihaza bağlı değil".to_string());
+                        return Err("IdentityExchange: identity claim is not bound to the device".to_string());
                     }
                 }
                 if my_id.as_deref() == Some(exchange.identity_id.as_str()) {
-                    return Err("IdentityExchange kendi kimliğimizi imzalı DeviceAdd olmadan iddia ediyor".to_string());
+                    return Err("IdentityExchange claims our identity without a signed DeviceAdd".to_string());
                 }
                 if let Some(prev) = self.known_remote_devices.get(&fp) {
                     if prev.identity_id != exchange.identity_id {
-                        return Err("IdentityExchange bilinen bir cihazın kimliğini imzasız değiştirmeye çalışıyor".to_string());
+                        return Err("IdentityExchange tries to change a known device's identity unsigned".to_string());
                     }
                 }
             }
@@ -1095,15 +1095,15 @@ impl P2PCore {
             let signed_add = self.sign_device_add(&fp, &exchange.link_consent, &exchange.link_consent_pq)
                 .and_then(|da| match Self::add_has_consent(&da, &exchange.sign_pubkey_ed25519, &exchange.sign_pubkey_mldsa) {
                     true => Ok(da),
-                    false => Err("yeni cihazın onay imzası yok ya da geçersiz".to_string()),
+                    false => Err("new device approval signature missing or invalid".to_string()),
                 });
             match signed_add {
                 Ok(da) => link_add = Some(da),
                 Err(e) if !active_sibling => {
-                    warn!("Cihaz bağlama henüz tamamlanamadı, cihaz kaydedilmedi: {}", e);
+                    warn!("Device linking not complete yet, device not saved: {}", e);
                     return Ok(());
                 }
-                Err(e) => error!("sign_device_add başarısız (cihaz bağlama tamamlanamadı): {}", e),
+                Err(e) => error!("sign_device_add failed (device linking not completed): {}", e),
             }
             // The device consented, so the contact it was before the link
             // (its own identity, this device only) is a ghost now. Removed
@@ -1115,7 +1115,7 @@ impl P2PCore {
                     .collect();
                 for cid in ghosts {
                     if let Err(e) = self.delete_contact(&cid, false) {
-                        warn!("Bağlanan cihazın eski kişi kaydı silinemedi: {}", e);
+                        warn!("Could not delete old contact record of linked device: {}", e);
                     }
                 }
             }
@@ -1179,7 +1179,7 @@ impl P2PCore {
                     && !self.owner_revoked(&revoke.identity_id, &revoke.revoked_device_fingerprint)
                 {
                     if let Err(e) = self.apply_device_revoke_notice(revoke, &fp) {
-                        warn!("IdentityExchange ile gelen iptal uygulanmadı: {}", e);
+                        warn!("Revocation carried by IdentityExchange not applied: {}", e);
                     }
                 }
             }
@@ -1193,7 +1193,7 @@ impl P2PCore {
                 match self.apply_device_revoke_notice(&revoke, &fp) {
                     Ok(true) => return Ok(()),
                     Ok(false) => {}
-                    Err(e) => warn!("IdentityExchange ile gelen kendi iptalimiz uygulanmadı: {}", e),
+                    Err(e) => warn!("Our own revocation carried by IdentityExchange not applied: {}", e),
                 }
             }
         }
@@ -1201,7 +1201,7 @@ impl P2PCore {
             // See `approve_device_link` docs. The QR is fingerprint-only, so the new device's REAL keys are only learned here (in this IdentityExchange). The rest of
             // the linking flow (signed DeviceAdd, full sync to the new device, announcement to contacts) can only complete now.
             if let Some(my_identity_id) = my_id.clone() {
-                match link_add.ok_or_else(|| "yeni cihazın onayı yok".to_string()) {
+                match link_add.ok_or_else(|| "new device approval not found".to_string()) {
                     Ok(device_add) => {
                         // see `device_add_proof`: the first device cannot
                         // make this add again by itself.
@@ -1218,7 +1218,7 @@ impl P2PCore {
                             sync: parts.next().unwrap_or_else(|| self.build_sync_payload()),
                         };
                         if let Err(e) = self.send_message_content(fp.clone(), &grant, None) {
-                            error!("DeviceLinkGrant gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+                            error!("DeviceLinkGrant send temporarily failed (will retry): {}", e);
                         }
                         // The other parts: `sync_to_siblings` below sends every part to every sibling, this device included.
                         // Announce the new device to all contacts.
@@ -1226,7 +1226,7 @@ impl P2PCore {
                         // Existing sibling devices should learn about the new device too (3+ devices).
                         self.sync_to_siblings();
                     }
-                    Err(e) => error!("sign_device_add başarısız (cihaz bağlama tamamlanamadı): {}", e),
+                    Err(e) => error!("sign_device_add failed (device linking not completed): {}", e),
                 }
             }
         }
@@ -1253,7 +1253,7 @@ impl P2PCore {
         let peer_readded_us = !first_contact
             && !as_sibling
             && !self.pairing_mailbox_subs.contains_key(&exchange.device_fingerprint);
-        info!("IdentityExchange işlendi: peer={} knew_before={} as_sibling={} reply_due={} peer_readded_us={} we_have_pairing_sub={}",
+        info!("IdentityExchange processed: peer={} knew_before={} as_sibling={} reply_due={} peer_readded_us={} we_have_pairing_sub={}",
             &exchange.device_fingerprint[..8.min(exchange.device_fingerprint.len())], knew_device_before, as_sibling, reply_due,
             peer_readded_us, self.pairing_mailbox_subs.contains_key(&exchange.device_fingerprint));
         if (first_contact || peer_readded_us || link_proved) && reply_due {
@@ -1292,7 +1292,7 @@ impl P2PCore {
                     display_name: self.own_display_name(),
                 };
                 if let Err(e) = self.send_message_content(exchange.device_fingerprint.clone(), &content, None) {
-                    error!("Eşleşme sonrası ProfileUpdate gönderilemedi: {}", e);
+                    error!("ProfileUpdate could not be sent after pairing: {}", e);
                 }
             }
         }
@@ -1319,7 +1319,7 @@ impl P2PCore {
             && !self.ratchets.contains_key(&exchange.device_fingerprint)
         {
             if let Err(e) = self.initiate_handshake_with(&exchange.device_fingerprint) {
-                warn!("Eşleşme sonrası el sıkışma başlatılamadı (kuyruğa alındı, yeniden denenecek): {}", e);
+                warn!("Could not start handshake after pairing (queued, will retry): {}", e);
             }
         }
 
@@ -1403,7 +1403,7 @@ impl P2PCore {
     /// Manual entry: the contact code, fingerprint and rendezvous address as one `|`-separated line, the simplest format a person can type by hand.
     /// This format is not formally specified. See `process_qr_packet`. Returns `(identity_id, device_fingerprint, device_name)`.
     pub(crate) fn process_manual_entry(&mut self, text: &str) -> Result<(String, String, String), String> {
-        const FORMAT_ERR: &str = "Beklenen format: identity_id|device_fingerprint|nonce|device_name|rendezvous_node";
+        const FORMAT_ERR: &str = "Expected format: identity_id|device_fingerprint|nonce|device_name|rendezvous_node";
         // The device name is free text and may itself contain `|`: the first
         // two fields are taken from the left, the address from the right.
         let (head, rendezvous_node) = text.trim().rsplit_once('|').ok_or(FORMAT_ERR)?;
@@ -1422,10 +1422,10 @@ impl P2PCore {
         //
         // Both values come from outside (QR, typed code, IdentityExchange, group vouching), and no caller validated them. Scanning our own code made a contact of ourselves.
         if !is_fingerprint_hex(&identity_id) || !is_fingerprint_hex(&device_fingerprint) {
-            return Err("Geçersiz kişi kodu".to_string());
+            return Err("Invalid contact code".to_string());
         }
         if self.my_identity_id().as_deref() == Some(identity_id.as_str()) || self.own_devices.contains_key(&device_fingerprint) {
-            return Err("Kendi kodunuzu kişi olarak ekleyemezsiniz".to_string());
+            return Err("You cannot add your own code as a contact".to_string());
         }
         let now = current_time_ms();
         if let Some(contact_id) = self.identity_to_contact.get(&identity_id).cloned() {
@@ -1437,14 +1437,14 @@ impl P2PCore {
             // and the attacker's own fingerprint made the attacker that
             // contact. A real new device arrives with a signed DeviceAdd in
             // its IdentityExchange.
-            let contact = self.contacts.get_mut(&contact_id).ok_or("Kişi bulunamadı")?;
+            let contact = self.contacts.get_mut(&contact_id).ok_or("Contact not found")?;
             match contact.find_device(&device_fingerprint).map(|d| (d.status, d.owner_revoked)) {
                 Some((contact::KnownDeviceStatus::Active, _)) => return Ok(()),
-                Some((_, true)) => return Err("Bu cihaz sahibi tarafından iptal edilmiş".to_string()),
+                Some((_, true)) => return Err("This device was revoked by its owner".to_string()),
                 Some(_) => {}
                 // An empty device list is no TOFU slot either: a public fp of
                 // an unrelated device became this contact's Active device.
-                None => return Err("Bu kod, kişilerinizdeki bir kimliği başka bir cihazla taşıyor. Gerçekten yeni bir cihazsa kişiyi silip yeniden ekleyin".to_string()),
+                None => return Err("This code carries an identity from your contacts on another device. If it is really a new device, delete the contact and add again".to_string()),
             }
             contact.add_device_unverified(device_fingerprint, now);
             let contact = contact.clone();
@@ -1455,7 +1455,7 @@ impl P2PCore {
         // Every caller's new contact: the scanning side got no error while
         // the other side refused it at the cap, and the pairing hung.
         if self.contacts.len() >= MAX_CONTACTS {
-            return Err(format!("Kişi sınırına ulaşıldı ({})", MAX_CONTACTS));
+            return Err(format!("Contact list too large ({} max)", MAX_CONTACTS));
         }
 
         let contact_id = self.new_contact_id(&identity_id);

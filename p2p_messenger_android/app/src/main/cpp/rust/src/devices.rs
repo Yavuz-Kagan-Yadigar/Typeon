@@ -276,22 +276,22 @@ impl P2PCore {
         let actor = self.own_devices.get(actor_fp)
             .or_else(|| self.known_remote_devices.get(actor_fp))
             .cloned()
-            .ok_or("İmzalayan (actor) cihaz bilinmiyor")?;
+            .ok_or("Signing (actor) device unknown")?;
         if actor.identity_id != identity_id {
-            return Err("İmzalayan cihaz bu kimliğe ait değil".to_string());
+            return Err("Signing device does not belong to this identity".to_string());
         }
         if !actor.is_active {
-            return Err("İmzalayan cihaz iptal edilmiş".to_string());
+            return Err("Signing device has been revoked".to_string());
         }
         // Only the identity's first device (fingerprint == identity id) adds
         // and revokes. Any active device could: a stolen secondary revoked the
         // primary and the siblings (they wiped themselves) and added devices
         // that outlived its own revocation. The first device is never revoked.
         if actor_fp != identity_id {
-            return Err("Cihaz ekleme/iptal yalnız kimliğin ana cihazı tarafından imzalanabilir".to_string());
+            return Err("Device add/revoke can only be signed by the identity's primary device".to_string());
         }
         if revoke && subject_fp == identity_id {
-            return Err("Ana cihaz iptal edilemez".to_string());
+            return Err("The primary device cannot be revoked".to_string());
         }
         // A root revokes only its own devices: the signature proves who
         // signed, not that the subject is theirs.
@@ -300,7 +300,7 @@ impl P2PCore {
             .map(|d| d.identity_id.as_str())
             .or_else(|| self.verified_device_adds.get(subject_fp).map(|s| s.as_str()));
         if revoke && subject_owner.map_or(false, |owner| owner != identity_id) {
-            return Err("İptal edilen cihaz bu kimliğe ait değil".to_string());
+            return Err("Device to revoke does not belong to this identity".to_string());
         }
         let msg = Self::device_auth_signing_bytes(identity_id, subject_fp, actor_fp, revoke);
         verify_hybrid_signature(&msg, sig, sig_pq, &actor)
@@ -311,7 +311,7 @@ impl P2PCore {
     pub(crate) fn build_device_link_request(&mut self) -> Result<Vec<u8>, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let rec = self.own_devices.get(&own_fp).ok_or("Missing own device record")?.clone();
-        let rendezvous = self.get_node_address().ok_or("Ağ adresi henüz hazır değil")?;
+        let rendezvous = self.get_node_address().ok_or("Network address not ready yet")?;
         let known_relays = self.freshest_relays();
         // One nonce per open window: a QR drawn again (the screen retries
         // until the address is ready) must not void the code already scanned.
@@ -347,12 +347,12 @@ impl P2PCore {
     pub(crate) fn approve_device_link(&mut self, request_cbor: &[u8]) -> Result<(String, String), String> {
         let req = DeviceLinkRequest::from_cbor(request_cbor)?;
         if req.nonce.len() != 16 {
-            return Err("Geçersiz cihaz bağlama kodu (nonce)".to_string());
+            return Err("Invalid device link code (nonce)".to_string());
         }
         if !is_fingerprint_hex(&req.device_fingerprint) {
-            return Err("Geçersiz cihaz kodu".to_string());
+            return Err("Invalid device code".to_string());
         }
-        let my_id = self.my_identity_id().ok_or("Önce bir kimlik oluşturun")?;
+        let my_id = self.my_identity_id().ok_or("Create an identity first")?;
         let own_fp = self.get_active_own_device_fingerprint()?;
         // Before any side effect: on a secondary the link can
         // never complete (`sign_device_add` refuses), and both devices waited
@@ -361,14 +361,14 @@ impl P2PCore {
             return Err("Only the primary device can do this".to_string());
         }
         if req.device_fingerprint == own_fp {
-            return Err("Bu zaten bu cihaz".to_string());
+            return Err("This is already this device".to_string());
         }
         // Active device limit. Note: unlike `sibling_active_devices`, this does NOT leave out siblings that have not been seen for a week. They are still active.
         let active_count = 1 + self.known_remote_devices.values()
             .filter(|d| d.identity_id == my_id && d.is_active && d.device_fingerprint != own_fp)
             .count();
         if active_count >= identity::MAX_ACTIVE_DEVICES {
-            return Err(format!("En fazla {} aktif cihaz olabilir", identity::MAX_ACTIVE_DEVICES));
+            return Err(format!("At most {} active devices allowed", identity::MAX_ACTIVE_DEVICES));
         }
         let new_fp = req.device_fingerprint.clone();
 
@@ -381,7 +381,7 @@ impl P2PCore {
             .filter(|c| c.find_device(&new_fp).is_some())
             .any(|c| c.trusted_identity_id != new_fp || self.contact_fingerprints_all(c).iter().any(|f| *f != new_fp));
         if foreign {
-            return Err("Bu cihaz kişilerinizden birine ait".to_string());
+            return Err("This device belongs to one of your contacts".to_string());
         }
 
         self.dial_pairing_addr(&new_fp, &req.rendezvous_node, &req.known_relays);
@@ -401,7 +401,7 @@ impl P2PCore {
         // Fresh: after a failed link or an unlink, the identical packet of the
         // earlier attempt still counted as deposited and was not sent.
         if let Err(e) = self.send_identity_exchange_fresh(&new_fp) {
-            error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+            error!("IdentityExchange send temporarily failed (will retry): {}", e);
         }
 
         Ok((new_fp, sanitize_display_name(&req.device_name).unwrap_or_default()))
@@ -467,7 +467,7 @@ impl P2PCore {
         if device_add.identity_id != identity_id
             || device_add.new_device_fingerprint != own_fp
             || device_add.added_by != primary_fp {
-            return Err("DeviceLinkGrant alanları tutarsız".to_string());
+            return Err("DeviceLinkGrant fields inconsistent".to_string());
         }
         // Verify the signature with the primary device's key (learned from the IdentityExchange during pairing).
         self.verify_device_auth(identity_id, &own_fp, primary_fp, &device_add.signature, &device_add.signature_pq, false)?;
@@ -475,7 +475,7 @@ impl P2PCore {
         // nobody else accepts this add.
         let own_rec = self.own_devices.get(&own_fp).ok_or("Missing own device record")?;
         if !Self::add_has_consent(device_add, &own_rec.sign_pubkey_ed25519, &own_rec.sign_pubkey_mldsa) {
-            return Err("DeviceLinkGrant reddedildi: bu cihazın onay imzası yok".to_string());
+            return Err("DeviceLinkGrant rejected: this device has no consent signature".to_string());
         }
 
         // Already adopted: idempotent. Only merge the sync.
@@ -489,15 +489,15 @@ impl P2PCore {
         // archive key and (on request) all history. So a device that already
         // has contacts of its own is never moved to another identity.
         if self.contacts.values().any(|c| c.trusted_identity_id != identity_id) {
-            return Err("DeviceLinkGrant reddedildi: bu cihazın kendi kişileri var, başka bir kimliğe bağlanamaz".to_string());
+            return Err("DeviceLinkGrant rejected: this device has its own contacts, cannot link to another identity".to_string());
         }
         if current_time_ms() > self.link_request_open_until {
-            return Err("İstenmemiş DeviceLinkGrant: bu cihaz bağlama QR'ı göstermiyor".to_string());
+            return Err("Unsolicited DeviceLinkGrant: this device is not showing a link QR".to_string());
         }
         // The nonce is in the QR only: a grant without it comes from a device
         // that did not scan the code this device is showing.
         if self.link_request_nonce.len() != 16 || nonce != self.link_request_nonce.as_slice() {
-            return Err("DeviceLinkGrant reddedildi: QR'daki nonce ile eşleşmiyor".to_string());
+            return Err("DeviceLinkGrant rejected: nonce does not match the QR".to_string());
         }
         let old_id = self.my_identity_id().unwrap_or_default();
         // During pairing, the primary may have been temporarily saved as a CONTACT. Remove it, since it is now a sibling device.
@@ -507,7 +507,7 @@ impl P2PCore {
         // changed, in memory or on disk, and the link window stays open: the
         // primary must not believe in a link this device forgets on restart.
         if let Some(conn) = self.db.as_ref() {
-            let tx = conn.unchecked_transaction().map_err(|e| format!("Kimlik değişimi diske yazılamadı: {}", e))?;
+            let tx = conn.unchecked_transaction().map_err(|e| format!("Identity exchange could not be written to disk: {}", e))?;
             tx.execute("DELETE FROM identities WHERE id = ?1", params![old_id])
                 .and_then(|_| tx.execute(
                     "INSERT OR REPLACE INTO identities (id, primary_device) VALUES (?1, ?2)",
@@ -522,7 +522,7 @@ impl P2PCore {
                     None => Ok(0),
                 })
                 .and_then(|_| tx.commit())
-                .map_err(|e| format!("Kimlik değişimi diske yazılamadı: {}", e))?;
+                .map_err(|e| format!("Identity exchange could not be written to disk: {}", e))?;
         }
         self.set_link_request_open_until(0);
         // Update memory.
@@ -553,7 +553,7 @@ impl P2PCore {
         self.announce_self_to_all_contacts();
         // The sibling devices I learned about should also know me and each other (3+ devices).
         self.sync_to_siblings();
-        info!("Bu cihaz {} kimliğine ikincil cihaz olarak bağlandı", crate::log_id(&identity_id));
+        info!("This device linked to identity {} as a secondary device", crate::log_id(&identity_id));
         Ok(true)
     }
 
@@ -563,17 +563,17 @@ impl P2PCore {
             &device_add.signature, &device_add.signature_pq, false,
         )?;
         if self.owner_revoked(&device_add.identity_id, &device_add.new_device_fingerprint) {
-            return Err("DeviceAddNotice: cihaz sahibi tarafından iptal edilmiş".to_string());
+            return Err("DeviceAddNotice: device was revoked by its owner".to_string());
         }
         // Do the transferred keys match the claimed fingerprint?
         if device.device_fingerprint != device_add.new_device_fingerprint {
-            return Err("DeviceAddNotice: cihaz fingerprint'i DeviceAdd ile uyuşmuyor".to_string());
+            return Err("DeviceAddNotice: device fingerprint does not match DeviceAdd".to_string());
         }
         if !device.keys_match_fingerprint() {
-            return Err("DeviceAddNotice: anahtarlar fingerprint ile tutarsız".to_string());
+            return Err("DeviceAddNotice: keys inconsistent with fingerprint".to_string());
         }
         if !Self::add_has_consent(device_add, &device.sign_pubkey_ed25519, &device.sign_pubkey_mldsa) {
-            return Err("DeviceAddNotice: eklenen cihazın onay imzası yok".to_string());
+            return Err("DeviceAddNotice: added device has no consent signature".to_string());
         }
         // Security / DoS: one contact (identity) must NOT be able to claim an UNLIMITED number of devices, which would make us fan out every message
         // N times to it. If we already know this device (an idempotent repeat), let it through. If it is a NEW device and the identity is already at
@@ -582,7 +582,7 @@ impl P2PCore {
         // CLAIMED identity, so anyone could claim a third party's device this way.) A real move comes with the device's own IdentityExchange.
         if let Some(rec) = self.known_remote_devices.get(&device.device_fingerprint) {
             if rec.identity_id != device_add.identity_id || !rec.is_active {
-                return Err("DeviceAddNotice: cihaz başka bir kimlik altında ya da iptal edilmiş olarak kayıtlı".to_string());
+                return Err("DeviceAddNotice: device is registered under another identity or as revoked".to_string());
             }
         }
         let already_known = self.known_remote_devices.contains_key(&device.device_fingerprint);
@@ -592,7 +592,7 @@ impl P2PCore {
                 .count();
             if active_for_identity >= identity::MAX_ACTIVE_DEVICES {
                 return Err(format!(
-                    "DeviceAddNotice reddedildi: {} için aktif cihaz üst sınırı ({})",
+                    "DeviceAddNotice rejected: active device limit for {} reached ({})",
                     device_add.identity_id, identity::MAX_ACTIVE_DEVICES
                 ));
             }
@@ -602,7 +602,7 @@ impl P2PCore {
                 .filter(|d| d.identity_id == device_add.identity_id)
                 .count();
             if all_for_identity >= 4 * identity::MAX_ACTIVE_DEVICES {
-                return Err(format!("DeviceAddNotice reddedildi: {} için cihaz kaydı üst sınırı", device_add.identity_id));
+                return Err(format!("DeviceAddNotice rejected: device registration limit hit for {}", device_add.identity_id));
             }
         }
         let now = current_time_ms();
@@ -662,10 +662,10 @@ impl P2PCore {
             let from_sibling = self.known_remote_devices.get(sender_fp)
                 .map_or(false, |d| d.is_active && Some(&d.identity_id) == my_id.as_ref());
             if !from_sibling {
-                return Err("Kendi iptalimiz kardeş olmayan bir cihazdan geldi".to_string());
+                return Err("Our own revocation came from a non-sibling device".to_string());
             }
             warn!(
-                "BU CİHAZ kendi kimliği ({}) tarafından iptal edildi (revoked_by={}) — tüm yerel durum siliniyor",
+                "THIS DEVICE was revoked by its own identity ({}) (revoked_by={}) — wiping all local state",
                 crate::log_id(&revoke.identity_id), crate::log_id(&revoke.revoked_by)
             );
             self.wipe_all_local_state();

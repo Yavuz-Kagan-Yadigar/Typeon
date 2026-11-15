@@ -1141,7 +1141,7 @@ class GroupChatActivity : AppCompatActivity() {
             try {
                 // Foreign `content://` bytes: capped, else the avatar fails (same toast).
                 val copied = contentResolver.openInputStream(uri)?.use { it.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES) } ?: false
-                if (!copied) throw java.io.IOException("Dosya açılamadı")
+                if (!copied) throw java.io.IOException("File could not be opened")
                 val compressed = ImagePreview.compressFile(tempFile, AVATAR_MAX_DIMENSION, AVATAR_JPEG_QUALITY)
                 withContext(Dispatchers.Main) { setGroupAvatar(compressed) }
             } catch (e: Exception) {
@@ -1202,7 +1202,7 @@ class GroupChatActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.msg_no_contacts_to_add, Toast.LENGTH_LONG).show()
             return
         }
-        val names = candidates.map { it.optString("display_name", "Bilinmeyen") }.toTypedArray()
+        val names = candidates.map { it.optString("display_name", getString(R.string.lbl_unknown)) }.toTypedArray()
         val identityIds = candidates.map { it.optString("identity_id") }
         val checked = BooleanArray(names.size)
 

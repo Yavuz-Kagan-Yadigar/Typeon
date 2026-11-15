@@ -323,7 +323,7 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     }
     if !plain_path.exists() {
         info!(
-            "get_attachment_plaintext_path: {} önbellekte yok, {} adresinden çözülüyor",
+            "get_attachment_plaintext_path: {} not in cache, decrypting from {}",
             plain_path.display(), enc_path.display()
         );
         let tmp_path = plain_path.with_file_name(format!(
@@ -333,7 +333,7 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
         ));
         let chunk_size = core_lock().file_chunk_size(file_id);
         if let Err(e) = attachments::decrypt_file_from_disk_with(&enc_path, &tmp_path, &file_key, &sha256_hex, chunk_size) {
-            error!("get_attachment_plaintext_path: decrypt_file_from_disk başarısız (file_id={}): {}", file_id, e);
+            error!("get_attachment_plaintext_path: decrypt_file_from_disk failed (file_id={}): {}", file_id, e);
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
         }

@@ -54,11 +54,11 @@ impl P2PCore {
         // Root, chain and ratchet secret keys are wiped when dropped.
         let plaintext = match ciborium_bytes(&persistable) {
             Ok(b) => zeroize::Zeroizing::new(b),
-            Err(e) => { error!("Ratchet state serileştirilemedi: {}", e); return false; }
+            Err(e) => { error!("Ratchet state could not be serialized: {}", e); return false; }
         };
 
         let Some((encrypted, nonce_bytes)) = seal_with(&enc_key, plaintext.as_slice()) else {
-            error!("Ratchet state şifrelenemedi");
+            error!("Ratchet state could not be encrypted");
             return false;
         };
 
@@ -78,7 +78,7 @@ impl P2PCore {
             let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         }
         if let Err(e) = &written {
-            error!("Ratchet state yazılamadı ({}): {}", crate::log_id(&peer_device_fingerprint), e);
+            error!("Ratchet state could not be written ({}): {}", crate::log_id(&peer_device_fingerprint), e);
         }
         written.is_ok()
     }
@@ -106,7 +106,7 @@ impl P2PCore {
         // If stored sessions exist and none of them opens, the key is wrong: the gate stays shut. Otherwise the next send would replace them
         // one by one. A single bad row among good ones is dropped, as before.
         if rows > 0 && unopened == rows {
-            error!("Hiçbir oturum durumu çözülemedi ({} satır): anahtar yanlış, gönderim kapısı kapalı", rows);
+            error!("No session state could be decrypted ({} rows): wrong key, send gate closed", rows);
             self.attachment_events.push(serde_json::json!({"type": "session_load_failed", "rows": rows}).to_string());
             return;
         }
@@ -157,16 +157,16 @@ impl P2PCore {
                 let nonce = Nonce::from_slice(&nonce_bytes);
                 let plaintext = match cipher.decrypt(nonce, encrypted.as_slice()) {
                     Ok(p) => zeroize::Zeroizing::new(p),
-                    Err(_) => { unopened += 1; error!("Ratchet state çözülemedi ({}), atlanıyor", crate::log_id(&peer_fp)); continue; }
+                    Err(_) => { unopened += 1; error!("Ratchet state could not be decrypted ({}), skipping", crate::log_id(&peer_fp)); continue; }
                 };
                 let persistable: ratchet::SerializableRatchetState = match ciborium::from_reader(plaintext.as_slice()) {
                     Ok(p) => p,
-                    Err(e) => { error!("Ratchet state ayrıştırılamadı ({}): {}", crate::log_id(&peer_fp), e); continue; }
+                    Err(e) => { error!("Ratchet state could not be parsed ({}): {}", crate::log_id(&peer_fp), e); continue; }
                 };
                 let skipped_keys = self.load_skipped_keys_from_db(&peer_fp);
                 match DeviceRatchetState::from_persistable(persistable, skipped_keys) {
                     Ok(state) => loaded.push((peer_fp, state)),
-                    Err(e) => error!("Ratchet state yeniden oluşturulamadı ({}): {}", crate::log_id(&peer_fp), e),
+                    Err(e) => error!("Ratchet state could not be rebuilt ({}): {}", crate::log_id(&peer_fp), e),
                 }
             }
         }
@@ -194,8 +194,8 @@ impl P2PCore {
         // Sealed like `server_archive_queue`. It used to be plain CBOR, so every sent message sat readable on disk until acked.
         let content_cbor = match ciborium_bytes(content).map(|b| self.seal_local_blob(&b)) {
             Ok(Some(b)) => b,
-            Ok(None) => { error!("Kalıcı yeniden deneme kaydı serileştirilemedi: şifreleme anahtarı yok"); return; }
-            Err(e) => { error!("Kalıcı yeniden deneme kaydı serileştirilemedi: {}", e); return; }
+            Ok(None) => { error!("Persistent retry record could not be serialized: no encryption key"); return; }
+            Err(e) => { error!("Persistent retry record could not be serialized: {}", e); return; }
         };
         if let Err(e) = conn.execute(
             "INSERT OR REPLACE INTO pending_durable_retries (message_id, peer_device_fingerprint, content_cbor, created_at, local_message_id)
@@ -203,7 +203,7 @@ impl P2PCore {
             params![message_id, peer_device_fingerprint, content_cbor, original_sent_at as i64, group_row_id(content)],
         ) {
             // The memory copy still retries. Only a process death loses it now.
-            error!("Kalıcı yeniden deneme kaydı yazılamadı ({}): {}", message_id, e);
+            error!("Persistent retry record could not be written ({}): {}", message_id, e);
         }
     }
 
@@ -257,15 +257,15 @@ impl P2PCore {
         // Sealed like `server_archive_queue`. It used to be plain CBOR, so every sent message sat readable on disk until acked.
         let content_cbor = match ciborium_bytes(content).map(|b| self.seal_local_blob(&b)) {
             Ok(Some(b)) => b,
-            Ok(None) => { error!("Kalıcı grup mesaj kuyruğu kaydı serileştirilemedi: şifreleme anahtarı yok"); return; }
-            Err(e) => { error!("Kalıcı grup mesaj kuyruğu kaydı serileştirilemedi: {}", e); return; }
+            Ok(None) => { error!("Persistent group message queue record could not be serialized: no encryption key"); return; }
+            Err(e) => { error!("Persistent group message queue record could not be serialized: {}", e); return; }
         };
         if let Err(e) = conn.execute(
             "INSERT INTO pending_group_messages (group_id, member_identity_id, content_cbor, created_at, local_message_id)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![group_id, member_identity_id, content_cbor, current_time_ms() as i64, group_row_id(content)],
         ) {
-            error!("Kalıcı grup mesaj kuyruğu kaydı yazılamadı (group={}): {}", group_id, e);
+            error!("Persistent group message queue record could not be written (group={}): {}", group_id, e);
         }
     }
 
@@ -340,7 +340,7 @@ impl P2PCore {
                 Err(e) => {
                     // Dropped like the durable-retry twin. If left in place, it would be read again on every start, and the "oldest row" eviction
                     // would then remove it instead of the entry evicted from memory.
-                    error!("Kalıcı grup mesaj kuyruğu kaydı ayrıştırılamadı, satır atılıyor: {}", e);
+                    error!("Persistent group message queue record could not be parsed, dropping row: {}", e);
                     if let Some(conn) = &self.db {
                         let _ = conn.execute("DELETE FROM pending_group_messages WHERE id = ?1", params![row_id]);
                     }
@@ -350,7 +350,7 @@ impl P2PCore {
             self.pending_group_messages.entry((group_id, member_identity_id)).or_default().push(content);
             count += 1;
         }
-        info!("Kalıcı grup mesaj kuyruğundan {} girdi geri yüklendi", count);
+        info!("Restored {} entries from persistent group message queue", count);
     }
 
     /// Called at app start, at exactly the same moment as the ratchet states (see the JNI `setSkippedKeyEncryptionKey`. Without ratchets we
@@ -381,7 +381,7 @@ impl P2PCore {
         let (Ok(own_fp), Some(own_identity_id)) = (self.get_active_own_device_fingerprint(), self.my_identity_id()) else { return };
         // Checked once, and reported, instead of silently returning inside the loop.
         if !self.own_device_keys.contains_key(&own_fp) {
-            error!("Grup senkronları yeniden kuyruklanamadı: kendi cihaz anahtarları yok");
+            error!("Group syncs could not be requeued: no own device keys");
             return;
         }
         let founded: Vec<Group> = self.groups.values()
@@ -422,7 +422,7 @@ impl P2PCore {
                 }
             }
             if let Err(e) = conn.execute("DELETE FROM pending_durable_retries WHERE created_at < ?1", params![cutoff]) {
-                error!("Süresi dolmuş kalıcı yeniden deneme kayıtları silinemedi: {}", e);
+                error!("Expired persistent retry records could not be deleted: {}", e);
             }
             // Read the keys of every row first (small), then the oldest 1000 that would really be sent now. A plain `LIMIT 1000` read rows of stale
             // devices or rows already in memory, and the rest never came through.
@@ -461,7 +461,7 @@ impl P2PCore {
         if loaded.is_empty() {
             return;
         }
-        info!("Kalıcı yeniden deneme kuyruğundan {} girdi geri yükleniyor", loaded.len());
+        info!("Restoring {} entries from persistent retry queue", loaded.len());
         for (message_id, peer_fp, content_cbor, created_at) in loaded {
             // CRITICAL (delivery guarantee): the row is NOT deleted here. `remove_durable_retry` used to be called BEFORE the resend ("a fresh send
             // will replace it anyway"). But if `send_message_content_inner` returns `Err` ("No ratchet session", "Missing own keys", "No identity",
@@ -490,7 +490,7 @@ impl P2PCore {
                 Ok(c) => c,
                 Err(e) => {
                     // A corrupt row is NOT retried (it would fail the same way on every start). Deleting it is the only case that should delete a row.
-                    error!("Kalıcı yeniden deneme kaydı ayrıştırılamadı, satır atılıyor ({}): {}", message_id, e);
+                    error!("Persistent retry record could not be parsed, dropping row ({}): {}", message_id, e);
                     self.remove_durable_retry(&message_id);
                     continue;
                 }
@@ -521,7 +521,7 @@ impl P2PCore {
                 peer_fp, &content, None,
                 Some(message_id.clone()), Some(created_at), interval,
             ) {
-                error!("Kalıcı kuyruktan yeniden gönderim denemesi geçici olarak başarısız (normal yeniden deneme döngüsü devralacak): {}", e);
+                error!("Resend from persistent queue temporarily failed (normal retry loop will take over): {}", e);
                 // A device that is gone never gets it, and the row would stay forever.
                 if !known {
                     self.remove_durable_retry(&message_id);

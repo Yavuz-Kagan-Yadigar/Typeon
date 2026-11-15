@@ -1111,7 +1111,7 @@ class SettingsFragment : Fragment() {
                 val copied = app.contentResolver.openInputStream(uri)?.use { input ->
                     input.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES)
                 } ?: false
-                if (!copied) throw java.io.IOException("Dosya açılamadı")
+                if (!copied) throw java.io.IOException("File could not be opened")
                 // Not a readable image: the catch below shows the error toast.
                 val compressed = ImagePreview.compressFile(tempFile, WALLPAPER_MAX_DIMENSION, WALLPAPER_JPEG_QUALITY)
                     ?: throw java.io.IOException("not an image")
@@ -1435,7 +1435,7 @@ class SettingsFragment : Fragment() {
                 val copied = app.contentResolver.openInputStream(uri)?.use { input ->
                     input.copyToCapped(tempFile, MAX_FOREIGN_URI_BYTES)
                 } ?: false
-                if (!copied) throw java.io.IOException("Dosya açılamadı")
+                if (!copied) throw java.io.IOException("File could not be opened")
                 // null = not an image. `setOwnAvatar(null)` means "remove" and
                 // would publish the removal to every contact.
                 val compressed = ImagePreview.compressFile(tempFile, AVATAR_MAX_DIMENSION, AVATAR_JPEG_QUALITY)

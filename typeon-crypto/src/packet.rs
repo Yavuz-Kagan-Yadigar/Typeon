@@ -38,7 +38,7 @@ fn pairing_code_from_cbor<T: serde::de::DeserializeOwned>(
     version: fn(&T) -> u8,
 ) -> Result<T, String> {
     if data.len() > MAX_PAIRING_CODE_BYTES {
-        return Err("Kod çok uzun".to_string());
+        return Err("Code too long".to_string());
     }
     let mut rest = data;
     let parsed: T = ciborium::from_reader(&mut rest).map_err(|e| e.to_string())?;
@@ -47,10 +47,10 @@ fn pairing_code_from_cbor<T: serde::de::DeserializeOwned>(
     }
     let v = version(&parsed);
     if v > *versions.end() {
-        return Err(format!("Bu kod daha yeni bir sürümle üretilmiş (v{}): uygulamayı güncelleyin", v));
+        return Err(format!("This code was made by a newer version (v{}): update the app", v));
     }
     if v < *versions.start() {
-        return Err(format!("Bu kod eski bir sürümle üretilmiş (v{}): karşı taraf uygulamayı güncellemeli", v));
+        return Err(format!("This code was made by an old version (v{}): the other side must update the app", v));
     }
     Ok(parsed)
 }
@@ -1649,7 +1649,7 @@ mod wire_size_tests {
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&NetworkEnvelope::Message(packet.clone()), &mut buf).unwrap();
-        assert!(buf.len() < 3 * raw.len() + 512, "paket {} bayt", buf.len());
+        assert!(buf.len() < 3 * raw.len() + 512, "packet {} bytes", buf.len());
         let back: NetworkEnvelope = ciborium::from_reader(buf.as_slice()).unwrap();
         match back {
             NetworkEnvelope::Message(m) => {
@@ -1682,7 +1682,7 @@ mod parse_limit_tests {
     fn pairing_codes_of_another_version_are_refused() {
         assert!(QrPacket::from_cbor(&qr(2)).is_err(), "a code without a nonce");
         assert!(QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION)).is_ok());
-        assert!(QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION + 1)).unwrap_err().contains("güncelleyin"));
+        assert!(QrPacket::from_cbor(&qr(QrPacket::CURRENT_VERSION + 1)).unwrap_err().contains("update the app"));
         assert!(QrPacket::from_cbor(&qr(0)).is_err());
 
         let link = |version| DeviceLinkRequest {

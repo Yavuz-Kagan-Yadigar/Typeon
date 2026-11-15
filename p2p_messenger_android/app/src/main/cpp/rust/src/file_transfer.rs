@@ -9,13 +9,13 @@ impl P2PCore {
     /// with node mode off) without a new Keystore key or lifecycle class on the Kotlin side. The same KEK keeps wrapping other small secrets
     /// (skipped message keys, ratchet state, and now file keys) with fresh nonces.
     pub(crate) fn wrap_file_key(&self, file_key: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), String> {
-        let enc_key = self.skipped_key_encryption_key.ok_or("Şifreleme anahtarı henüz yüklenmedi")?;
+        let enc_key = self.skipped_key_encryption_key.ok_or("File key not loaded yet")?;
         let (encrypted, nonce_bytes) = seal_with(&enc_key, file_key.as_slice()).ok_or("File key encryption failed")?;
         Ok((encrypted, nonce_bytes.to_vec()))
     }
 
     pub(crate) fn unwrap_file_key(&self, encrypted: &[u8], nonce_bytes: &[u8]) -> Result<[u8; 32], String> {
-        let enc_key = self.skipped_key_encryption_key.ok_or("Şifreleme anahtarı henüz yüklenmedi")?;
+        let enc_key = self.skipped_key_encryption_key.ok_or("File key not loaded yet")?;
         use chacha20poly1305::aead::{Aead, KeyInit};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce};
         let cipher = ChaCha20Poly1305::new_from_slice(&enc_key).map_err(|_| "Invalid key")?;
@@ -45,7 +45,7 @@ impl P2PCore {
     /// processed, leaving an orphan `.enc` on disk with no DB row. The size check is here for the same reason.
     pub(crate) fn begin_outgoing_file(&self, source_path: &str, group_id: Option<&str>) -> Result<(String, [u8; 32], std::path::PathBuf), String> {
         if self.skipped_key_encryption_key.is_none() {
-            return Err("Şifreleme anahtarı henüz yüklenmedi, birazdan tekrar deneyin".to_string());
+            return Err("File key not loaded yet, try again shortly".to_string());
         }
         if let Some(gid) = group_id {
             // Group not present locally: do not start encryption at all.
@@ -56,7 +56,7 @@ impl P2PCore {
         let source_size = std::fs::metadata(source_path).map(|m| m.len()).map_err(|e| e.to_string())?;
         if source_size > MAX_ATTACHMENT_SIZE {
             return Err(format!(
-                "Dosya çok büyük ({} bayt) — azami boyut {} bayt (4GB)",
+                "File too large ({} bytes) — max size {} bytes (4GB)",
                 source_size, MAX_ATTACHMENT_SIZE
             ));
         }
@@ -64,7 +64,7 @@ impl P2PCore {
         // after it is stored, and the offer would go out for a file nobody
         // can download.
         if self.node_mode_enabled && source_size > self.history_storage_limit_bytes {
-            return Err("Dosya, depolama sınırından büyük".to_string());
+            return Err("File too large for storage limit".to_string());
         }
 
         let mut file_key = [0u8; 32];
@@ -118,8 +118,8 @@ impl P2PCore {
             // See the note above: this INSERT used to fail silently. The failure is logged now, so it cannot slip by unnoticed.
             // Without the row we cannot serve the file: sending the offer anyway gave the recipient an attachment it could never download.
             if let Err(e) = res {
-                error!("finish_outgoing_file: `files` satırı yazılamadı (file_id={}): {}", file_id, e);
-                return Err(format!("Dosya kaydı yazılamadı: {}", e));
+                error!("finish_outgoing_file: could not write `files` row (file_id={}): {}", file_id, e);
+                return Err(format!("Could not write file record: {}", e));
             }
         }
         // Our own sent file also counts toward total storage. See the `enforce_history_storage_limit` note.
@@ -199,8 +199,8 @@ impl P2PCore {
                 ],
             );
             if let Err(e) = res {
-                error!("finish_outgoing_group_file: `files` satırı yazılamadı (file_id={}): {}", file_id, e);
-                return Err(format!("Dosya kaydı yazılamadı: {}", e));
+                error!("finish_outgoing_group_file: could not write `files` row (file_id={}): {}", file_id, e);
+                return Err(format!("Could not write file record: {}", e));
             }
         }
         self.enforce_history_storage_limit();
@@ -247,23 +247,23 @@ impl P2PCore {
         // limit now applies on the receive side too. An oversized offer is rejected without writing any DB row.
         // The peer's chunk size becomes buffer sizes and file offsets here.
         if chunk_size.map_or(false, |c| !attachments::chunk_size_ok(c as usize)) {
-            warn!("FileOffer REDDEDİLDİ: geçersiz parça boyutu {:?} (gönderen: {})", chunk_size, crate::log_id(&peer_fp));
+            warn!("FileOffer REJECTED: invalid chunk size {:?} (sender: {})", chunk_size, crate::log_id(&peer_fp));
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
                 "group_id": group_id, "file_id": file_id,
-                "error": "Geçersiz parça boyutu"
+                "error": "Invalid chunk size"
             });
         }
         // `file_id` comes from the other side and becomes a file path shortly after. Validate it FIRST (see `is_safe_file_id`).
         if !is_safe_file_id(file_id) {
             warn!(
-                "FileOffer REDDEDİLDİ: file_id yol olarak güvenli değil (gönderen: {}, id: {:?})",
+                "FileOffer REJECTED: file_id not safe as a path (sender: {}, id: {:?})",
                 crate::log_id(&peer_fp), file_id
             );
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
                 "group_id": group_id, "file_id": file_id,
-                "error": "Geçersiz dosya kimliği"
+                "error": "Invalid file id"
             });
         }
         // The `INSERT OR REPLACE` below has a problem: if the other side sends back the `file_id` of a file we sent to it (it knows the id because
@@ -275,11 +275,11 @@ impl P2PCore {
             || mime_type.len() > 255 || caption.len() > 64 * 1024
             || preview_jpeg.as_ref().map_or(false, |p| p.len() > 512 * 1024)
         {
-            warn!("FileOffer REDDEDİLDİ: alanlar geçersiz ya da çok büyük (gönderen: {})", crate::log_id(&peer_fp));
+            warn!("FileOffer REJECTED: fields invalid or too large (sender: {})", crate::log_id(&peer_fp));
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
                 "group_id": group_id, "file_id": file_id,
-                "error": "Geçersiz dosya teklifi"
+                "error": "Invalid file offer"
             });
         }
         let existing: Option<(String, Option<String>, Option<String>)> = self.db.as_ref().and_then(|conn| {
@@ -301,45 +301,45 @@ impl P2PCore {
             if row_sender.as_deref().map_or(true, |s| s == sender_identity_id) && *row_group == group_id {
                 return serde_json::json!({"type": "noop"});
             }
-            warn!("FileOffer REDDEDİLDİ: file_id başka bir gönderenin dosyasıyla çakışıyor (gönderen: {}, id: {})", crate::log_id(&peer_fp), file_id);
+            warn!("FileOffer REJECTED: file_id collides with another sender's file (sender: {}, id: {})", crate::log_id(&peer_fp), file_id);
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
                 "group_id": group_id, "file_id": file_id,
-                "error": "Dosya kimliği çakışması"
+                "error": "File id collision"
             });
         }
         let collides_with_own_outgoing = existing_direction.is_some();
         if collides_with_own_outgoing {
             warn!(
-                "FileOffer REDDEDİLDİ: file_id kendi GİDEN dosyamızla çakışıyor (gönderen: {}, id: {})",
+                "FileOffer REJECTED: file_id collides with our OUTGOING file (sender: {}, id: {})",
                 crate::log_id(&peer_fp), file_id
             );
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
                 "group_id": group_id, "file_id": file_id,
-                "error": "Dosya kimliği çakışması"
+                "error": "File id collision"
             });
         }
         if total_size > MAX_ATTACHMENT_SIZE {
             warn!(
-                "FileOffer reddedildi: total_size ({}) MAX_ATTACHMENT_SIZE'ı ({}) aşıyor (gönderen: {})",
+                "FileOffer rejected: total_size ({}) exceeds MAX_ATTACHMENT_SIZE ({}) (sender: {})",
                 total_size, MAX_ATTACHMENT_SIZE, crate::log_id(&peer_fp)
             );
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
                 "group_id": group_id, "file_id": file_id,
-                "error": "Dosya boyutu izin verilen üst sınırı aşıyor"
+                "error": "File size exceeds allowed maximum"
             });
         }
         // One hash per chunk group, signed with the offer: every chunk is
         // checked against it (`handle_chunk_response`). No list, no download.
         let offer_chunks = attachments::total_chunks_with(total_size, chunk_size.map_or(attachments::FILE_CHUNK_SIZE, |c| c as usize));
         if chunk_hashes.len() != attachments::chunk_hashes_len(offer_chunks) {
-            warn!("FileOffer REDDEDİLDİ: parça hash listesi yok ya da boyu yanlış (gönderen: {})", crate::log_id(&peer_fp));
+            warn!("FileOffer REJECTED: chunk hash list missing or wrong length (sender: {})", crate::log_id(&peer_fp));
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
                 "group_id": group_id, "file_id": file_id,
-                "error": "Geçersiz dosya teklifi"
+                "error": "Invalid file offer"
             });
         }
         // `file_name` is controlled by the remote side and is used as both file name and displayed text. This is the single entry point: `safe_file_name` sanitises it before anything is written to the DB, so both clients and the "save to Downloads" flow are protected.
@@ -388,7 +388,7 @@ impl P2PCore {
                 ok
             }
             Err(e) => {
-                error!("FileOffer için dosya anahtarı sarmalanamadı: {}", e);
+                error!("Could not wrap file key for FileOffer: {}", e);
                 false
             }
         };
@@ -417,7 +417,7 @@ impl P2PCore {
             match self.download_file(file_id.to_string(), peer_fp.to_string()) {
                 Ok(()) => true,
                 Err(e) => {
-                    error!("Otomatik dosya indirme başlatılamadı (node modu açık): {}", e);
+                    error!("Could not start automatic file download (node mode on): {}", e);
                     if let Some(conn) = &self.db {
                         let _ = conn.execute("UPDATE files SET status = 'failed' WHERE file_id = ?1", params![file_id]);
                     }
@@ -480,9 +480,9 @@ impl P2PCore {
             // Once per process run, unless the download has made progress since (see `handle_chunk_response`). A file that fails every time would
             // otherwise restart on every reconnect of its owner. After that it waits for a tap.
             if !self.auto_resumed_downloads.insert(file_id.clone()) { continue; }
-            info!("Yarım kalan indirme, kaynak yeniden bağlandığı için sürdürülüyor: file_id={} kaynak={}", file_id, crate::log_id(&owner_fp));
+            info!("Partial download resumed, source reconnected: file_id={} source={}", file_id, crate::log_id(&owner_fp));
             if let Err(e) = self.download_file(file_id.clone(), owner_fp.clone()) {
-                warn!("İndirme yeniden bağlanmada sürdürülemedi: file_id={} {}", file_id, e);
+                warn!("Download could not resume on reconnect: file_id={} {}", file_id, e);
             }
         }
     }
@@ -498,15 +498,15 @@ impl P2PCore {
         if scanned.is_none() && RESUME_SCANS.lock().map_or(false, |s| s.contains(&file_id)) {
             return Ok(());
         }
-        info!("download_file çağrıldı: file_id={} peer={}", file_id, crate::log_id(&peer_device_fingerprint));
+        info!("download_file called: file_id={} peer={}", file_id, crate::log_id(&peer_device_fingerprint));
         if self.active_downloads.contains_key(&file_id) {
-            info!("download_file: {} zaten indiriliyor, no-op", file_id);
+            info!("download_file: {} already downloading, no-op", file_id);
             return Ok(());
         }
         // without a swarm no chunk is ever requested; the UI showed
         // "downloading" for 10 min instead of an error.
         if self.swarm.is_none() {
-            return Err("Ağ henüz başlatılmadı".to_string());
+            return Err("Network not started yet".to_string());
         }
         let conn = self.db.as_ref().ok_or("DB not open")?;
         let row: Option<(u64, Vec<u8>, Vec<u8>, String, String, Option<String>, Option<Vec<u8>>)> = conn.query_row(
@@ -521,7 +521,7 @@ impl P2PCore {
         // would then be wasted. If the owner in the row is empty, fall back to the caller.
         let peer_device_fingerprint = if owner_fp.is_empty() { peer_device_fingerprint } else { owner_fp };
         if status == "complete" {
-            info!("download_file: {} zaten tamamlanmış, no-op", file_id);
+            info!("download_file: {} already complete, no-op", file_id);
             return Ok(());
         }
         let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
@@ -532,13 +532,13 @@ impl P2PCore {
         let peer_id = match self.device_to_peer_id.get(&peer_device_fingerprint) {
             Some(pid) => *pid,
             None => *server_peers.first().ok_or(
-                "Bu kişiden henüz doğrudan bir paket alınmadı, karşı taraf şu an erişilebilir değil",
+                "No direct packet received from this contact yet, peer is not reachable right now",
             )?,
         };
         let cached_addr = self.peer_id_to_addr.get(&peer_id).cloned();
         let already_connected = self.swarm.as_ref().map(|s| s.is_connected(&peer_id)).unwrap_or(false);
         info!(
-            "download_file: peer_id={} biliniyor, önbellekteki adres={:?}, swarm zaten bağlı mı={}",
+            "download_file: peer_id={} known, cached address={:?}, swarm already connected={}",
             crate::log_id(&peer_id), cached_addr, already_connected
         );
         if let Some(addr) = cached_addr.clone() {
@@ -558,7 +558,7 @@ impl P2PCore {
         // A row without the offer's chunk hashes (an offer from before they
         // existed) cannot be checked chunk by chunk: not downloaded.
         if chunk_hashes.len() != attachments::chunk_hashes_len(total_chunks) {
-            return Err("Bu dosyanın parça hash listesi yok, gönderenden yeniden istenmeli".to_string());
+            return Err("Chunk hash list not found for this file, request again from sender".to_string());
         }
         let per_hash = attachments::chunks_per_hash(total_chunks);
         let enc_path = self.enc_path_for(&file_id)?;
@@ -590,7 +590,7 @@ impl P2PCore {
         let resumed_bytes: u64 = received_chunks.iter().map(|&i| attachments::chunk_plain_len(total_size, chunk_size, i)).sum();
         let resumed = (0..total_chunks).find(|i| !received_chunks.contains(i)).unwrap_or(total_chunks);
         if !received_chunks.is_empty() {
-            info!("download_file: {} kaldığı yerden sürüyor, {}/{} parça diskte", file_id, received_chunks.len(), total_chunks);
+            info!("download_file: {} resuming from where it stopped, {}/{} chunks on disk", file_id, received_chunks.len(), total_chunks);
         }
 
         if let Some(conn) = &self.db {
@@ -767,7 +767,7 @@ impl P2PCore {
         };
         if elapsed_since_progress > DOWNLOAD_GIVE_UP_TIMEOUT_MS {
             error!(
-                "İndirme {} dakikadır hiç ilerlemedi, pes ediliyor: file_id={} ({})",
+                "Download made no progress for {} min, giving up: file_id={} ({})",
                 DOWNLOAD_GIVE_UP_TIMEOUT_MS / 60_000, file_id, reason
             );
             self.fail_download(file_id, reason);
@@ -791,11 +791,11 @@ impl P2PCore {
         }
         if let Some(next_peer) = switched_to {
             warn!(
-                "İndirme mevcut kaynaktan {} kez yanıt alamadı, ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}",
+                "Download got no reply from current source {} times, switching to an ALTERNATIVE source: file_id={} new_peer={}",
                 RETRIES_BEFORE_SOURCE_SWITCH, file_id, crate::log_id(&next_peer)
             );
         }
-        info!("İndirme geçici olarak yanıt vermedi ({}), parçalar yeniden isteniyor: file_id={}", reason, file_id);
+        info!("Download temporarily unresponsive ({}), re-requesting chunks: file_id={}", reason, file_id);
         // In-flight requests stalled (no reply, or the source changed). If they are not cleared, those indices stay in `inflight_chunks` forever,
         // the pipeline window never refills, and the download silently stops. Asking again is safe: if the same chunk arrives twice,
         // `handle_chunk_response` ignores the second one via the `received_chunks` check.
@@ -831,12 +831,12 @@ impl P2PCore {
 
     pub(crate) fn finalize_download(&mut self, file_id: &str) {
         let peer_fp = self.peer_for_file(file_id);
-        info!("finalize_download: file_id={} peer={} status='complete' olarak işaretlendi, file_complete olayı üretiliyor", file_id, crate::log_id(&peer_fp));
+        info!("finalize_download: file_id={} peer={} marked status='complete', emitting file_complete event", file_id, crate::log_id(&peer_fp));
         if let Some(s) = self.active_downloads.get(file_id) {
             let secs = current_time_ms().saturating_sub(s.started_at) as f64 / 1000.0;
             if secs > 0.0 {
                 info!(
-                    "İndirme tamamlandı: {} parça, {} bayt, {:.1} sn, {:.0} KB/s, son pencere {}",
+                    "Download complete: {} chunks, {} bytes, {:.1} s, {:.0} KB/s, last window {}",
                     s.total_chunks, s.bytes_done, secs,
                     (s.bytes_done as f64 / 1024.0) / secs, s.window
                 );
@@ -865,7 +865,7 @@ impl P2PCore {
                 .and_then(|head| attachments::jxl_head(&head))
                 .map_or(false, |(w, h, _)| w <= attachments::STICKER_MAX_SIDE && h <= attachments::STICKER_MAX_SIDE);
             if !side_ok {
-                warn!("Çıkartma işaretli dosya çıkartma değil, işaret kaldırıldı: {}", file_id);
+                warn!("Sticker-marked file is not a sticker, mark removed: {}", file_id);
                 if let Some(conn) = &self.db {
                     let _ = conn.execute("UPDATE files SET sticker = 0, sticker_origin = NULL WHERE file_id = ?1", params![file_id]);
                 }
@@ -894,7 +894,7 @@ impl P2PCore {
         if let Some(conn) = &self.db {
             let _ = conn.execute("UPDATE files SET status = 'failed', bytes_transferred = ?2 WHERE file_id = ?1", params![file_id, on_disk as i64]);
         }
-        error!("Dosya indirme başarısız ({}): {}", file_id, reason);
+        error!("File download failed ({}): {}", file_id, reason);
         self.attachment_events.push(serde_json::json!({"type": "file_failed", "peer": peer_fp, "file_id": file_id, "error": reason}).to_string());
     }
 
@@ -920,7 +920,7 @@ impl P2PCore {
             .map(|(id, _)| id.clone())
             .collect();
         for file_id in stalled {
-            self.retry_or_give_up_download(&file_id, "Bağlantı zaman aşımına uğradı — karşı taraf yanıt vermedi");
+            self.retry_or_give_up_download(&file_id, "Connection timed out — peer did not respond");
         }
     }
 
@@ -937,7 +937,7 @@ impl P2PCore {
         }
         match self.switch_to_alt_source(file_id) {
             Some(next) => {
-                warn!("Parça doğrulanamadı ({}), kaynak bırakıldı, ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}", reason, file_id, crate::log_id(&next));
+                warn!("Chunk verification failed ({}), source dropped, switching to an ALTERNATIVE source: file_id={} new_peer={}", reason, file_id, crate::log_id(&next));
                 self.request_next_chunk(file_id);
             }
             None => self.fail_download(file_id, reason),
@@ -978,7 +978,7 @@ impl P2PCore {
                 }
                 match next_peer {
                     Some(peer) => {
-                        warn!("Kaynakta dosya/parça bulunamadı, ALTERNATİF bir kaynağa geçiliyor: file_id={} yeni_peer={}", file_id, crate::log_id(&peer));
+                        warn!("Source file/chunk not found, switching to an ALTERNATIVE source: file_id={} new_peer={}", file_id, crate::log_id(&peer));
                         self.request_next_chunk(file_id);
                     }
                     None if from_server => {
@@ -992,10 +992,10 @@ impl P2PCore {
                             s.window = DOWNLOAD_WINDOW_MIN;
                             s.retry_at = current_time_ms() + DOWNLOAD_RETRY_DELAY_MS;
                         }
-                        info!("Sunucuda dosya henüz hazır değil (yükleme sürüyor olabilir): file_id={}", file_id);
+                        info!("File not ready on server yet (upload may still be running): file_id={}", file_id);
                     }
                     None => {
-                        self.fail_download(file_id, "Karşı tarafta bu dosya/parça bulunamadı");
+                        self.fail_download(file_id, "File/chunk not found on peer");
                     }
                 }
                 return;
@@ -1216,7 +1216,7 @@ impl P2PCore {
 
     /// The RESPONDER side of the `request_response` request: asks for one chunk of a file that this device sent, or fully downloaded and re-serves.
     pub(crate) fn serve_chunk_request(&self, peer: PeerId, request: &FileChunkRequest) -> FileChunkResponse {
-        debug!("serve_chunk_request: file_id={} chunk={} isteği alındı", request.file_id, request.chunk_index);
+        debug!("serve_chunk_request: file_id={} chunk={} request received", request.file_id, request.chunk_index);
         let row = self.db.as_ref().and_then(|conn| {
             conn.query_row(
                 "SELECT status, peer_device_fingerprint, group_id FROM files WHERE file_id = ?1",
@@ -1225,17 +1225,17 @@ impl P2PCore {
             ).ok()
         });
         let Some((status, row_peer_fp, row_group_id)) = row else {
-            error!("serve_chunk_request: file_id={} için kayıt yok — NotFound dönülüyor", request.file_id);
+            error!("serve_chunk_request: no record for file_id={} — not found, returning NotFound", request.file_id);
             return FileChunkResponse::NotFound;
         };
         if status != "complete" {
-            error!("serve_chunk_request: file_id={} status='complete' değil — NotFound dönülüyor", request.file_id);
+            error!("serve_chunk_request: file_id={} status is not 'complete' — returning NotFound", request.file_id);
             return FileChunkResponse::NotFound;
         }
         // Authorization: the requester must resolve, via its Noise-authenticated `PeerId`, to a known device, and must be a legitimate counterpart of the file. Without this, anyone who knew or guessed a `file_id` could fetch the encrypted chunks. The `NotFound`/`Chunk` split also answered "do you have this file". The bytes are encrypted with `file_key`, but a group file's key is shared by all members (see `finish_outgoing_group_file`), so a removed member could still fetch with the old key.
         if !self.may_serve_file_to(peer, &row_peer_fp, row_group_id.as_deref()) {
             warn!(
-                "serve_chunk_request REDDEDİLDİ: {} bu dosyanın yetkili karşı tarafı değil (file_id={})",
+                "serve_chunk_request REJECTED: {} is not an authorized peer for this file (file_id={})",
                 crate::log_id(&peer), request.file_id
             );
             return FileChunkResponse::NotFound;
@@ -1247,11 +1247,11 @@ impl P2PCore {
         let chunk_size = self.file_chunk_size(&request.file_id);
         match attachments::read_chunk_from_disk_with(&enc_path, request.chunk_index, chunk_size) {
             Ok(Some(data)) => {
-                debug!("serve_chunk_request: file_id={} chunk={} {} bayt ile yanıtlanıyor", request.file_id, request.chunk_index, data.len());
+                debug!("serve_chunk_request: file_id={} chunk={} answering with {} bytes", request.file_id, request.chunk_index, data.len());
                 FileChunkResponse::Chunk { data }
             }
             other => {
-                error!("serve_chunk_request: file_id={} chunk={} diskten okunamadı: {:?}", request.file_id, request.chunk_index, other.err());
+                error!("serve_chunk_request: file_id={} chunk={} could not be read from disk: {:?}", request.file_id, request.chunk_index, other.err());
                 FileChunkResponse::NotFound
             }
         }
@@ -1308,7 +1308,7 @@ impl P2PCore {
         let mut stmt = match conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                warn!("Ek listesi sorgusu hazırlanamadı: {}", e);
+                warn!("Could not prepare attachment list query: {}", e);
                 return Vec::new();
             }
         };
@@ -1377,7 +1377,7 @@ impl P2PCore {
         ) {
             Ok(s) => s,
             Err(e) => {
-                warn!("Ek listesi sorgusu hazırlanamadı: {}", e);
+                warn!("Could not prepare attachment list query: {}", e);
                 return Vec::new();
             }
         };
@@ -1423,16 +1423,16 @@ impl P2PCore {
     /// lock. This is the SHORT locked phase: it reads the metadata from the DB, unwraps the key, and returns the path pair. The actual
     /// `decrypt_file_from_disk` runs unlocked in `attachment_plaintext_path_unlocked`.
     pub(crate) fn begin_attachment_decrypt(&self, file_id: &str) -> Result<([u8; 32], String, std::path::PathBuf, std::path::PathBuf), String> {
-        info!("get_attachment_plaintext_path çağrıldı: file_id={}", file_id);
+        info!("get_attachment_plaintext_path called: file_id={}", file_id);
         let conn = self.db.as_ref().ok_or("DB not open")?;
         let (encrypted_key, key_nonce, sha256_hex, status, file_name): (Vec<u8>, Vec<u8>, String, String, String) = conn.query_row(
             "SELECT encrypted_file_key, key_nonce, sha256_hex, status, file_name FROM files WHERE file_id = ?1",
             params![file_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         ).map_err(|e| format!("Unknown file_id ({}): {}", file_id, e))?;
-        info!("get_attachment_plaintext_path: file_id={} DB durumu='{}'", file_id, status);
+        info!("get_attachment_plaintext_path: file_id={} DB status='{}'", file_id, status);
         if status != "complete" {
-            return Err(format!("Dosya henüz tamamlanmadı (durum: {})", status));
+            return Err(format!("File not complete yet (status: {})", status));
         }
         let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
 

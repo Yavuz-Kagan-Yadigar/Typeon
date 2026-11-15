@@ -8,7 +8,7 @@ impl P2PCore {
     /// Called from every mutation point (register_contact_from_pairing, evaluate_sender_device, accept_pending_device_alert).
     pub(crate) fn persist_contact(&self, contact: &Contact) {
         if let Err(e) = self.try_persist_contact(contact) {
-            error!("Kişi kaydedilemedi: {}", e);
+            error!("Could not save contact: {}", e);
         }
     }
 
@@ -62,15 +62,15 @@ impl P2PCore {
                 // way by the next `persist_contact`.
                 let (contact_id, display_name, trusted_identity_id, known_devices_json, last_device_change, avatar_jpeg, added_via_group) = match row {
                     Ok(r) => r,
-                    Err(e) => { error!("Kişi satırı okunamadı, atlandı: {}", e); continue; }
+                    Err(e) => { error!("Could not read contact row, skipped: {}", e); continue; }
                 };
                 let known_devices: Vec<contact::KnownDevice> = match serde_json::from_str(&known_devices_json) {
                     Ok(d) => d,
-                    Err(e) => { error!("Kişi {} cihaz listesi okunamadı, atlandı: {}", contact_id, e); continue; }
+                    Err(e) => { error!("Could not read device list of contact {}, skipped: {}", contact_id, e); continue; }
                 };
                 // Rows written before the write path checked these.
                 if !is_fingerprint_hex(&trusted_identity_id) {
-                    error!("Kişi {} geçersiz kimlikle kayıtlı, atlandı", contact_id);
+                    error!("Contact {} registered with invalid identity, skipped", contact_id);
                     continue;
                 }
                 let display_name = sanitize_display_name(&display_name).unwrap_or_default();
@@ -88,7 +88,7 @@ impl P2PCore {
         for contact in loaded {
             // Two rows for one identity: the older row stays the contact.
             if self.identity_to_contact.contains_key(&contact.trusted_identity_id) {
-                warn!("Kişi {} aynı kimliğin ikinci satırı, yüklenmedi", contact.contact_id);
+                warn!("Contact {} is a second row for the same identity, not loaded", contact.contact_id);
                 continue;
             }
             self.identity_to_contact.insert(contact.trusted_identity_id.clone(), contact.contact_id.clone());
@@ -101,7 +101,7 @@ impl P2PCore {
     /// existing contact was impossible until a new IdentityExchange arrived.
     pub(crate) fn persist_remote_device(&self, device: &DeviceRecord) {
         if let Err(e) = self.try_persist_remote_device(device) {
-            error!("Cihaz kaydı yazılamadı: {}", e);
+            error!("Could not write device record: {}", e);
         }
     }
 
@@ -186,19 +186,19 @@ impl P2PCore {
                 // has us and sends its IdentityExchange on every reconnect,
                 // which used to recreate the contact within seconds.
                 if self.contact_removed_locally(identity_id) {
-                    info!("TOFU reddedildi: {} bu cihazda silinmiş bir kişi", crate::log_id(&identity_id));
+                    info!("TOFU rejected: {} is a contact deleted on this device", crate::log_id(&identity_id));
                     return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
                 }
                 // see `pairing_proof_valid`: only a device that read a code
                 // this device shows becomes a contact.
                 if !pairing_proved {
-                    info!("TOFU reddedildi: gönderen bu cihazın kodunu okumamış ({})", crate::log_id(&identity_id));
+                    info!("TOFU rejected: sender has not read this device's code ({})", crate::log_id(&identity_id));
                     return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
                 }
                 // See `MAX_CONTACTS`: protection against Sybil/flood, especially for TOFU records created by one-sided `IdentityExchange` packets that need no user action.
                 if self.contacts.len() >= MAX_CONTACTS {
                     warn!(
-                        "TOFU reddedildi: contacts tablosu üst sınırda ({} >= {}), identity {} eklenmedi",
+                        "TOFU rejected: contacts table at limit ({} >= {}), identity {} not added",
                         self.contacts.len(), MAX_CONTACTS, crate::log_id(&identity_id)
                     );
                     // the sender read our code, the user here waits
@@ -225,7 +225,7 @@ impl P2PCore {
                     }
                 }
                 // Only an information notice is shown here, not an alarm.
-                info!("Identity {} yeni bir cihaz ekledi: {}", crate::log_id(&identity_id), crate::log_id(&device_fingerprint));
+                info!("Identity {} added a new device: {}", crate::log_id(&identity_id), crate::log_id(&device_fingerprint));
             }
             DeviceCheckOutcome::UnverifiedNewDeviceAlert => {
                 // Listed but not Active: the user rejected or revoked this
@@ -281,7 +281,7 @@ impl P2PCore {
                     }
                 } else {
                     warn!(
-                        "pending_device_alerts üst sınırda ({} >= {}), identity {} için yeni uyarı düşürüldü (paket yine de bloklu kalır)",
+                        "pending_device_alerts at limit ({} >= {}), new alert for identity {} dropped (packet still stays blocked)",
                         self.pending_device_alerts.len(), MAX_PENDING_DEVICE_ALERTS, crate::log_id(&identity_id)
                     );
                 }
@@ -303,7 +303,7 @@ impl P2PCore {
         let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else { return };
         self.blocked_identities = rows.flatten().collect();
         if !self.blocked_identities.is_empty() {
-            info!("{} engellenen kimlik yüklendi", self.blocked_identities.len());
+            info!("{} blocked identities loaded", self.blocked_identities.len());
         }
     }
 
@@ -324,14 +324,14 @@ impl P2PCore {
     /// The difference from `delete_contact` is that the block SURVIVES deleting the contact.
     pub(crate) fn block_identity(&mut self, identity_id: &str) -> Result<(), String> {
         if self.my_identity_id().as_deref() == Some(identity_id) {
-            return Err("Kendi kimliğinizi engelleyemezsiniz".to_string());
+            return Err("You cannot block your own identity".to_string());
         }
         // Disk first: a block that is gone after a restart must not look done.
         if let Some(conn) = &self.db {
             conn.execute(
                 "INSERT OR REPLACE INTO blocked_identities (identity_id, blocked_at) VALUES (?1, ?2)",
                 params![identity_id, current_time_ms() as i64],
-            ).map_err(|e| format!("Engel kaydedilemedi: {}", e))?;
+            ).map_err(|e| format!("Could not save block: {}", e))?;
         }
         self.blocked_identities.insert(identity_id.to_string());
         let fps: Vec<String> = self.known_remote_devices.values()
@@ -354,7 +354,7 @@ impl P2PCore {
                 params![identity_id],
             );
         }
-        warn!("Kimlik ENGELLENDİ: {} ({} cihaz)", crate::log_id(&identity_id), fps.len());
+        warn!("Identity BLOCKED: {} ({} devices)", crate::log_id(&identity_id), fps.len());
         Ok(())
     }
 
@@ -365,12 +365,12 @@ impl P2PCore {
             // Disk first: lifted only in memory, the block came back on restart.
             if let Some(conn) = &self.db {
                 if let Err(e) = conn.execute("DELETE FROM blocked_identities WHERE identity_id = ?1", params![identity_id]) {
-                    error!("Kimlik engeli kaldırılamadı: {}", e);
+                    error!("Could not remove identity block: {}", e);
                     return;
                 }
             }
             self.blocked_identities.remove(identity_id);
-            info!("Kimlik engeli kaldırıldı: {}", crate::log_id(&identity_id));
+            info!("Identity block removed: {}", crate::log_id(&identity_id));
             // The block dropped the sessions. Without a new handshake here
             // the peer's packets were only buffered until the user opened
             // the chat.
@@ -414,7 +414,7 @@ impl P2PCore {
         // which now passes as `KnownActive`.
         self.subscribe_pairing_mailbox(device_fingerprint);
         if let Err(e) = self.send_identity_exchange_fresh(device_fingerprint) {
-            error!("IdentityExchange gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+            error!("IdentityExchange send temporarily failed (will retry): {}", e);
         }
         Ok(())
     }
@@ -453,14 +453,14 @@ impl P2PCore {
     }
 
     pub(crate) fn trust_contact(&mut self, contact_id: &str) -> Result<(), String> {
-        let contact = self.contacts.get_mut(contact_id).ok_or("Kişi bulunamadı")?;
+        let contact = self.contacts.get_mut(contact_id).ok_or("Contact not found")?;
         if !contact.added_via_group {
             return Ok(());
         }
         contact.added_via_group = false;
         let snapshot = contact.clone();
         self.persist_contact(&snapshot);
-        info!("Kişiye tam güven verildi: {}", crate::log_id(&snapshot.trusted_identity_id));
+        info!("Full trust granted to contact: {}", crate::log_id(&snapshot.trusted_identity_id));
         Ok(())
     }
 
@@ -530,7 +530,7 @@ impl P2PCore {
                 "UPDATE own_devices SET device_name = ?1 WHERE identity_id = ?2",
                 params![name, my_id],
             ) {
-                error!("Hesap adı yazılamadı: {}", e);
+                error!("Could not write account name: {}", e);
             }
         }
     }
@@ -563,7 +563,7 @@ impl P2PCore {
         for (gid, heir) in founded {
             if let Some(heir) = heir {
                 if let Err(e) = self.transfer_group_founder(&gid, &heir) {
-                    error!("Hesap silme: grup yetkisi devredilemedi ({}): {}", gid, e);
+                    error!("Account deletion: could not transfer group rights ({}): {}", gid, e);
                 }
             }
         }
@@ -586,7 +586,7 @@ impl P2PCore {
         for fp in targets {
             match self.send_message_content(fp.clone(), &content, None) {
                 Ok(_) => sent += 1,
-                Err(e) => error!("Hesap silme bildirimi gönderilemedi ({}): {}", crate::log_id(&fp), e),
+                Err(e) => error!("Account deletion notice could not be sent ({}): {}", crate::log_id(&fp), e),
             }
         }
         Ok(sent)
@@ -630,7 +630,7 @@ impl P2PCore {
         for (gid, i_am_founder) in &groups {
             if *i_am_founder {
                 if let Err(e) = self.remove_from_group(gid, identity_id, false) {
-                    error!("Hesabı silinen üye gruptan çıkarılamadı ({}): {}", gid, e);
+                    error!("Could not remove deleted-account member from group ({}): {}", gid, e);
                 }
             }
         }
@@ -639,7 +639,7 @@ impl P2PCore {
 
     pub(crate) fn set_display_name(&mut self, name: &str) -> Result<(), String> {
         let name = sanitize_display_name(name)
-            .ok_or_else(|| "Hesap adı boş olamaz".to_string())?;
+            .ok_or_else(|| "Invalid: account name cannot be empty".to_string())?;
         // If there is no identity (first launch not finished), there is no record to write the name to: `adopt_own_device_name` would silently do nothing, and the
         // user would see "changed" without knowing it did not.
         self.get_active_own_device_fingerprint()?;
@@ -661,7 +661,7 @@ impl P2PCore {
         let peer_fps = self.contact_device_targets();
         for fp in peer_fps {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
-                error!("Ad değişikliği bildirilemedi ({}): {}", crate::log_id(&fp), e);
+                error!("Could not announce name change ({}): {}", crate::log_id(&fp), e);
             }
         }
         self.sync_to_siblings();
@@ -675,12 +675,12 @@ impl P2PCore {
         if let Some(a) = &avatar_jpeg {
             if a.len() > MAX_AVATAR_BYTES {
                 return Err(format!(
-                    "Profil fotoğrafı çok büyük ({} KB) — en fazla {} KB olabilir",
+                    "Profile photo too large ({} KB) — at most {} KB allowed",
                     a.len() / 1024, MAX_AVATAR_BYTES / 1024
                 ));
             }
         }
-        let identity_id = self.identity.as_ref().ok_or("Kimlik yok")?.identity_id.clone();
+        let identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         if let Some(conn) = &self.db {
             conn.execute(
                 "UPDATE identities SET avatar_jpeg = ?1 WHERE id = ?2",
@@ -698,7 +698,7 @@ impl P2PCore {
         let peer_fps = self.contact_device_targets();
         for fp in peer_fps {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
-                error!("ProfileUpdate gönderilemedi ({}): {}", crate::log_id(&fp), e);
+                error!("ProfileUpdate could not be sent ({}): {}", crate::log_id(&fp), e);
             }
         }
         for fp in siblings {
@@ -736,7 +736,7 @@ impl P2PCore {
         let peer_fps = self.contact_device_targets();
         for fp in peer_fps {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
-                error!("AddressAnnounce gönderilemedi ({}): {}", crate::log_id(&fp), e);
+                error!("AddressAnnounce could not be sent ({}): {}", crate::log_id(&fp), e);
             }
         }
     }
@@ -747,7 +747,7 @@ impl P2PCore {
         if self.groups.contains_key(contact_id) {
             return self.clear_group_history(contact_id);
         }
-        let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
+        let contact = self.contacts.get(contact_id).ok_or("Contact not found")?.clone();
         // No history answer or sibling backfill may bring the rows back.
         self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());
         // same device set as `delete_contact` (inactive records too).
@@ -848,7 +848,7 @@ impl P2PCore {
     /// Chatting again requires a fresh QR or manual pairing. See `clear_chat_history` (the soft option, which only deletes history).
     /// `sync`: also delete it on my other devices (`SiblingEchoBody::ContactRemoved`).
     pub(crate) fn delete_contact(&mut self, contact_id: &str, sync: bool) -> Result<(), String> {
-        let identity_id = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.trusted_identity_id.clone();
+        let identity_id = self.contacts.get(contact_id).ok_or("Contact not found")?.trusted_identity_id.clone();
         self.delete_contact_local(contact_id)?;
         if sync {
             self.send_to_siblings(SiblingEchoBody::ContactRemoved { identity_id });
@@ -857,7 +857,7 @@ impl P2PCore {
     }
 
     fn delete_contact_local(&mut self, contact_id: &str) -> Result<(), String> {
-        let contact = self.contacts.get(contact_id).ok_or("Kişi bulunamadı")?.clone();
+        let contact = self.contacts.get(contact_id).ok_or("Contact not found")?.clone();
         // see the `hfloor:` filter in the HistorySyncResponse arm.
         self.raise_history_floor(&contact.trusted_identity_id, current_time_ms());
         // Still a member of one of our groups: the device records, keys and
@@ -936,12 +936,12 @@ impl P2PCore {
 
     /// Revokes ONE device of a contact by setting `Contact::revoke_device` and `DeviceRecord.is_active`. It runs the same cleanup steps as `delete_contact`, but keeps the contact and its history. It stops all traffic to and from this device fingerprint (checked via `is_active` in `receive_message` and `process_handshake_init`). Other devices of the same contact are not affected.
     pub(crate) fn revoke_contact_device(&mut self, contact_id: &str, device_fingerprint: &str) -> Result<(), String> {
-        let mut contact = self.contacts.get(contact_id).cloned().ok_or("Kişi bulunamadı")?;
+        let mut contact = self.contacts.get(contact_id).cloned().ok_or("Contact not found")?;
         // Everything below acts on the fingerprint alone: for a device of
         // someone else (even one of our own siblings) it would deactivate the
         // record and delete the session.
         if contact.find_device(device_fingerprint).is_none() {
-            return Err("Bu cihaz bu kişiye ait değil".to_string());
+            return Err("This device does not belong to this contact".to_string());
         }
         contact.revoke_device(device_fingerprint, current_time_ms());
         let record = self.known_remote_devices.get(device_fingerprint).cloned().map(|mut r| {
@@ -1051,8 +1051,8 @@ impl P2PCore {
 
     /// A relay address the user adds by hand in Settings, one they trust or run themselves (for example a VPS with a fixed IP, or a device with node mode on). This is the only way two strangers with no shared relay history can pair across different networks for the first time. Organic discovery (identify, QR sharing, `known_relay_peers`) needs a relay already known on the network. See SECURITY.md, "Cross-network connectivity".
     pub(crate) fn add_known_relay_address(&mut self, multiaddr: &str) -> Result<(), String> {
-        let addr: Multiaddr = multiaddr.trim().parse().map_err(|_| "Geçersiz multiaddr".to_string())?;
-        let peer_id = extract_peer_id(&addr).ok_or("Adres bir /p2p/<peer_id> son eki içermeli")?;
+        let addr: Multiaddr = multiaddr.trim().parse().map_err(|_| "Invalid multiaddr".to_string())?;
+        let peer_id = extract_peer_id(&addr).ok_or("Invalid address: must end with /p2p/<peer_id>")?;
         if let Some(swarm) = &mut self.swarm {
             swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
         }

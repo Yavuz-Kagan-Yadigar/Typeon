@@ -23,13 +23,13 @@ impl P2PCore {
         // long-term key would be written under the empty passphrase.
         let passphrase = zeroize::Zeroizing::new(passphrase);
         if passphrase.is_empty() {
-            return Err("Parola boş olamaz".to_string());
+            return Err("Password cannot be empty".to_string());
         }
         // Every long-term key is in the file: a short passphrase is guessed
         // offline. Import takes any passphrase, older files have shorter ones.
         // UTF-16 units, as the Android check counts them.
         if passphrase.encode_utf16().count() < RECOVERY_PASSPHRASE_MIN_CHARS {
-            return Err("Parola en az 12 karakter olmalı".to_string());
+            return Err("Password must be at least 12 characters".to_string());
         }
         let identity = self.identity.as_ref().ok_or("No identity to export")?;
 
@@ -93,7 +93,7 @@ impl P2PCore {
         if data_bytes.len() > MAX_RECOVERY_FILE_BYTES - 1024 * 1024 {
             data.keep_newest(RECOVERY_TRIMMED_MESSAGES);
             data_bytes = ciborium_bytes(&data)?;
-            warn!("Kurtarma dosyası sınırı aşıyor, yalnızca en yeni {} mesaj eklendi", RECOVERY_TRIMMED_MESSAGES);
+            warn!("Recovery file over limit, only the newest {} messages kept", RECOVERY_TRIMMED_MESSAGES);
         }
         drop(data);
         // CBOR: as JSON every byte was a number, and a few thousand messages
@@ -152,7 +152,7 @@ pub(crate) fn seal_recovery_file(plaintext: &[u8], passphrase: &str) -> Result<V
     // Still over (the newest messages alone are that large): no file that
     // looks saved and cannot be imported.
     if file.len() > MAX_RECOVERY_FILE_BYTES {
-        return Err("Kurtarma dosyası 64 MB sınırını aşıyor".to_string());
+        return Err("Recovery file too large (limit 64 MB)".to_string());
     }
     Ok(file)
 }
@@ -163,16 +163,16 @@ pub(crate) fn seal_recovery_file(plaintext: &[u8], passphrase: &str) -> Result<V
 pub(crate) fn open_recovery_file(file_bytes: &[u8], passphrase: &str) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     // `export_recovery` writes no such file.
     if passphrase.is_empty() {
-        return Err("Parola boş olamaz".to_string());
+        return Err("Password cannot be empty".to_string());
     }
 
     // The export cap is the import cap: a bigger file is no file of ours.
     if file_bytes.len() > MAX_RECOVERY_FILE_BYTES {
-        return Err("Kurtarma dosyası çok büyük".to_string());
+        return Err("Recovery file too large".to_string());
     }
-    let file: RecoveryFile = ciborium::from_reader(file_bytes).map_err(|_| "Bozuk kurtarma dosyası".to_string())?;
+    let file: RecoveryFile = ciborium::from_reader(file_bytes).map_err(|_| "Corrupt recovery file".to_string())?;
     if file.kdf != "argon2id" {
-        return Err(format!("Desteklenmeyen anahtar türetme algoritması: {}", file.kdf));
+        return Err(format!("Unsupported key derivation algorithm: {}", file.kdf));
     }
 
     use chacha20poly1305::aead::{Aead, KeyInit};
@@ -187,10 +187,10 @@ pub(crate) fn open_recovery_file(file_bytes: &[u8], passphrase: &str) -> Result<
     if file.argon2_m_cost > MAX_RECOVERY_ARGON2_M_COST_KIB || file.argon2_t_cost > 10 || file.argon2_p_cost > 4
         || file.argon2_m_cost as u64 * file.argon2_t_cost as u64 > 4 * 65_536 * 2
     {
-        return Err("Bozuk kurtarma dosyası (Argon2 parametreleri sınır dışı)".to_string());
+        return Err("Corrupt recovery file (Argon2 parameters out of range)".to_string());
     }
     if file.salt.len() != 16 {
-        return Err("Bozuk kurtarma dosyası (salt)".to_string());
+        return Err("Corrupt recovery file (salt)".to_string());
     }
     let params = argon2::Params::new(file.argon2_m_cost, file.argon2_t_cost, file.argon2_p_cost, Some(32))
         .map_err(|e| format!("Argon2 params: {e}"))?;
@@ -201,11 +201,11 @@ pub(crate) fn open_recovery_file(file_bytes: &[u8], passphrase: &str) -> Result<
 
     let cipher = ChaCha20Poly1305::new_from_slice(&key[..]).map_err(|_| "Invalid key")?;
     if file.nonce.len() != 12 {
-        return Err("Bozuk kurtarma dosyası (nonce)".to_string());
+        return Err("Corrupt recovery file (nonce)".to_string());
     }
     let nonce = Nonce::from_slice(&file.nonce);
     let plaintext = zeroize::Zeroizing::new(cipher.decrypt(nonce, file.ciphertext.as_slice())
-        .map_err(|_| "Yanlış parola veya bozuk dosya".to_string())?);
+        .map_err(|_| "Wrong password or corrupt file".to_string())?);
     Ok(plaintext)
 }
 
@@ -235,7 +235,7 @@ impl P2PCore {
         // "identity_secret.enc lost or corrupt" case (see the comment in MainActivity), `initDatabase` already loads the PUBLIC keys from the DB and
         // fills `self.identity`, but the secret keys (`own_device_keys`) stay empty. That is exactly the state this function must recover from.
         if self.get_active_own_device_fingerprint().is_ok() {
-            return Err("Bu cihazda zaten çalışan bir kimlik var — önce Ayarlar'dan çıkış yapın".to_string());
+            return Err("An identity is already running on this device — sign out in Settings first".to_string());
         }
         Ok(())
     }
@@ -259,14 +259,14 @@ impl P2PCore {
             own_revokes: Vec<DeviceRevoke>,
         }
         let exported: ExportedIdentity = ciborium::from_reader(plaintext)
-            .map_err(|_| "Bozuk kurtarma dosyası (içerik)".to_string())?;
+            .map_err(|_| "Corrupt recovery file (content)".to_string())?;
         if exported.devices.is_empty() {
-            return Err("Kurtarma dosyasında cihaz anahtarı yok".to_string());
+            return Err("Device key missing from recovery file".to_string());
         }
         // Before anything is stored: an identity without it cannot read its
         // server history, and the user would not be told.
         if exported.archive_root_key.as_ref().map_or(false, |k| k.len() != 32) {
-            return Err("Kurtarma dosyası bozuk (arşiv anahtarı)".to_string());
+            return Err("Corrupt recovery file (archive key)".to_string());
         }
 
         // parsed before the wipe, so a bad payload changes nothing.
@@ -274,7 +274,7 @@ impl P2PCore {
             None
         } else {
             Some(ciborium::from_reader(exported.data.as_slice())
-                .map_err(|_| "Kurtarma dosyası bozuk (kişiler ve sohbetler)".to_string())?)
+                .map_err(|_| "Corrupt recovery file (contacts and chats)".to_string())?)
         };
 
         let mut device_infos = Vec::new();
@@ -284,16 +284,16 @@ impl P2PCore {
         // The first device only. The caller stores the secret keys of that one
         // alone, so any other device was a row without keys after a restart.
         for dev in exported.devices.iter().take(1) {
-            let sign_sk_ed_bytes: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(dev.sign_sk_ed25519.as_slice().try_into().map_err(|_| "Bozuk Ed25519 secret key")?);
+            let sign_sk_ed_bytes: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(dev.sign_sk_ed25519.as_slice().try_into().map_err(|_| "Corrupt Ed25519 secret key")?);
             let sign_sk_ed25519 = SigningKey::from_bytes(&sign_sk_ed_bytes);
             let sign_pk_ed25519 = sign_sk_ed25519.verifying_key();
 
             // See the generate_identity note. The ML-DSA secret key is stored as a 32-byte seed and deterministically regenerated with `from_seed`.
-            let sign_sk_mldsa_seed: ml_dsa::Seed = dev.sign_sk_mldsa.as_slice().try_into().map_err(|_| "Bozuk ML-DSA secret key")?;
+            let sign_sk_mldsa_seed: ml_dsa::Seed = dev.sign_sk_mldsa.as_slice().try_into().map_err(|_| "Corrupt ML-DSA secret key")?;
             let sign_sk_mldsa = MlDsaSigningKey::<MlDsa87>::from_seed(&sign_sk_mldsa_seed);
             let sign_pk_mldsa = sign_sk_mldsa.verifying_key().clone();
 
-            let kem_sk_x_bytes: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(dev.kem_sk_x25519.as_slice().try_into().map_err(|_| "Bozuk X25519 secret key")?);
+            let kem_sk_x_bytes: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(dev.kem_sk_x25519.as_slice().try_into().map_err(|_| "Corrupt X25519 secret key")?);
             let kem_sk_x25519 = StaticSecret::from(*kem_sk_x_bytes);
             let kem_pk_x25519 = X25519PublicKey::from(&kem_sk_x25519);
 
@@ -307,7 +307,7 @@ impl P2PCore {
                 &mlkem_ek_to_bytes(&kem_pk_mlkem),
             ));
             if computed_fp != dev.device_fingerprint {
-                return Err("Kurtarma dosyası bozuk (fingerprint uyuşmazlığı)".to_string());
+                return Err("Corrupt recovery file (fingerprint mismatch)".to_string());
             }
             // the keys decoded and match: only now does the other
             // identity go (`take(1)`: once).
@@ -404,7 +404,7 @@ impl P2PCore {
         if let Some(ark) = &exported.archive_root_key {
             // A precondition for the history on the server to be decryptable on this device.
             if !self.set_archive_root_key(ark) {
-                error!("Kurtarma: arşiv kök anahtarı yüklenemedi, sunucudaki geçmiş okunamayacak");
+                error!("Recovery: archive root key could not be loaded, server history cannot be read");
             }
         }
         if let Some(data) = recovery_data {
@@ -473,7 +473,7 @@ impl P2PCore {
                         m.reply_to_message_id.as_deref(), m.reply_to_preview.as_deref(), m.sent_at_ms),
                 };
                 if let Err(e) = stored {
-                    warn!("Kurtarma: mesaj yazılamadı: {}", e);
+                    warn!("Recovery: message could not be written: {}", e);
                     continue;
                 }
                 self.backdate_archived(gid.as_deref(), &key, mid, m.timestamp);

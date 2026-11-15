@@ -452,7 +452,7 @@ pub(crate) fn answered_pending_id(payload: &[u8]) -> Option<String> {
 /// the packet around it (header, hybrid signatures, encryption).
 pub(crate) fn check_group_update_size(update: &GroupUpdate) -> Result<(), String> {
     if ciborium_bytes(update)?.len() + 64 * 1024 > MAX_ENVELOPE_BYTES {
-        return Err("Grup güncellemesi çok büyük (çok fazla üye/cihaz)".to_string());
+        return Err("Group update too large (too many members/devices)".to_string());
     }
     Ok(())
 }
@@ -532,12 +532,12 @@ pub(crate) fn load_or_generate_libp2p_keypair(app_files_dir: &str) -> libp2p::id
             if let Ok(kp) = libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
                 return kp;
             }
-            error!("libp2p_identity.key bozuk, yeni kimlik üretiliyor");
+            error!("libp2p_identity.key is corrupt, generating new identity");
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         // The file may be intact despite an I/O error, so it is not overwritten: every contact's stored address carries its PeerId. Use a key for this run only.
         Err(e) => {
-            error!("libp2p_identity.key okunamadı ({}), bu çalıştırma için geçici kimlik", e);
+            error!("libp2p_identity.key could not be read ({}), temporary identity for this run", e);
             return libp2p::identity::Keypair::generate_ed25519();
         }
     }
@@ -558,7 +558,7 @@ pub(crate) fn load_or_generate_libp2p_keypair(app_files_dir: &str) -> libp2p::id
                 .and_then(|mut f| { use std::io::Write; f.write_all(&bytes)?; f.sync_all() })
                 .and_then(|_| std::fs::rename(&tmp, &path));
             if let Err(e) = written {
-                error!("libp2p_identity.key yazılamadı (bu süreçte kullanılacak ama kalıcı olmayacak): {}", e);
+                error!("libp2p_identity.key could not be written (used in this process but not persistent): {}", e);
             }
         }
         Err(e) => error!("libp2p keypair encode edilemedi: {}", e),

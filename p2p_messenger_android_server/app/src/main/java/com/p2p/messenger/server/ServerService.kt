@@ -223,7 +223,7 @@ class ServerService : Service() {
             // Android 12+: a sticky restart in the background, without the
             // battery exemption, may not go foreground. Uncaught, this
             // crashed the process on every restart attempt.
-            Log.w(TAG, "Ön plana geçilemedi: ${e.message}")
+            Log.w(TAG, "Could not move to foreground: ${e.message}")
             isRunning = false
             stopSelf()
             return START_NOT_STICKY
@@ -240,7 +240,7 @@ class ServerService : Service() {
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) { pokeCore("network available") }
                 override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) {}
-                override fun onLost(network: Network) { Log.i(TAG, "Ağ kaybedildi") }
+                override fun onLost(network: Network) { Log.i(TAG, "Network lost") }
             }
             cm.registerNetworkCallback(
                 NetworkRequest.Builder()
@@ -250,7 +250,7 @@ class ServerService : Service() {
             )
             netCallback = cb
         } catch (e: Exception) {
-            Log.w(TAG, "Ağ geri çağrısı kaydedilemedi: ${e.message}")
+            Log.w(TAG, "Network callback could not be registered: ${e.message}")
         }
 
         startCore()
@@ -283,14 +283,14 @@ class ServerService : Service() {
                 try {
                     val dead = !org.json.JSONObject(ServerLib.serverStatus()).optBoolean("running")
                     if (isRunning && dead && !moving.get()) {
-                        Log.w(TAG, "Sunucu döngüsü ölmüş, yeniden başlatılıyor")
+                        Log.w(TAG, "Server loop died, restarting")
                         startCore()
                         watchdogDelay = (watchdogDelay * 2).coerceAtMost(WATCHDOG_MAX_MS)
                     } else {
                         watchdogDelay = WATCHDOG_MS
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "Durum okunamadı: ${e.message}")
+                    Log.w(TAG, "Status could not be read: ${e.message}")
                 }
                 if (isRunning) watchdog.postDelayed(this, watchdogDelay)
             }
@@ -317,7 +317,7 @@ class ServerService : Service() {
                     blobs.absolutePath
                 )
             } catch (e: Throwable) {
-                Log.e(TAG, "Sunucu başlatılamadı", e)
+                Log.e(TAG, "Server could not be started", e)
                 "Error: ${e.message}"
             }
             val failed = result.startsWith("Error:")
@@ -351,7 +351,7 @@ class ServerService : Service() {
                 val r = ServerLib.stopServer()
                 if (r.startsWith("Error:")) Log.w(TAG, "stopServer: $r")
             } catch (e: Throwable) {
-                Log.w(TAG, "Sunucu durdurulamadı: ${e.message}")
+                Log.w(TAG, "Server could not be stopped: ${e.message}")
             }
         }
         setLocks(false)
@@ -378,7 +378,7 @@ class ServerService : Service() {
                 ServerLib.notifyNetworkChanged()
                 Log.i(TAG, "notifyNetworkChanged ($reason)")
             } catch (e: Throwable) {
-                Log.w(TAG, "notifyNetworkChanged başarısız: ${e.message}")
+                Log.w(TAG, "notifyNetworkChanged failed: ${e.message}")
             }
         }
     }
@@ -439,7 +439,7 @@ class ServerService : Service() {
             // At least 1: 0 means "no budget" to the native side.
             (used + free / 2).coerceAtMost(8L * 1024 * 1024 * 1024).coerceAtLeast(1L)
         } catch (e: Throwable) {
-            Log.w(TAG, "Boş alan okunamadı, varsayılan bütçe: ${e.message}")
+            Log.w(TAG, "Free space could not be read, default budget: ${e.message}")
             512L * 1024 * 1024
         }
     }

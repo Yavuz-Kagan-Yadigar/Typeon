@@ -19,7 +19,7 @@ impl P2PCore {
         // (see the group_message arm), or redirect a `ProfileUpdate` to another contact and overwrite that contact's avatar (see the
         // ProfileUpdate arm, which trusted this field through `identity_to_contact`). A mismatch rejects the whole packet.
         if packet.header.sender_identity_id != sender.identity_id {
-            return Err("sender_identity_id, imzalayan cihazın kayıtlı kimliğiyle eşleşmiyor".to_string());
+            return Err("sender_identity_id does not match the signing device's stored identity".to_string());
         }
 
         let to_verify = packet_signing_input(packet.header.raw(), &packet.ciphertext, &self.get_active_own_device_fingerprint()?);
@@ -91,7 +91,7 @@ impl P2PCore {
                 // 25 min) stays. An undelivered message is never acked by mistake.
                 if self.reack_if_already_handled(&packet.header) {
                     info!(
-                        "Çözülemeyen paket zaten işlendi (id={}) — yinelenen teslim, Ack yeniden gönderildi (gönderen aksi hâlde ~25 dk boşuna dener)",
+                        "Undecryptable packet already processed (id={}) — duplicate delivery, Ack re-sent (otherwise sender retries for ~25 min for nothing)",
                         packet.header.message_id
                     );
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -122,7 +122,7 @@ impl P2PCore {
         // (`old_chain`) proves nothing: the peer sent it before it knew.
         if !skipped_changes.old_chain && state.pending_rotation_ct.take().is_some() {
             info!(
-                "Rotasyon karşı tarafça uygulandı (peer={}) — duyuru tekrarı durduruluyor",
+                "Rotation applied by peer (peer={}) — stopping announcement repeats",
                 crate::log_id(&packet.header.sender_device_fingerprint)
             );
         }
@@ -131,7 +131,7 @@ impl P2PCore {
         let mut saved = true;
         for (msg_num, key) in &skipped_changes.added {
             if let Err(e) = self.persist_skipped_key(&packet.header.sender_device_fingerprint, *msg_num, key) {
-                error!("Skipped-key diske yazılamadı: {}", e);
+                error!("Could not write skipped key to disk: {}", e);
                 saved = false;
                 break;
             }
@@ -165,7 +165,7 @@ impl P2PCore {
         let content: MessageContent = match MessageContent::from_cbor(payload_bytes.as_slice()) {
             Ok(c) => c,
             Err(e) => {
-                warn!("Paket içeriği ayrıştırılamadı (id={}): {}", message_id, e);
+                warn!("Could not parse packet content (id={}): {}", message_id, e);
                 self.send_ack(&peer_fp, &message_id);
                 return Ok(serde_json::json!({"type": "noop"}).to_string());
             }
@@ -241,7 +241,7 @@ impl P2PCore {
             for (_, source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms) in buf {
                 match self.dispatch_received_content(source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms) {
                     Ok(event) => self.attachment_events.push(event),
-                    Err(e) => warn!("Tutulan grup paketi işlenemedi (group={}): {}", gid, e),
+                    Err(e) => warn!("Could not process held group packet (group={}): {}", gid, e),
                 }
             }
         }
@@ -267,7 +267,7 @@ impl P2PCore {
                 // with the SAME id after a lost Ack, and the persistent queue resends after a restart. This arm used to dedup nothing, so each
                 // repeat made a separate archive row (the UI hid it, but archive/history sync kept copying the pairs). Ack is still sent: that is
                 // the only way the sender's retry stops.
-                info!("Metin alındı: id={} kaynak={}", display_id.chars().take(8).collect::<String>(), if source.is_some() { "p2p" } else { "sunucu" });
+                info!("Text received: id={} source={}", display_id.chars().take(8).collect::<String>(), if source.is_some() { "p2p" } else { "server" });
                 if self.message_exists_in_chat(&display_id, None, &chat_key) {
                     self.ack_text_packet(&peer_fp, &message_id, Some(&display_id));
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -286,7 +286,7 @@ impl P2PCore {
                     Err(e) => {
                         // No event either: the UI would show a message that is
                         // gone on reload, and show it again when the retry lands.
-                        error!("Mesaj arşivlenemedi, Ack ertelendi (gönderen tekrar deneyecek): {}", e);
+                        error!("Could not archive message, Ack deferred (sender will retry): {}", e);
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
                     }
                 }
@@ -316,7 +316,7 @@ impl P2PCore {
                 // its retry accepted once the `GroupUpdate` reaches us.
                 if !self.sender_may_post_to_group(&gid, &sender_identity_id) {
                     warn!(
-                        "Grup mesajı REDDEDİLDİ: gönderen bu grubun üyesi değil (group={}, gönderen={})",
+                        "Group message REJECTED: sender is not a member of this group (group={}, sender={})",
                         gid, crate::log_id(&sender_identity_id)
                     );
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -373,7 +373,7 @@ impl P2PCore {
                         self.replay_buffered_edits_deletes(local_id);
                     }
                 } else {
-                    error!("Grup mesajı arşivlenemedi, Ack ertelendi (gönderen tekrar deneyecek)");
+                    error!("Could not archive group message, Ack deferred (sender will retry)");
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 serde_json::json!({
@@ -417,7 +417,7 @@ impl P2PCore {
                 if let Some(gid) = &group_id {
                     if !self.sender_may_post_to_group(gid, &sender_identity_id) {
                         warn!(
-                            "Grup tepkisi REDDEDİLDİ: gönderen bu grubun üyesi değil (group={}, gönderen={})",
+                            "Group reaction REJECTED: sender is not a member of this group (group={}, sender={})",
                             gid, crate::log_id(&sender_identity_id)
                         );
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -427,7 +427,7 @@ impl P2PCore {
                 // `group_id: None` skipped the membership check above, and any
                 // contact could react on a group message whose id it knew.
                 if emoji.len() > 64 || !self.reaction_fits_chat(&target_message_id, group_id.as_deref(), &sender_identity_id) {
-                    warn!("Tepki REDDEDİLDİ: hedef bu sohbete ait değil ya da emoji çok uzun (gönderen={})", crate::log_id(&sender_identity_id));
+                    warn!("Reaction REJECTED: target not in this chat or emoji too long (sender={})", crate::log_id(&sender_identity_id));
                     self.send_ack(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
@@ -454,7 +454,7 @@ impl P2PCore {
                 // Group history goes only to someone who is a member now. Otherwise anyone who knew the `group_id`, such as a removed member, could page through the history, including messages sent after their removal.
                 if let Some(gid) = &group_id {
                     if !self.groups.get(gid).map_or(false, |g| g.is_member(&sender_identity_id)) {
-                        warn!("Grup geçmişi isteği REDDEDİLDİ: gönderen üye değil (group={}, gönderen={})", gid, crate::log_id(&sender_identity_id));
+                        warn!("Group history request REJECTED: sender is not a member (group={}, sender={})", gid, crate::log_id(&sender_identity_id));
                         // Ack: the request is in `needs_delivery_confirmation`, and no reply will come, otherwise the sender would retry for days.
                         self.send_ack(&peer_fp, &message_id);
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -572,7 +572,7 @@ impl P2PCore {
                     request_id: message_id.clone(), messages, group_id: group_id.clone(), more,
                 };
                 if let Err(e) = self.send_message_content(peer_fp.clone(), &response, None) {
-                    error!("HistorySyncResponse gönderilemedi: {}", e);
+                    error!("HistorySyncResponse could not be sent: {}", e);
                     // nothing went out, the window is not used up.
                     self.history_answered_at.remove(&peer_fp);
                 } else {
@@ -585,7 +585,7 @@ impl P2PCore {
                 }
                 // No client handles this event, and none needs to: the other side asking for history is not something the user has to see.
                 // Logged for diagnostics, and emitted to the stream as `noop`.
-                info!("Geçmiş senkronu istendi (peer={}, group={:?})", crate::log_id(&peer_fp), group_id);
+                info!("History sync requested (peer={}, group={:?})", crate::log_id(&peer_fp), group_id);
                 serde_json::json!({"type": "noop"})
             }
             MessageContent::HistorySyncResponse { request_id, messages, group_id, more } => {
@@ -606,7 +606,7 @@ impl P2PCore {
                     if answered_before {
                         debug!("HistorySyncResponse already taken from this member (peer={}, request_id={})", crate::log_id(&peer_fp), request_id);
                     } else {
-                        warn!("İstenmemiş HistorySyncResponse REDDEDİLDİ (peer={}, request_id={})", crate::log_id(&peer_fp), request_id);
+                        warn!("Unsolicited HistorySyncResponse REJECTED (peer={}, request_id={})", crate::log_id(&peer_fp), request_id);
                     }
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
@@ -673,7 +673,7 @@ impl P2PCore {
                                 if !signed {
                                     m.author_proof = None;
                                     if m.direction != "sent" {
-                                        warn!("Grup geçmişi satırı atlandı: yazar imzası yok ya da geçersiz (group={}, yazar={})", gid, crate::log_id(&author));
+                                        warn!("Group history row skipped: author signature missing or invalid (group={}, author={})", gid, crate::log_id(&author));
                                         return None;
                                     }
                                 }
@@ -685,7 +685,7 @@ impl P2PCore {
                                 // have taken it, so a row already under it is
                                 // this author's and a duplicate.
                                 if !group_msg_id_bound(gid, &author, &mid) {
-                                    warn!("Grup geçmişi satırı atlandı: kimlik yazarına bağlı değil (group={}, yazar={})", gid, crate::log_id(&author));
+                                    warn!("Group history row skipped: identity not bound to author (group={}, author={})", gid, crate::log_id(&author));
                                     return None;
                                 }
                                 if !self.message_exists_in_chat(&mid, Some(gid.as_str()), "") {
@@ -693,7 +693,7 @@ impl P2PCore {
                                     // sync are archived without a reply preview for now (a known, accepted scope limit).
                                     // Not shown when it is not on disk: it would vanish on reload.
                                     if let Err(e) = self.archive_group_message(gid, &author, our_direction, m.text.as_bytes(), Some(&mid), None, None, None, m.sent_at_ms, m.author_proof.as_deref()) {
-                                        error!("Grup geçmişi satırı arşivlenemedi: {}", e);
+                                        error!("Could not archive group history row: {}", e);
                                         write_failed = true;
                                         return None;
                                     }
@@ -726,7 +726,7 @@ impl P2PCore {
                                     // Multi-device fix: archive under the CANONICAL chat key (same as the live Text arm). If `peer_fp` is not
                                     // canonical, the rows landed in a separate chat the UI never reads.
                                     if let Err(e) = self.archive_message(&chat_key, our_direction, m.text.as_bytes(), Some(mid), None, None, None, m.sent_at_ms) {
-                                        error!("Geçmiş satırı arşivlenemedi: {}", e);
+                                        error!("Could not archive history row: {}", e);
                                         write_failed = true;
                                         return None;
                                     }
@@ -766,7 +766,7 @@ impl P2PCore {
                             && (m.message_id.is_some() || already_have_since.map(|t| m.timestamp > t as u64).unwrap_or(true));
                         if is_new {
                             if let Err(e) = self.archive_message(&chat_key, our_direction, m.text.as_bytes(), m.message_id.as_deref(), None, None, None, m.sent_at_ms) {
-                                error!("Geçmiş satırı arşivlenemedi: {}", e);
+                                error!("Could not archive history row: {}", e);
                                 write_failed = true;
                                 return None;
                             }
@@ -835,7 +835,7 @@ impl P2PCore {
                 if let Some(gid) = &group_id {
                     if !self.sender_may_post_to_group(gid, &sender_identity_id) {
                         warn!(
-                            "Grup dosya teklifi REDDEDİLDİ: gönderen bu grubun üyesi değil (group={}, gönderen={})",
+                            "Group file offer REJECTED: sender is not a member of this group (group={}, sender={})",
                             gid, crate::log_id(&sender_identity_id)
                         );
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -948,7 +948,7 @@ impl P2PCore {
                 let avatar_too_big = avatar_jpeg.as_ref().map_or(false, |a| a.len() > MAX_AVATAR_BYTES);
                 if avatar_too_big {
                     warn!(
-                        "ProfileUpdate avatarı çok büyük ({} bayt), yok sayıldı (gönderen: {})",
+                        "ProfileUpdate avatar too large ({} bytes), ignored (sender: {})",
                         avatar_jpeg.as_ref().map_or(0, |a| a.len()), crate::log_id(&peer_fp)
                     );
                 }
@@ -960,7 +960,7 @@ impl P2PCore {
                             "UPDATE identities SET avatar_jpeg = ?1 WHERE id = ?2",
                             params![avatar_jpeg, sender_identity_id],
                         ) {
-                            error!("Profil fotoğrafı kaydedilemedi: {}", e);
+                            error!("Could not save profile photo: {}", e);
                         }
                     }
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -1009,7 +1009,7 @@ impl P2PCore {
                         serde_json::json!({"type": "group_updated", "peer": peer_fp, "group_id": group_id})
                     }
                     Err(e) => {
-                        error!("GroupUpdate işlenemedi: {}", e);
+                        error!("Could not process GroupUpdate: {}", e);
                         // Only an unknown signer can be cured by a later packet.
                         // Every other error is final: without the Ack the
                         // sender resent the same update for 7 days.
@@ -1037,7 +1037,7 @@ impl P2PCore {
                                 self.meta_put(&key, &now.to_string());
                                 self.send_group_update_to_member(&group_id, &sender_identity_id, &update);
                             }
-                            Err(e) => warn!("GroupSyncRequest yanıtlanamadı: {}", e),
+                            Err(e) => warn!("Could not answer GroupSyncRequest: {}", e),
                         }
                     }
                 }
@@ -1050,7 +1050,7 @@ impl P2PCore {
                 // process it, e.g. we are not this group's founder, retrying would not help).
                 self.send_ack(&peer_fp, &message_id);
                 if let Err(e) = self.remove_from_group(&group_id, &sender_identity_id, false) {
-                    error!("LeaveGroupRequest işlenemedi (group={}, ayrılan={}): {}", group_id, crate::log_id(&sender_identity_id), e);
+                    error!("Could not process LeaveGroupRequest (group={}, leaving={}): {}", group_id, crate::log_id(&sender_identity_id), e);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 serde_json::json!({"type": "member_left", "group_id": group_id, "identity_id": sender_identity_id})
@@ -1072,7 +1072,7 @@ impl P2PCore {
                 if own_pid.is_some() {
                     self.remember_device_addr(&peer_fp, &multiaddr);
                 } else {
-                    warn!("AddressAnnounce yok sayıldı (onion değil ya da başka bir PeerId): {}", crate::log_id(&peer_fp));
+                    warn!("AddressAnnounce ignored (not onion or a different PeerId): {}", crate::log_id(&peer_fp));
                 }
                 serde_json::json!({"type": "address_announce", "peer": peer_fp})
             }
@@ -1086,7 +1086,7 @@ impl P2PCore {
                         if linked { serde_json::json!({"type": "device_linked", "identity_id": identity_id}) } else { serde_json::json!({"type": "noop"}) }
                     }
                     Err(e) => {
-                        error!("DeviceLinkGrant benimsenemedi: {}", e);
+                        error!("DeviceLinkGrant not accepted: {}", e);
                         // Past the link window no retry can be adopted (a new
                         // QR has a new nonce): acked, or it came for 7 days.
                         if current_time_ms() > self.link_request_open_until {
@@ -1101,7 +1101,7 @@ impl P2PCore {
                 self.send_ack(&peer_fp, &message_id);
                 match self.apply_device_add_notice(&device_add, &device, &sender_identity_id) {
                     Ok(()) => serde_json::json!({"type": "device_change", "identity_id": device_add.identity_id}),
-                    Err(e) => { error!("DeviceAddNotice reddedildi: {}", e); serde_json::json!({"type": "noop"}) }
+                    Err(e) => { error!("DeviceAddNotice rejected: {}", e); serde_json::json!({"type": "noop"}) }
                 }
             }
             // Multi-device: signed device revocation.
@@ -1114,7 +1114,7 @@ impl P2PCore {
                     // and return to onboarding (see `wipe_all_local_state`). `self_revoked` is already queued by `apply_device_revoke_notice`.
                     Ok(true) => serde_json::json!({"type": "noop"}),
                     Ok(false) => serde_json::json!({"type": "device_change", "identity_id": revoke.identity_id}),
-                    Err(e) => { error!("DeviceRevokeNotice reddedildi: {}", e); serde_json::json!({"type": "noop"}) }
+                    Err(e) => { error!("DeviceRevokeNotice rejected: {}", e); serde_json::json!({"type": "noop"}) }
                 }
             }
             // Multi-device: delta sync from a sibling device. Accept ONLY if the sender is one of my own identity's devices.
@@ -1132,7 +1132,7 @@ impl P2PCore {
                     if let Some(ark) = &sync.archive_root_key {
                         let had_key = self.archive_root_key.is_some();
                         if self.adopt_archive_key(ark, my_id_now.as_deref() == Some(peer_fp.as_str())) {
-                            info!("Kardeş cihazdan kök arşiv anahtarı alındı");
+                            info!("Root archive key received from sibling device");
                             // Rows written before the first key came were never
                             // queued. Not after a rotation: the primary uploads
                             // the history again, this device does not.
@@ -1282,7 +1282,7 @@ impl P2PCore {
                                 ack = self.remember_sibling_op(&target_message_id, Some(&new_text), edited_at_ms);
                                 serde_json::json!({"type": "noop"})
                             } else if !self.own_sent_target(group_id.as_deref(), chat_key.as_deref().unwrap_or(""), &target_message_id) {
-                                warn!("Kardeş Edit yok sayıldı: hedef bizim gönderdiğimiz bir mesaj değil ({})", target_message_id);
+                                warn!("Sibling Edit ignored: target is not a message we sent ({})", target_message_id);
                                 serde_json::json!({"type": "noop"})
                             } else if let Some(gid) = &group_id {
                                 self.apply_edit_to_archive(Some(gid), "", &target_message_id, &new_text, edited_at_ms);
@@ -1299,7 +1299,7 @@ impl P2PCore {
                             // Same checks as the contact arm; a 1:1 row's chat is the conversation identity, not mine.
                             let chat_identity = if group_id.is_some() { own_id.as_str() } else { conversation_identity_id.as_deref().unwrap_or("") };
                             if emoji.len() > 64 || !self.reaction_fits_chat(&target_message_id, group_id.as_deref(), chat_identity) {
-                                warn!("Kardeş tepkisi yok sayıldı: hedef bu sohbete ait değil ya da emoji çok uzun");
+                                warn!("Sibling reaction ignored: target not in this chat or emoji too long");
                                 serde_json::json!({"type": "noop"})
                             } else if !self.apply_reaction(&target_message_id, &own_id, &emoji, reacted_at_ms) {
                                 ack = false; // write failed: the sibling sends it again
@@ -1364,7 +1364,7 @@ impl P2PCore {
                                     Ok(Some(whole)) => whole,
                                     Ok(None) => break 'sticker serde_json::json!({"type": "noop"}),
                                     Err(e) => {
-                                        warn!("Kardeş sticker parçası atıldı: {}", e);
+                                        warn!("Sibling sticker chunk dropped: {}", e);
                                         break 'sticker serde_json::json!({"type": "noop"});
                                     }
                                 }
@@ -1387,7 +1387,7 @@ impl P2PCore {
                             match stored {
                                 Ok(id) => serde_json::json!({"type": "stickers_changed", "added": id}),
                                 Err(e) => {
-                                    warn!("Kardeş sticker saklanamadı: {}", e);
+                                    warn!("Could not store sibling sticker: {}", e);
                                     ack = not_a_sticker;
                                     serde_json::json!({"type": "noop"})
                                 }
@@ -1430,7 +1430,7 @@ impl P2PCore {
                         SiblingEchoBody::StickerRemoved { id } => match self.delete_sticker(&id, false) {
                             Ok(()) => serde_json::json!({"type": "stickers_changed", "removed": id}),
                             Err(e) => {
-                                warn!("Kardeş sticker silinemedi: {}", e);
+                                warn!("Could not delete sibling sticker: {}", e);
                                 // A bad id is final; a DB error is sent again.
                                 ack = self.sticker_enc_path(&id).is_err();
                                 serde_json::json!({"type": "noop"})
@@ -1441,7 +1441,7 @@ impl P2PCore {
                                 Some(cid) => match self.delete_contact(&cid, false) {
                                     Ok(()) => serde_json::json!({"type": "device_change", "identity_id": identity_id}),
                                     Err(e) => {
-                                        warn!("Kardeş kişi silinemedi: {}", e);
+                                        warn!("Could not delete sibling contact: {}", e);
                                         ack = false; // DB error: the sibling sends again.
                                         serde_json::json!({"type": "noop"})
                                     }
@@ -1464,7 +1464,7 @@ impl P2PCore {
                                 ack = self.remember_sibling_op(&target_message_id, None, 0);
                                 serde_json::json!({"type": "noop"})
                             } else if !self.own_sent_target(group_id.as_deref(), chat_key.as_deref().unwrap_or(""), &target_message_id) {
-                                warn!("Kardeş Delete yok sayıldı: hedef bizim gönderdiğimiz bir mesaj değil ({})", target_message_id);
+                                warn!("Sibling Delete ignored: target is not a message we sent ({})", target_message_id);
                                 serde_json::json!({"type": "noop"})
                             } else {
                                 self.purge_attachment_if_exists(&target_message_id);
@@ -1507,11 +1507,11 @@ impl P2PCore {
                 // `verify_device_auth`): a stolen secondary wiped the others,
                 // and made every contact drop the identity.
                 if peer_fp != sender_identity_id {
-                    warn!("AccountDeleted ana cihazdan gelmedi, yok sayıldı (peer={})", crate::log_id(&peer_fp));
+                    warn!("AccountDeleted did not come from primary device, ignored (peer={})", crate::log_id(&peer_fp));
                     serde_json::json!({"type": "noop"})
                 } else if from_sibling {
                     // The account was deleted from one of my other devices: this device is deleted too (the UI cleans up files and restarts with `self_revoked`).
-                    warn!("Hesap kardeş cihazdan silindi (peer={}) — yerel durum siliniyor", crate::log_id(&peer_fp));
+                    warn!("Account deleted from sibling device (peer={}) — wiping local state", crate::log_id(&peer_fp));
                     self.wipe_all_local_state();
                     serde_json::json!({"type": "self_revoked"})
                 } else {
@@ -1520,7 +1520,7 @@ impl P2PCore {
                         .map(|c| c.display_name.clone())
                         .unwrap_or_default();
                     let group_ids = self.apply_account_deleted(&sender_identity_id);
-                    info!("Kişi hesabını sildi: {} ({} grup)", crate::log_id(&sender_identity_id), group_ids.len());
+                    info!("Contact deleted their account: {} ({} groups)", crate::log_id(&sender_identity_id), group_ids.len());
                     serde_json::json!({
                         "type": "account_deleted", "peer": chat_key,
                         "identity_id": sender_identity_id,
@@ -1548,7 +1548,7 @@ impl P2PCore {
                     // The echo is the request's own window, not the clamped one.
                     let resp = MessageContent::SiblingHistoryResponse { entries, window: before_timestamp.zip(after_timestamp), more };
                     if let Err(e) = self.send_message_content(peer_fp.clone(), &resp, None) {
-                        error!("SiblingHistoryResponse gönderilemedi: {}", e);
+                        error!("SiblingHistoryResponse could not be sent: {}", e);
                     }
                 }
                 serde_json::json!({"type": "noop"})

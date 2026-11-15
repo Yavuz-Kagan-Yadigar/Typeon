@@ -114,7 +114,7 @@ pub(crate) mod lock_watch {
                         next_log_ms = held.saturating_mul(2);
                         let holder = HOLDER.lock().ok().and_then(|h| *h).map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
                         let phase = PHASE.lock().map(|p| *p).unwrap_or("?");
-                        log::warn!("Çekirdek kilidi {} sn'dir tutuluyor: alan={} poll_fazı={}", held / 1000, holder, phase);
+                        log::warn!("Core lock held for {} s: holder={} poll_phase={}", held / 1000, holder, phase);
                         continue;
                     }
                     // Woken early by `acquired` (new holder) or after the wait.
@@ -195,7 +195,7 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
     };
     let waited = started.elapsed().as_millis() as u64;
     if waited > timeout_ms + 5_000 {
-        log::warn!("Ağ beklemesi zaman aşımını aştı: {} ms (zaman aşımı {} ms)", waited, timeout_ms);
+        log::warn!("Network wait exceeded timeout: {} ms (timeout {} ms)", waited, timeout_ms);
     }
     if let Some(ev) = event {
         core.deferred_swarm_events.push(ev);

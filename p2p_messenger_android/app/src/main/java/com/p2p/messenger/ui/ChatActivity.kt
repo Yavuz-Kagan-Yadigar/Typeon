@@ -1827,7 +1827,7 @@ class ChatActivity : AppCompatActivity() {
                             output.write(buf, 0, n)
                         }
                     }
-                } ?: throw java.io.IOException("Dosya açılamadı")
+                } ?: throw java.io.IOException("File could not be opened")
 
                 val previewJpeg = try {
                     when {

@@ -226,7 +226,7 @@ class P2PApplication : Application() {
                                 Intent(this@P2PApplication, com.p2p.messenger.service.P2PService::class.java)
                             )
                         } catch (e: Exception) {
-                            com.p2p.messenger.util.Log.w("P2PApplication", "Servis başlatılamadı: ${e.message}")
+                            com.p2p.messenger.util.Log.w("P2PApplication", "Service could not be started: ${e.message}")
                         }
                     }
                 }

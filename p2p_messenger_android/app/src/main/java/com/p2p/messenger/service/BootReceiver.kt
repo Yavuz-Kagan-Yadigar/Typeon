@@ -43,7 +43,7 @@ class BootReceiver : BroadcastReceiver() {
             } catch (e: Throwable) {
                 // If the device is still in direct boot, or an OEM restriction applies, skip quietly. `P2PRetryWorker` and the user opening the app are still
                 // the fallback paths.
-                Log.w("BootReceiver", "Açılışta servis başlatılamadı: ${e.message}")
+                Log.w("BootReceiver", "Service could not be started at boot: ${e.message}")
             } finally {
                 pending.finish()
             }

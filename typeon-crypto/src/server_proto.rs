@@ -601,10 +601,10 @@ pub fn parse_server_invite(text: &str) -> Result<ServerInvite, String> {
     let trimmed = text.trim();
     let body = trimmed
         .strip_prefix(SERVER_INVITE_SCHEME)
-        .ok_or_else(|| format!("Kod '{}' ile başlamalı", SERVER_INVITE_SCHEME))?;
+        .ok_or_else(|| format!("Code must start with '{}'", SERVER_INVITE_SCHEME))?;
     let (addr_part, token) = body
         .split_once('#')
-        .ok_or("Kodda davet jetonu ('#' sonrası) yok")?;
+        .ok_or("Invite token ('#' part) missing from code")?;
     // Addresses are separated by commas. A multiaddr contains neither `#` nor `,`, so
     // both splits are unambiguous. Codes with a single address still parse.
     let addrs: Vec<String> = addr_part
@@ -613,10 +613,10 @@ pub fn parse_server_invite(text: &str) -> Result<ServerInvite, String> {
         .filter(|a| !a.is_empty())
         .collect();
     if addrs.is_empty() {
-        return Err("Kodda sunucu adresi yok".to_string());
+        return Err("Server address missing from code".to_string());
     }
     if token.trim().is_empty() {
-        return Err("Kodda davet jetonu boş".to_string());
+        return Err("Invite token in code is empty".to_string());
     }
     Ok(ServerInvite { addrs, token: token.trim().to_string() })
 }
@@ -799,7 +799,7 @@ mod tests {
         // Tests the note at the top of the module: libp2p-request-response's CBOR codec
         // truncates requests at 1 MiB. If this constant gets close to that, envelopes
         // start to corrupt silently.
-        assert!(MAX_DEPOSIT_BYTES < 1024 * 1024, "codec sert sinirini asamaz");
+        assert!(MAX_DEPOSIT_BYTES < 1024 * 1024, "codec cannot exceed its hard limit");
         assert!(ServerLimits::default().max_item_bytes as usize <= MAX_DEPOSIT_BYTES);
     }
 

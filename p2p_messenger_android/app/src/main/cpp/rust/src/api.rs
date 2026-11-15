@@ -182,7 +182,7 @@ pub fn poll_network() -> Vec<String> {
         let out = crate::core_lock_poll().poll_events();
         let took = started.elapsed().as_millis();
         if took > 5_000 {
-            log::warn!("poll_events {} ms sürdü", took);
+            log::warn!("poll_events took {} ms", took);
         }
         out
     })

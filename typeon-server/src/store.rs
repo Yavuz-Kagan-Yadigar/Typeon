@@ -136,25 +136,25 @@ pub fn set_db_key(key: Option<zeroize::Zeroizing<[u8; 32]>>) {
 /// Parses a 64-hex-character key (CLI `TYPEON_SERVER_DB_KEY`).
 pub fn parse_hex_db_key(hex_key: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
     let mut key = zeroize::Zeroizing::new([0u8; 32]);
-    hex::decode_to_slice(hex_key, &mut key[..]).map_err(|_| "DB anahtarı 64 hex karakter olmalı".to_string())?;
+    hex::decode_to_slice(hex_key, &mut key[..]).map_err(|_| "DB key must be 64 hex characters".to_string())?;
     Ok(key)
 }
 
 /// Opens `path` with the raw key. Returns an error if the key does not match, or if the linked SQLite has no SQLCipher
 /// (a plain build would ignore `PRAGMA key` and silently write plaintext).
 fn open_keyed(path: &Path, key: &str) -> Result<Connection, String> {
-    let conn = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
+    let conn = Connection::open(path).map_err(|e| format!("DB could not be opened: {e}"))?;
     let cipher: Option<String> = conn
         .query_row("PRAGMA cipher_version", [], |r| r.get(0))
         .optional()
-        .map_err(|e| format!("DB anahtarı: {e}"))?;
+        .map_err(|e| format!("DB key: {e}"))?;
     if cipher.map_or(true, |v| v.is_empty()) {
-        return Err("DB anahtarı: SQLite SQLCipher olmadan derlenmiş".into());
+        return Err("DB key: SQLite built without SQLCipher".into());
     }
     conn.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = \"x'{key}'\";")))
-        .map_err(|e| format!("DB anahtarı: {e}"))?;
+        .map_err(|e| format!("DB key: {e}"))?;
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-        .map_err(|e| format!("DB şifre çözülemedi: {e}"))?;
+        .map_err(|e| format!("DB could not be decrypted: {e}"))?;
     Ok(conn)
 }
 
@@ -165,19 +165,19 @@ fn migrate_plain_to_keyed(path: &Path, key: &str) -> Result<(), String> {
     if !path.exists() || open_keyed(path, key).is_ok() {
         return Ok(());
     }
-    let err = |e: rusqlite::Error| format!("DB şifreleme geçişi: {e}");
+    let err = |e: rusqlite::Error| format!("DB encryption migration: {e}");
     let objects = |c: &Connection| c.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0));
     let tmp = path.with_extension("db.enc");
     for suffix in ["", "-journal", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", tmp.display()));
     }
-    let plain = Connection::open(path).map_err(|e| format!("DB açılamadı: {e}"))?;
-    let expected = objects(&plain).map_err(|_| "DB ne düz ne de bu anahtarla açılıyor (yanlış anahtar?)".to_string())?;
+    let plain = Connection::open(path).map_err(|e| format!("DB could not be opened: {e}"))?;
+    let expected = objects(&plain).map_err(|_| "DB opens neither plain nor with this key (wrong key?)".to_string())?;
     // Fold the WAL into the main file and leave WAL mode. A leftover `-wal` next to the encrypted file would be
     // replayed into it.
     let mode: String = plain.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0)).map_err(err)?;
     if !mode.eq_ignore_ascii_case("delete") {
-        return Err("DB şifreleme geçişi: plain database is still in WAL mode".into());
+        return Err("DB encryption migration: plain database is still in WAL mode".into());
     }
     let user_version: i64 = plain.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(err)?;
     let tmp_s = tmp.to_string_lossy().replace('\'', "''");
@@ -192,15 +192,15 @@ fn migrate_plain_to_keyed(path: &Path, key: &str) -> Result<(), String> {
 
     let encrypted = open_keyed(&tmp, key)?;
     if objects(&encrypted).map_err(err)? != expected {
-        return Err("DB şifreleme geçişi: encrypted copy is incomplete".into());
+        return Err("DB encryption migration: encrypted copy is incomplete".into());
     }
     drop(encrypted);
 
-    std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| format!("DB şifreleme geçişi: {e}"))?;
+    std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(|e| format!("DB encryption migration: {e}"))?;
     for ext in ["db-wal", "db-shm", "db-journal"] {
         let _ = std::fs::remove_file(path.with_extension(ext));
     }
-    std::fs::rename(&tmp, path).map_err(|e| format!("DB şifreleme geçişi: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("DB encryption migration: {e}"))?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
     }
@@ -216,7 +216,7 @@ impl Store {
                 migrate_plain_to_keyed(db_path, k)?;
                 open_keyed(db_path, k)?
             }
-            None => Connection::open(db_path).map_err(|e| format!("DB açılamadı: {e}"))?,
+            None => Connection::open(db_path).map_err(|e| format!("DB could not be opened: {e}"))?,
         };
         // Incremental auto-vacuum, so the file shrinks after mail is acked (see `incremental_vacuum`). It only takes
         // effect before the first table exists, or through one VACUUM. Hence the one-time VACUUM on a database created
@@ -231,8 +231,8 @@ impl Store {
         // in rollback mode, where the JNI or CLI connection blocks the server.
         match conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
             Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
-            Ok(mode) => log::warn!("SQLite WAL açılamadı, journal_mode={mode}: ikinci bağlantı yazarken sunucu bekler"),
-            Err(e) => log::warn!("SQLite WAL açılamadı: {e}"),
+            Ok(mode) => log::warn!("SQLite WAL could not be enabled, journal_mode={mode}: server waits while a second connection writes"),
+            Err(e) => log::warn!("SQLite WAL could not be enabled: {e}"),
         }
         // FULL: a `Deposited` answer lets the sender drop its copy, so the mail row must be on disk before that answer,
         // not only in the WAL.
@@ -424,12 +424,12 @@ impl Store {
                 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB);
                 "#,
             )
-            .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+            .map_err(|e| format!("Schema could not be created: {e}"))?;
         // SQLite has no `ADD COLUMN IF NOT EXISTS`. Only "duplicate column name" means the column is already there. Any
         // other failure fails init before `user_version` is stamped, so the next start retries.
         let add_column = |sql: &str| -> Result<(), String> {
             match self.conn.execute(sql, []) {
-                Err(e) if !e.to_string().contains("duplicate column name") => Err(format!("Şema oluşturulamadı ({sql}): {e}")),
+                Err(e) if !e.to_string().contains("duplicate column name") => Err(format!("Schema could not be created ({sql}): {e}")),
                 _ => Ok(()),
             }
         };
@@ -443,7 +443,7 @@ impl Store {
         let old_mail: bool = self
             .conn
             .query_row("SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master WHERE type = 'table' AND name = 'mail'", [], |r| r.get(0))
-            .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+            .map_err(|e| format!("Schema could not be created: {e}"))?;
         if old_mail {
             self.conn
                 .execute_batch(
@@ -462,7 +462,7 @@ impl Store {
                      ALTER TABLE mail_new RENAME TO mail;
                      COMMIT;",
                 )
-                .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+                .map_err(|e| format!("Schema could not be created: {e}"))?;
         }
         // The per-mailbox key binding becomes a per-reader key. Each reader keeps the key its box was bound to, then
         // the binding table is dropped.
@@ -483,10 +483,10 @@ impl Store {
                  -- from the index and never touch the `sealed` blobs.
                  CREATE INDEX IF NOT EXISTS idx_mail_depositor ON mail(depositor, byte_len);",
             )
-            .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+            .map_err(|e| format!("Schema could not be created: {e}"))?;
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| format!("Şema oluşturulamadı: {e}"))?;
+            .map_err(|e| format!("Schema could not be created: {e}"))?;
         Ok(())
     }
 
@@ -752,7 +752,7 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         if n == 0 {
-            return Err("Kayıt bulunamadı".to_string());
+            return Err("Record not found".to_string());
         }
         tx.commit().map_err(|e| e.to_string())
     }
@@ -772,7 +772,7 @@ impl Store {
         self.conn
             .execute("UPDATE enrollments SET state = 'revoked' WHERE enrollment_id = ?1", params![enrollment_id])
             .map_err(|e| e.to_string())
-            .and_then(|n| if n == 0 { Err("Kayıt bulunamadı".to_string()) } else { Ok(()) })?;
+            .and_then(|n| if n == 0 { Err("Record not found".to_string()) } else { Ok(()) })?;
         tx.commit().map_err(|e| e.to_string())
     }
 
@@ -1509,7 +1509,7 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         if n == 0 {
-            return Err("Blob tamamlanamadı (eksik parça ya da satır yok)".to_string());
+            return Err("Blob not completed (missing chunk or row)".to_string());
         }
         Ok(())
     }
@@ -1780,7 +1780,7 @@ mod tests {
 
         let s1 = s.deposit("mb_1", b"one", &a, 1, 1000).unwrap();
         let s2 = s.deposit("mb_1", b"two", &a, 2, 1000).unwrap();
-        assert!(s2 > s1, "seq kesin artan olmali");
+        assert!(s2 > s1, "seq must strictly increase");
 
         let b = enroll(&s, b"bbbb", "peerB");
         register(&s, &b, "mb_1");
@@ -1788,7 +1788,7 @@ mod tests {
         assert_eq!(items.len(), 2);
         // Advance the cursor. The same items must not arrive again.
         let (again, _) = s.fetch(&b, &[("mb_1".into(), s2)], 10, 4096);
-        assert!(again.is_empty(), "islenmis ogeler tekrar gelmemeli");
+        assert!(again.is_empty(), "processed items must not come back");
         // Continue from the middle. No gap must appear.
         let (mid, _) = s.fetch(&b, &[("mb_1".into(), s1)], 10, 4096);
         assert_eq!(mid.len(), 1);
@@ -1828,7 +1828,7 @@ mod tests {
         assert_eq!(items.len(), 3);
         assert!(more);
         let (items, more) = s.fetch(&b, &[("mb_1".into(), 0)], 100, 250);
-        assert!(items.len() <= 2 && more, "bayt tavani uygulanmali");
+        assert!(items.len() <= 2 && more, "byte cap must be enforced");
     }
 
     #[test]
@@ -1846,7 +1846,7 @@ mod tests {
 
         let (for_a, _) = s.fetch(&a, &[("mb_1".into(), 0)], 10, 4096);
         assert_eq!(for_a.len(), 1);
-        assert_eq!(for_a[0].sealed, b"b-den", "A sadece B'nin biraktigini gormeli");
+        assert_eq!(for_a[0].sealed, b"b-den", "A must see only what B left");
 
         let (for_b, _) = s.fetch(&b, &[("mb_1".into(), 0)], 10, 4096);
         assert_eq!(for_b.len(), 1);
@@ -1939,9 +1939,9 @@ mod tests {
         register(&s, &recipient, "mb_1");
         let seq = s.deposit("mb_1", b"hello", &sender, 1, 1000).unwrap();
 
-        assert_eq!(s.ack("mb_1", seq, &sender).unwrap(), 0, "birakan silememeli");
+        assert_eq!(s.ack("mb_1", seq, &sender).unwrap(), 0, "the depositor must not delete");
         assert_eq!(s.mailbox_item_count("mb_1"), 1);
-        assert_eq!(s.ack("mb_1", seq, &recipient).unwrap(), 1, "alici silebilmeli");
+        assert_eq!(s.ack("mb_1", seq, &recipient).unwrap(), 1, "recipient must be able to delete");
         assert_eq!(s.mailbox_item_count("mb_1"), 0);
     }
 
@@ -1974,7 +1974,7 @@ mod tests {
         let first = s.deposit("mb_1", b"ayni-el-sikisma", &sender, 1, 1000).unwrap();
         for i in 2..50 {
             let again = s.deposit("mb_1", b"ayni-el-sikisma", &sender, i, 1000).unwrap();
-            assert_eq!(again, first, "ayni zarf ayni seq'e dusmeli");
+            assert_eq!(again, first, "same envelope must map to the same seq");
         }
         assert_eq!(s.mailbox_item_count("mb_1"), 1);
 
@@ -1999,12 +1999,12 @@ mod tests {
         let seq = s.deposit("mb_1", b"gizli", &sender, 1, 1000).unwrap();
 
         let (stolen, _) = s.fetch(&snoop, &[("mb_1".into(), 0)], 10, 4096);
-        assert!(stolen.is_empty(), "kaydetmemis istemci okuyamamali");
-        assert_eq!(s.ack("mb_1", seq, &snoop).unwrap(), 0, "kaydetmemis istemci silememeli");
+        assert!(stolen.is_empty(), "unregistered client must not read");
+        assert_eq!(s.ack("mb_1", seq, &snoop).unwrap(), 0, "unregistered client must not delete");
         assert_eq!(s.mailbox_item_count("mb_1"), 1, "posta yerinde kalmali");
 
         let (mine, _) = s.fetch(&victim, &[("mb_1".into(), 0)], 10, 4096);
-        assert_eq!(mine.len(), 1, "gercek alici hala okuyabilmeli");
+        assert_eq!(mine.len(), 1, "real recipient must still be able to read");
         assert_eq!(s.ack("mb_1", seq, &victim).unwrap(), 1);
     }
 
@@ -2033,9 +2033,9 @@ mod tests {
         register(&s, &lurker, "mb_fp");
         let seq = s.deposit("mb_fp", b"handshake", &sender, 1, 1000).unwrap();
 
-        assert_eq!(s.ack("mb_fp", seq, &lurker).unwrap(), 0, "yabanci onayi silmemeli");
+        assert_eq!(s.ack("mb_fp", seq, &lurker).unwrap(), 0, "a stranger's ack must not delete");
         let (mine, _) = s.fetch(&victim, &[("mb_fp".into(), 0)], 10, 4096);
-        assert_eq!(mine.len(), 1, "alici postasini hala almali");
+        assert_eq!(mine.len(), 1, "recipient must still get its mail");
 
         // The recipient acks. If the stranger had not acked, the row would stay until the TTL but would not count toward
         // capacity. Here both acked.
@@ -2049,7 +2049,7 @@ mod tests {
         let same_key = vec![("mb_fp".to_string(), b"test-key".to_vec())];
         assert_eq!(s.register_mailboxes_proved(&third, &["mb_fp".to_string()], &[], &same_key, 0, 100).unwrap().0.len(), 1);
         // The lurker is the silent reader here: it has not acked seq2.
-        assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "sessiz okuyucu varken silinmez");
+        assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "not deleted while a silent reader exists");
         assert_eq!(s.mailbox_item_count("mb_fp"), 0, "alicinin onayladigi satir kapasiteye sayilmaz");
         assert_eq!(s.ack("mb_fp", seq2, &lurker).unwrap(), 1);
     }
@@ -2093,7 +2093,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let a = enroll(&s, b"aaaa", "peerA");
         s.blob_begin("bl_s", &a, 2, 0).unwrap();
-        assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 0, "baslangicta bilinmiyor");
+        assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 0, "unknown at start");
         s.blob_set_chunk_size("bl_s", 512 * 1024);
         assert_eq!(s.blob_state("bl_s").unwrap().chunk_size, 512 * 1024);
         // The first value is FIXED. Later chunks cannot claim a different stride.
@@ -2252,7 +2252,7 @@ mod tests {
         s.archive_put("ar_1", &[rec("m1", 1, 100, b"ilk")], &a, 0).unwrap();
         s.archive_put("ar_1", &[rec("m1", 2, 100, b"duzeltilmis")], &a, 0).unwrap();
         let (page, _) = s.archive_fetch("ar_1", None, 10, 65536);
-        assert_eq!(page.len(), 1, "ayni record_id tek satir olmali");
+        assert_eq!(page.len(), 1, "same record_id must be one row");
         assert_eq!(page[0].sealed, b"duzeltilmis");
 
         // A LOWER rev must not restore the old version (out-of-order delivery).
@@ -2271,7 +2271,7 @@ mod tests {
         let (page, more) = s.archive_fetch("ar_1", None, 2, 65536);
         assert_eq!(page.len(), 2);
         assert!(more);
-        assert_eq!(page[0].sent_at_ms, 104, "en yeni once");
+        assert_eq!(page[0].sent_at_ms, 104, "newest first");
         // Paging: from the newest seen to older.
         let (older, _) = s.archive_fetch("ar_1", Some((page[1].sent_at_ms, page[1].record_id.as_str())), 10, 65536);
         assert_eq!(older.len(), 3);
@@ -2307,7 +2307,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.create_invite(b"pub", "herkese-acik", 0, 0, 0).unwrap();
         s.delete_invite(b"pub").unwrap();
-        assert!(!s.consume_invite(b"pub", 10).unwrap(), "donen kod eskisini gecersiz kilmali");
+        assert!(!s.consume_invite(b"pub", 10).unwrap(), "rotated code must invalidate the old one");
         assert_eq!(s.invite_uses_left(b"pub", 0), None);
     }
 
@@ -2316,7 +2316,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.create_invite(b"hash", "test", 1, 0, 0).unwrap();
         assert!(s.consume_invite(b"hash", 10).unwrap());
-        assert!(!s.consume_invite(b"hash", 10).unwrap(), "tek kullanimlik olmali");
+        assert!(!s.consume_invite(b"hash", 10).unwrap(), "must be single-use");
     }
 
     #[test]
@@ -2414,7 +2414,7 @@ mod tests {
         enroll(&s, b"bbbb", "peerNew");
         s.rebind_enrollment(&a, "peerNew", 5).unwrap();
         let found = s.enrollment_by_peer("peerNew").unwrap();
-        assert_eq!(found.enrollment_id, a, "yeni PeerId artik a kaydina cozulmeli");
+        assert_eq!(found.enrollment_id, a, "new PeerId must now resolve to a's record");
         // A second displaced holder must not collide with the first one.
         let c = enroll(&s, b"cccc", "peerThird");
         enroll(&s, b"dddd", "peerFourth");
@@ -2474,7 +2474,7 @@ mod tests {
         s.blob_record_chunk("bl_1", 2, 10).unwrap();
         s.blob_record_chunk("bl_1", 0, 10).unwrap();
         assert!(s.blob_finish("bl_1", b"h", 5).is_err());
-        assert!(!s.blob_state("bl_1").unwrap().complete, "eksik parcayla tamamlanmamali");
+        assert!(!s.blob_state("bl_1").unwrap().complete, "must not complete with a missing chunk");
         assert_eq!(s.blob_state("bl_1").unwrap().received_chunks, 2);
         s.blob_record_chunk("bl_1", 1, 10).unwrap();
         s.blob_finish("bl_1", b"h", 5).unwrap();
@@ -2489,7 +2489,7 @@ mod tests {
         s.blob_begin("bl_1", &a, 2, 0).unwrap();
         s.blob_record_chunk("bl_1", 0, 100).unwrap();
         s.blob_record_chunk("bl_1", 0, 100).unwrap();  // Connection dropped, retry.
-        assert_eq!(s.blob_state("bl_1").unwrap().byte_len, 100, "tekrar gonderilen parca iki kez sayilmamali");
+        assert_eq!(s.blob_state("bl_1").unwrap().byte_len, 100, "resent chunk must not be counted twice");
         s.blob_record_chunk("bl_1", 1, 100).unwrap();
         assert_eq!(s.blob_state("bl_1").unwrap().byte_len, 200);
     }
@@ -2501,7 +2501,7 @@ mod tests {
         s.blob_begin("bl_1", &a, 1, 0).unwrap();
         s.blob_record_chunk("bl_1", 0, 10).unwrap();
         s.blob_finish("bl_1", b"h", 0).unwrap();
-        assert!(s.blobs_to_gc(500, 1000).is_empty(), "TTL dolmadan silinmemeli");
+        assert!(s.blobs_to_gc(500, 1000).is_empty(), "must not be deleted before TTL expires");
         // A file still being downloaded must keep living.
         s.blob_touch("bl_1", 900);
         assert!(s.blobs_to_gc(1500, 1000).is_empty());

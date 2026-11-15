@@ -164,7 +164,7 @@ impl P2PCore {
                             // The real listen address. The `node_address` shown on the QR / "my code" screen comes from here
                             // (see `own_listen_addrs` and `get_node_address`).
                             if address.iter().any(|p| matches!(p, MultiaddrProtocol::P2pCircuit)) {
-                                info!("Röle rezervasyonu kabul edildi: {}", address);
+                                info!("Relay reservation accepted: {}", address);
                             }
                             listen_addr_changes.push((address, true));
                         }
@@ -180,15 +180,15 @@ impl P2PCore {
                             // until restart. A port another app
                             // took fails at once here, so this does not loop.
                             for a in addresses.iter().filter(|a| is_loopback_multiaddr(a)) {
-                                warn!("Yerel dinleyici kapandı ({:?}), yeniden açılıyor: {}", reason, a);
+                                warn!("Local listener closed ({:?}), reopening: {}", reason, a);
                                 if let Err(e) = swarm.listen_on(a.clone()) {
-                                    error!("Yerel dinleyici yeniden açılamadı ({}): {}", a, e);
+                                    error!("Could not reopen local listener ({}): {}", a, e);
                                 }
                             }
                             listen_addr_changes.extend(addresses.into_iter().map(|a| (a, false)));
                         }
                         libp2p::swarm::SwarmEvent::ListenerError { error, .. } => {
-                            warn!("Dinleyici hatası: {}", error);
+                            warn!("Listener error: {}", error);
                         }
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                             if info.protocols.iter().any(|p| p.as_ref() == KEEPALIVE_QUIET_PROTOCOL) {
@@ -256,11 +256,11 @@ impl P2PCore {
                                     if matches!(error, request_response::OutboundFailure::Timeout) {
                                         server_rpc_outcomes.push((peer, false));
                                     }
-                                    warn!("Sunucu isteği başarısız: {:?}", error);
+                                    warn!("Server request failed: {:?}", error);
                                     server_events.push(server_client::ServerEventLocal::OutboundFailure { request_id });
                                 }
                                 request_response::Event::InboundFailure { error, .. } => {
-                                    warn!("Sunucuya yanıt gönderilemedi: {:?}", error);
+                                    warn!("Could not send reply to server: {:?}", error);
                                 }
                                 request_response::Event::ResponseSent { .. } => {}
                             }
@@ -289,7 +289,7 @@ impl P2PCore {
                                     ack_events.push(AckEventLocal::Delivered { request_id });
                                 }
                                 request_response::Event::OutboundFailure { request_id, error, .. } => {
-                                    warn!("Toplu Ack isteği başarısız, şifreli pakete düşülüyor: {:?}", error);
+                                    warn!("Batch Ack request failed, falling back to encrypted packet: {:?}", error);
                                     ack_events.push(AckEventLocal::Failed { request_id });
                                 }
                                 request_response::Event::InboundFailure { .. } | request_response::Event::ResponseSent { .. } => {}
@@ -304,11 +304,11 @@ impl P2PCore {
                                     file_chunk_events.push(FileChunkEventLocal::Response { request_id, response });
                                 }
                                 request_response::Event::OutboundFailure { request_id, error, .. } => {
-                                    error!("Dosya parça isteği başarısız: {:?}", error);
+                                    error!("File chunk request failed: {:?}", error);
                                     file_chunk_events.push(FileChunkEventLocal::OutboundFailure { request_id });
                                 }
                                 request_response::Event::InboundFailure { error, .. } => {
-                                    error!("Dosya parça yanıtı gönderilemedi: {:?}", error);
+                                    error!("Could not send file chunk response: {:?}", error);
                                 }
                                 request_response::Event::ResponseSent { .. } => {}
                             }
@@ -317,7 +317,7 @@ impl P2PCore {
                         // runs asynchronously, and its success or failure shows up here as `ConnectionEstablished` or `OutgoingConnectionError`. Without
                         // logging these, it is impossible to tell why a handshake never completes. Search `adb logcat` for these lines.
                         libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, endpoint, connection_id, num_established, .. } => {
-                            info!("libp2p bağlantısı kuruldu: peer={} adres={:?} giden_mi={} bağlantı_sayısı={}", crate::log_id(&peer_id), endpoint.get_remote_address(), endpoint.is_dialer(), num_established);
+                            info!("libp2p connection established: peer={} addr={:?} outbound={} connection_count={}", crate::log_id(&peer_id), endpoint.get_remote_address(), endpoint.is_dialer(), num_established);
                             established_conns.push((peer_id, connection_id));
                             new_conn_ranks.push((connection_id, conn_path_rank(endpoint.get_remote_address())));
                             if !endpoint.is_dialer() {
@@ -366,14 +366,14 @@ impl P2PCore {
                             });
                         }
                         libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, connection_id } => {
-                            error!("Dial başarısız: peer={:?} hata={}", peer_id.as_ref().map(|p| crate::log_id(p)), error);
+                            error!("Dial failed: peer={:?} error={}", peer_id.as_ref().map(|p| crate::log_id(p)), error);
                             failed_dials.push(connection_id);
                         }
                         libp2p::swarm::SwarmEvent::IncomingConnectionError { error, send_back_addr, .. } => {
-                            error!("Gelen bağlantı başarısız: adres={} hata={}", send_back_addr, error);
+                            error!("Incoming connection failed: addr={} error={}", send_back_addr, error);
                         }
                         libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, cause, num_established, connection_id, .. } => {
-                            info!("libp2p bağlantısı kapandı: peer={} sebep={:?} kalan_bağlantı={}", crate::log_id(&peer_id), cause, num_established);
+                            info!("libp2p connection closed: peer={} cause={:?} remaining_connections={}", crate::log_id(&peer_id), cause, num_established);
                             closed_conns.push((peer_id, connection_id));
                             // See `connections_lost`. Before, this event only logged.
                             //
@@ -448,7 +448,7 @@ impl P2PCore {
                                 }
                                 request_response::Event::OutboundFailure { peer, error, .. } => {
                                     if matches!(error, request_response::OutboundFailure::UnsupportedProtocols) {
-                                        warn!("Keepalive desteklenmiyor (bağlantı sağlıklı kabul ediliyor, kapatılMIYOR): peer={}", crate::log_id(&peer));
+                                        warn!("Keepalive not supported (connection assumed healthy, NOT closing): peer={}", crate::log_id(&peer));
                                         if let Some(state) = keepalive_state.get_mut(&peer) {
                                             state.outstanding = None;
                                             // Hourly, not never: a peer that upgrades
@@ -470,14 +470,14 @@ impl P2PCore {
                                         let limit = if state.suspect { 1 } else { KEEPALIVE_FAILURES_BEFORE_DISCONNECT };
                                         if state.consecutive_failures >= limit {
                                             warn!(
-                                                "Keepalive {} kez ardışık başarısız (bağlantı yarı açık kabul ediliyor), kapatılıp yeniden bağlanılacak: peer={} hata={}",
+                                                "Keepalive failed {} times in a row (connection assumed half-open), closing and reconnecting: peer={} error={}",
                                                 state.consecutive_failures, crate::log_id(&peer), error
                                             );
                                             keepalive_state.remove(&peer);
                                             let _ = swarm.disconnect_peer_id(peer);
                                         } else {
                                             warn!(
-                                                "Keepalive başarısız (deneme {}/{}), kısa süre sonra tekrar denenecek: peer={} hata={}",
+                                                "Keepalive failed (attempt {}/{}), retrying shortly: peer={} error={}",
                                                 state.consecutive_failures, KEEPALIVE_FAILURES_BEFORE_DISCONNECT, crate::log_id(&peer), error
                                             );
                                             // Retry right after a failed attempt. Waiting the full `KEEPALIVE_FAST_INTERVAL_MS` or `KEEPALIVE_IDLE_INTERVAL_MS`
@@ -487,7 +487,7 @@ impl P2PCore {
                                     }
                                 }
                                 request_response::Event::InboundFailure { peer, error, .. } => {
-                                    warn!("Keepalive yanıtı gönderilemedi: peer={} hata={}", crate::log_id(&peer), error);
+                                    warn!("Could not send keepalive reply: peer={} error={}", crate::log_id(&peer), error);
                                 }
                                 request_response::Event::ResponseSent { .. } => {}
                             }
@@ -552,7 +552,7 @@ impl P2PCore {
             let n = self.server_rpc_timeouts.entry(peer).or_insert(0);
             *n += 1;
             if *n >= SERVER_RPC_TIMEOUTS_BEFORE_DISCONNECT {
-                warn!("Sunucu {} istekte üst üste yanıt vermedi, bağlantı ölü sayılıp yeniden kuruluyor: {}", n, crate::log_id(&peer));
+                warn!("Server did not reply to {} requests in a row, connection considered dead, re-establishing: {}", n, crate::log_id(&peer));
                 self.server_rpc_timeouts.remove(&peer);
                 if let Some(swarm) = &mut self.swarm {
                     let _ = swarm.disconnect_peer_id(peer);
@@ -588,7 +588,7 @@ impl P2PCore {
                 let best_other = others.iter().map(|c| rank(c)).max().unwrap_or(0);
                 if let Some(swarm) = &mut self.swarm {
                     if new_rank > best_other {
-                        info!("Daha iyi yol kuruldu (seviye {} > {}), {} eski bağlantı kapatılıyor: peer={}", new_rank, best_other, worse.len(), crate::log_id(&peer));
+                        info!("Better path established (level {} > {}), closing {} old connections: peer={}", new_rank, best_other, worse.len(), crate::log_id(&peer));
                         for c in &worse {
                             swarm.close_connection(*c);
                         }
@@ -599,7 +599,7 @@ impl P2PCore {
                 continue;
             }
             if suspect && !others.is_empty() {
-                info!("Şüpheli bağlantının yerine yenisi kuruldu, {} eski bağlantı kapatılıyor: peer={}", others.len(), crate::log_id(&peer));
+                info!("New connection replaced suspect one, closing {} old connections: peer={}", others.len(), crate::log_id(&peer));
                 if let Some(swarm) = &mut self.swarm {
                     for c in &others {
                         swarm.close_connection(*c);
@@ -783,7 +783,7 @@ impl P2PCore {
                 })
                 .collect();
             for (fp, pid) in learned {
-                info!("Bağlantı eşleşme adresinden cihaza bağlandı: {} -> {}", &fp[..fp.len().min(8)], crate::log_id(&pid));
+                info!("Connected to device via pairing address: {} -> {}", &fp[..fp.len().min(8)], crate::log_id(&pid));
                 if let Some(onion) = self.peer_onion_addr.get(&pid).cloned() {
                     self.remember_onion_addr(&fp, &onion);
                 }
@@ -866,7 +866,7 @@ impl P2PCore {
                     .and_then(|a| extract_peer_id(&a));
                 if link_peer_id.map(|p| connections_established.contains(&p)).unwrap_or(false) {
                     if let Err(e) = self.send_identity_exchange(&fp) {
-                        error!("Bağlanma IdentityExchange'i (bağlantı kurulduğunda) gönderilemedi, yeniden denenecek: {}", e);
+                        error!("IdentityExchange could not be sent on connect (when connection established), will retry: {}", e);
                     }
                 }
             }
@@ -967,7 +967,7 @@ impl P2PCore {
                             }
                         }
                     }
-                    warn!("Doğrudan zarf gönderimi başarısız ({}), gossipsub/sunucuya düşülüyor: {}", error, &fp[..fp.len().min(8)]);
+                    warn!("Direct envelope send failed ({}), falling back to gossipsub/server: {}", error, &fp[..fp.len().min(8)]);
                     match self.try_publish_raw_via(&fp, &envelope, first_attempt_at, false) {
                         Err(PublishFailure::Transient(_)) => {
                             // Tracked messages are resent by `retry_unconfirmed_messages`;
@@ -1009,13 +1009,13 @@ impl P2PCore {
                     // retried for minutes. Dropping the channel fails their request, and they fall back to the encrypted Ack. That one also
                     // teaches us their PeerId.
                     if fps.is_empty() {
-                        warn!("Toplu Ack tanınmayan peer'dan, yanıtlanmıyor (şifreli Ack'e düşecek): {}", crate::log_id(&peer));
+                        warn!("Batch Ack from unknown peer, not answered (will fall back to encrypted Ack): {}", crate::log_id(&peer));
                         drop(channel);
                         continue;
                     }
                     // the sender chunks at ACK_BATCH_MAX; more is a broken peer.
                     if ids.len() > ACK_BATCH_MAX {
-                        warn!("Toplu Ack {} kimlik taşıyor, ilk {} uygulanıyor (peer={})", ids.len(), ACK_BATCH_MAX, crate::log_id(&peer));
+                        warn!("Batch Ack carries {} ids, applying first {} (peer={})", ids.len(), ACK_BATCH_MAX, crate::log_id(&peer));
                     }
                     for id in ids.iter().take(ACK_BATCH_MAX) {
                         let owner = self.awaiting_confirmation.get(id).map(|p| p.peer_device_fingerprint.clone());
@@ -1025,7 +1025,7 @@ impl P2PCore {
                             }
                         }
                     }
-                    info!("Toplu Ack alındı: {} adet (peer={})", ids.len(), crate::log_id(&peer));
+                    info!("Batch Ack received: {} items (peer={})", ids.len(), crate::log_id(&peer));
                     ack_replies.push(channel);
                 }
                 AckEventLocal::Delivered { request_id } => {
@@ -1121,7 +1121,7 @@ impl P2PCore {
         if tor_ready_now && !self.tor_was_ready {
             // not the address itself — it is a stable pseudonym and
             // logcat is readable by adb and OEM log collectors.
-            info!("Tor Ready durumuna geçti — bilinen kişilere .onion adresi bildiriliyor");
+            info!("Tor Ready — announcing .onion address to known contacts");
             self.announce_address_to_all_contacts();
         }
         self.tor_was_ready = tor_ready_now;
@@ -1153,11 +1153,11 @@ impl P2PCore {
                     // (no `awaiting_confirmation`); it is tried again, later.
                     let handshake_class = matches!(queued.envelope, NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_));
                     if handshake_class && now.saturating_sub(first_attempt_at) <= PENDING_HANDSHAKE_TIMEOUT_MS {
-                        error!("Bekleyen zarf yayınlanırken panik, sonra yeniden denenecek (peer={})", crate::log_id(&peer_fp));
+                        error!("Panic while publishing pending envelope, will retry later (peer={})", crate::log_id(&peer_fp));
                         queued.next_at = pending_retry_at(first_attempt_at, now);
                         self.pending_envelopes.push(queued);
                     } else {
-                        error!("Bekleyen zarf yayınlanırken panik, zarf bırakıldı (peer={})", crate::log_id(&peer_fp));
+                        error!("Panic while publishing pending envelope, envelope dropped (peer={})", crate::log_id(&peer_fp));
                     }
                     continue;
                 };
@@ -1236,7 +1236,7 @@ impl P2PCore {
                         continue;
                     }
                     RateVerdict::Drop => {
-                        debug!("Hız sınırı aşıldı (tanınmayan eş), paket düşürüldü: peer={}", crate::log_id(&peer));
+                        debug!("Rate limit exceeded (unknown peer), packet dropped: peer={}", crate::log_id(&peer));
                         rate_dropped += 1;
                         continue;
                     }
@@ -1254,7 +1254,7 @@ impl P2PCore {
                 Ok(Some(text)) => self.attachment_events.push(text),
                 Ok(None) => {}
                 Err(e) => {
-                    error!("Gelen paket işlenemedi: {}", e);
+                    error!("Could not process incoming packet: {}", e);
                     // covers both the Err result and a caught panic.
                     if source.is_none() {
                         self.server_item_failed(&raw);
@@ -1263,11 +1263,11 @@ impl P2PCore {
             }
         }
         if rate_dropped > 0 {
-            warn!("Hız sınırı: bu turda {} paket düşürüldü", rate_dropped);
+            warn!("Rate limit: {} packets dropped this round", rate_dropped);
         }
         if keys_ready && (queued_before > 0 || !self.deferred_incoming.is_empty()) {
             info!(
-                "Gelen kuyruk: {} işlendi ({} önceki turdan), {} bekliyor",
+                "Incoming queue: {} processed ({} from previous round), {} waiting",
                 processed,
                 queued_before,
                 self.deferred_incoming.len()
@@ -1350,7 +1350,7 @@ impl P2PCore {
         }
         buf.push_back((now, source, packet));
         info!(
-            "Ratchet henüz yok (peer={}) — paket tamponlandı, el sıkışma sonrası oynatılacak ({} bekliyor)",
+            "No ratchet yet (peer={}) — packet buffered, will replay after handshake ({} waiting)",
             crate::log_id(&sender_fp),
             buf.len()
         );
@@ -1363,11 +1363,11 @@ impl P2PCore {
             Some(b) if !b.is_empty() => b,
             _ => return,
         };
-        info!("El sıkışma tamam (peer={}) — {} tamponlanmış paket oynatılıyor", crate::log_id(&sender_fp), buffered.len());
+        info!("Handshake done (peer={}) — replaying {} buffered packets", crate::log_id(&sender_fp), buffered.len());
         for (_, source, packet) in buffered {
             match self.receive_message(source, &packet) {
                 Ok(event) => self.attachment_events.push(event),
-                Err(e) => error!("Tamponlanmış paket işlenemedi (peer={}): {}", crate::log_id(&sender_fp), e),
+                Err(e) => error!("Could not process buffered packet (peer={}): {}", crate::log_id(&sender_fp), e),
             }
         }
     }
@@ -1392,13 +1392,13 @@ impl P2PCore {
         let Some(buf) = self.early_handshakes.remove(sender_fp) else { return };
         // Each buffered init in turn: the first one that verifies wins.
         for (_, source, handshake) in buf {
-            info!("Tamponlanmış HandshakeInit oynatılıyor (peer={})", crate::log_id(&sender_fp));
+            info!("Replaying buffered HandshakeInit (peer={})", crate::log_id(&sender_fp));
             match self.process_handshake_init(source, &handshake) {
                 Ok(()) => {
                     self.replay_early_packets(sender_fp);
                     return;
                 }
-                Err(e) => error!("Tamponlanmış HandshakeInit işlenemedi (peer={}): {}", crate::log_id(&sender_fp), e),
+                Err(e) => error!("Could not process buffered HandshakeInit (peer={}): {}", crate::log_id(&sender_fp), e),
             }
         }
     }
@@ -1526,7 +1526,7 @@ impl P2PCore {
             evicted += 1;
         }
         if evicted > 0 {
-            warn!("Ertelenmiş gelen paket kuyruğu doldu, {} girdi düştü (gönderen yeniden deneyecek)", evicted);
+            warn!("Deferred incoming packet queue full, {} entries dropped (sender will retry)", evicted);
         }
         self.deferred_incoming.push_back((source, raw));
     }
@@ -1580,7 +1580,7 @@ impl P2PCore {
                 // `Ok(None)` here let the server copy be acked and deleted.
                 if !first_ok {
                     if source.is_none() {
-                        return Err("Aynı zarf az önce işlenemedi".to_string());
+                        return Err("Same envelope could not be processed just now".to_string());
                     }
                     return Ok(None);
                 }
@@ -1675,7 +1675,7 @@ impl P2PCore {
                         if expected && same_identity < 4 && (vouched || unvouched < 16) && held < 3
                             && (self.early_handshakes.len() < 64 || held > 0)
                         {
-                            info!("HandshakeInit erken geldi (peer={}) — IdentityExchange bekleniyor, tamponlandı", crate::log_id(&sender_fp));
+                            info!("HandshakeInit arrived early (peer={}) — waiting for IdentityExchange, buffered", crate::log_id(&sender_fp));
                             self.early_handshakes.entry(sender_fp.clone()).or_default().push((current_time_ms(), source, h));
                             return Ok(None);
                         }

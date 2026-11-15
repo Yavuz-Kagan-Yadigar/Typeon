@@ -31,7 +31,7 @@ class BootReceiver : BroadcastReceiver() {
         }
         // The user's on/off switch (see ServerActivity). If it is off, do not start it at boot either. The "off" decision is respected.
         if (!ServerService.isEnabled(context)) {
-            Log.i("ServerBootReceiver", "Sunucu kullanıcı tarafından kapalı — açılışta başlatılmadı")
+            Log.i("ServerBootReceiver", "Server turned off by user — not started at boot")
             return
         }
         try {
@@ -41,7 +41,7 @@ class BootReceiver : BroadcastReceiver() {
             )
         } catch (e: Exception) {
             // Direct boot stage, or an OEM restriction: skip quietly. The server starts when the user next opens the app.
-            Log.w("ServerBootReceiver", "Açılışta sunucu başlatılamadı: ${e.message}")
+            Log.w("ServerBootReceiver", "Server could not be started at boot: ${e.message}")
         }
     }
 }

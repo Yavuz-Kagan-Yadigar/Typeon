@@ -779,17 +779,17 @@ fn media_supervise(control: &libp2p_stream::Control, peers: Vec<(String, Option<
 }
 
 async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: bool, generation: u64) {
-    let what = if relay { "sunucu" } else { "doğrudan" };
+    let what = if relay { "server" } else { "direct" };
     let proto = if relay { RELAY_PROTOCOL } else { MEDIA_PROTOCOL };
     let opened = match tokio::time::timeout(OPEN_TIMEOUT, control.open_stream(peer, proto)).await {
         Ok(Ok(s)) => Ok(s),
         Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err("zaman aşımı".to_string()),
+        Err(_) => Err("timed out".to_string()),
     };
     let stream = match opened {
         Ok(s) => s,
         Err(e) => {
-            warn!("Arama akışı açılamadı ({}, {}): {}", what, crate::log_id(&peer), e);
+            warn!("Call stream could not be opened ({}, {}): {}", what, crate::log_id(&peer), e);
             let mut m = media();
             if m.generation == generation {
                 m.opening.insert(peer, mono_ms() + REOPEN_BACKOFF_MS);
@@ -811,7 +811,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
         m.opening.remove(&peer);
         id
     };
-    info!("Arama akışı açıldı ({}, {})", what, crate::log_id(&peer));
+    info!("Call stream opened ({}, {})", what, crate::log_id(&peer));
     tokio::spawn(pump_writes(wr, rx));
     // Relay links carry the server's pushes back to us; on a direct outbound
     // link the read only notices the peer closing it.
@@ -846,7 +846,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
     if m.generation == generation {
         m.opening.insert(peer, mono_ms() + REOPEN_BACKOFF_MS);
     }
-    info!("Arama akışı kapandı ({}, {})", what, crate::log_id(&peer));
+    info!("Call stream closed ({}, {})", what, crate::log_id(&peer));
 }
 
 /// Reads media frames peers push to us over direct streams. Registered once
@@ -854,7 +854,7 @@ async fn open_link(mut control: libp2p_stream::Control, peer: PeerId, relay: boo
 pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
     let mut incoming = match control.accept(MEDIA_PROTOCOL) {
         Ok(i) => i,
-        Err(e) => { warn!("Arama akışı dinleyicisi kurulamadı: {}", e); return; }
+        Err(e) => { warn!("Call stream listener could not be set up: {}", e); return; }
     };
     RUNTIME.spawn(async move {
         while let Some((peer, mut stream)) = incoming.next().await {
@@ -978,44 +978,44 @@ static LAST_CALL_SIG: Mutex<String> = Mutex::new(String::new());
 impl P2PCore {
     pub(crate) fn start_call(&mut self, peer_fp: String, video: bool) -> Result<String, String> {
         if self.call.is_some() {
-            return Err("Zaten bir arama sürüyor".to_string());
+            return Err("A call is already in progress".to_string());
         }
         // Ring every active device of the contact. The chat key is the lowest fingerprint, which may belong to an old, dead device, so ringing only that one can leave
         // the call unanswered. The first device to answer wins (see the Accept arm).
         let invited: Vec<String> = self.fanout_targets(&peer_fp).into_iter().filter(|fp| self.ratchets.contains_key(fp)).collect();
         if invited.is_empty() {
-            return Err("Bu kişiyle oturum yok".to_string());
+            return Err("No session with this contact".to_string());
         }
         let call_id = uuid::Uuid::new_v4().to_string();
         let s = CallSession::new(call_id.clone(), None, video, CallPhase::Outgoing, peer_fp, invited);
         media_start(*s.my_key, s.my_sid);
         self.call = Some(s);
         self.call_broadcast(CallAction::Invite);
-        info!("Arama başlatıldı: {} video={}", &call_id[..8], video);
+        info!("Call started: {} video={}", &call_id[..8], video);
         Ok(call_id)
     }
 
     pub(crate) fn start_group_call(&mut self, group_id: String, video: bool) -> Result<String, String> {
         if self.call.is_some() {
-            return Err("Zaten bir arama sürüyor".to_string());
+            return Err("A call is already in progress".to_string());
         }
         let invited = self.group_call_devices(&group_id)?;
         if invited.is_empty() {
-            return Err("Aranabilecek üye yok".to_string());
+            return Err("No members to call".to_string());
         }
         let call_id = uuid::Uuid::new_v4().to_string();
         let s = CallSession::new(call_id.clone(), Some(group_id), video, CallPhase::Outgoing, String::new(), invited);
         media_start(*s.my_key, s.my_sid);
         self.call = Some(s);
         self.call_broadcast(CallAction::Invite);
-        info!("Grup araması başlatıldı: {} video={}", &call_id[..8], video);
+        info!("Group call started: {} video={}", &call_id[..8], video);
         Ok(call_id)
     }
 
     pub(crate) fn accept_call(&mut self) -> Result<(), String> {
-        let s = self.call.as_mut().ok_or("Arama yok")?;
+        let s = self.call.as_mut().ok_or("No call")?;
         if s.phase != CallPhase::Incoming {
-            return Err("Cevaplanacak arama yok".to_string());
+            return Err("No call to answer".to_string());
         }
         s.phase = CallPhase::Active;
         s.connected_at = current_time_ms();
@@ -1053,7 +1053,7 @@ impl P2PCore {
     }
 
     fn group_call_devices(&self, group_id: &str) -> Result<Vec<String>, String> {
-        let me = self.my_identity_id().ok_or("Kimlik yok")?;
+        let me = self.my_identity_id().ok_or("No identity")?;
         let group = self.groups.get(group_id).cloned_group()?;
         // All devices of every member (see `start_call` for why not one).
         Ok(group
@@ -1098,7 +1098,7 @@ impl P2PCore {
         let sent = self.send_message_content(fp.to_string(), &content, None);
         self.call_signal_sending = false;
         if let Err(e) = sent {
-            warn!("Arama sinyali gönderilemedi ({:?} -> {}): {}", action, &fp[..8.min(fp.len())], e);
+            warn!("Call signal could not be sent ({:?} -> {}): {}", action, &fp[..8.min(fp.len())], e);
         }
     }
 
@@ -1414,7 +1414,7 @@ impl P2PCore {
         };
         if !not_allowed.is_empty() {
             if self.call.as_ref().map_or(false, |s| s.group_id.is_none()) {
-                info!("Arama: karşı taraf engellendi, arama bitiriliyor");
+                info!("Call: peer blocked, ending call");
                 self.end_call_with("remote");
                 return;
             }
@@ -1433,7 +1433,7 @@ impl P2PCore {
             let lost = Duration::from_millis(MEDIA_LOST_MS);
             let gone: Vec<String> = s.joined.iter().filter(|fp| media_rx_age(fp).map_or(false, |a| a > lost)).cloned().collect();
             for fp in gone {
-                info!("Arama: {} sn sessiz kalan katılımcı çıkarıldı", MEDIA_LOST_MS / 1000);
+                info!("Call: removed participant silent for {} s", MEDIA_LOST_MS / 1000);
                 s.joined.remove(&fp);
                 media_remove_remote(&fp);
             }
@@ -1443,7 +1443,7 @@ impl P2PCore {
         let ringing_too_long = s.started.elapsed() > Duration::from_millis(RING_TIMEOUT_MS);
         match s.phase {
             CallPhase::Outgoing if ringing_too_long => {
-                info!("Arama cevapsız kaldı");
+                info!("Call was not answered");
                 self.end_call_with("no_answer");
                 return;
             }
@@ -1497,7 +1497,7 @@ impl P2PCore {
             .collect();
         if now.saturating_sub(self.call_stats_logged_at) >= 5_000 {
             self.call_stats_logged_at = now;
-            info!("Arama medyası: {}", media_stats());
+            info!("Call media: {}", media_stats());
         }
         media_supervise(control, peers, self.ready_server_peers());
     }

@@ -35,7 +35,7 @@ impl P2PCore {
         };
         let members_json = match serde_json::to_string(&group.members) {
             Ok(j) => j,
-            Err(e) => { error!("Group members serileştirilemedi: {}", e); return; }
+            Err(e) => { error!("Could not serialize group members: {}", e); return; }
         };
         let founder_chain_json = serde_json::to_string(&group.founder_chain).unwrap_or_else(|_| "[]".to_string());
         if let Err(e) = conn.execute(
@@ -44,7 +44,7 @@ impl P2PCore {
             params![group.group_id, group.founder_identity_id, group.name, group.version, members_json, group.created_at as i64, group.avatar_jpeg, founder_chain_json],
 )
         {
-            error!("Grup yazılamadı ({}): {}", group.group_id, e);
+            error!("Could not write group ({}): {}", group.group_id, e);
         }
     }
 
@@ -103,7 +103,7 @@ impl P2PCore {
     pub(crate) fn sign_group_change_with(&self, group: &Group, change: &GroupChange, full: bool) -> Result<GroupUpdate, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
-        let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
+        let new_version = group.version.checked_add(1).ok_or("Group version exhausted")?;
         let mut projected = group.clone();
         apply_change(&mut projected, change, new_version, current_time_ms());
         let members_after = projected.member_identity_ids();
@@ -150,7 +150,7 @@ impl P2PCore {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         if group.version == 0 {
-            return Err("Grup henüz yayınlanmadı".to_string());
+            return Err("Group not published yet".to_string());
         }
         // "No avatar" is state too: a Rename left a member that
         // missed `AvatarUpdate(None)` with the old picture.
@@ -173,7 +173,7 @@ impl P2PCore {
         let own_identity_id = self.my_identity_id().ok_or("No identity")?;
         let group = self.groups.get(group_id).cloned_group()?;
         if group.founder_identity_id != own_identity_id {
-            return Err("Sadece kurucu grubu yeniden gönderebilir".to_string());
+            return Err("Only the founder can resend the group".to_string());
         }
         let update = self.sign_group_resync(&group)?;
         for member in group.other_members(&own_identity_id) {
@@ -189,7 +189,7 @@ impl P2PCore {
         let content = MessageContent::GroupUpdate(update.clone());
         for fp in self.sibling_active_devices() {
             if let Err(e) = self.send_message_content(fp, &content, None) {
-                warn!("GroupUpdate kardeş cihaza gönderilemedi: {}", e);
+                warn!("GroupUpdate could not be sent to sibling device: {}", e);
             }
         }
     }
@@ -232,20 +232,20 @@ impl P2PCore {
 
         let group = self.groups.get(group_id).cloned_group()?;
         if group.founder_identity_id != own_identity_id {
-            return Err("Sadece kurucu üye ekleyebilir".to_string());
+            return Err("Only the founder can add members".to_string());
         }
         // Each call signs a new version and sends it to every member.
         if group.is_member(new_member_identity_id) {
-            return Err("Bu kişi zaten grubun üyesi".to_string());
+            return Err("This contact is already a group member".to_string());
         }
         // Every receiver refuses an update past this (`process_group_update`).
         if group.members.len() >= MAX_GROUP_MEMBERS {
-            return Err(format!("Grup en fazla {} üye alabilir", MAX_GROUP_MEMBERS));
+            return Err(format!("Group is too large: at most {} members", MAX_GROUP_MEMBERS));
         }
         if self.is_blocked(new_member_identity_id) {
-            return Err("Engellenmiş bir kişi gruba eklenemez".to_string());
+            return Err("A blocked contact cannot be added to the group".to_string());
         }
-        let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
+        let new_version = group.version.checked_add(1).ok_or("Group version exhausted")?;
         let change = GroupChange::Add(new_member_identity_id.to_string());
         // The new member gets every vouched device, the others only the new ones.
         let full = self.sign_group_change_with(&group, &change, true)?;
@@ -282,19 +282,19 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if group.founder_identity_id != own_identity_id {
-            return Err("Sadece kurucu üye çıkarabilir".to_string());
+            return Err("Only the founder can remove members".to_string());
         }
         // A LeaveGroupRequest from a non-member made a new version, a new
         // signature and a GroupUpdate to every member, each time.
         if !group.is_member(member_identity_id) {
-            return Err("Bu kişi grubun üyesi değil".to_string());
+            return Err("Not found: this contact is not a group member".to_string());
         }
         // The founder is us: receivers ignore a founder Remove, so this only
         // burnt a version.
         if member_identity_id == own_identity_id {
-            return Err("Kurucu kendini gruptan çıkaramaz".to_string());
+            return Err("The founder cannot remove themselves from the group".to_string());
         }
-        let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
+        let new_version = group.version.checked_add(1).ok_or("Group version exhausted")?;
         let change = GroupChange::Remove(member_identity_id.to_string());
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         let update = self.sign_group_change(&group, &change)?;
@@ -352,7 +352,7 @@ impl P2PCore {
         if let Some(a) = &avatar_jpeg {
             if a.len() > MAX_AVATAR_BYTES {
                 return Err(format!(
-                    "Grup fotoğrafı çok büyük ({} KB) — en fazla {} KB olabilir",
+                    "Group photo too large ({} KB) — at most {} KB allowed",
                     a.len() / 1024, MAX_AVATAR_BYTES / 1024
                 ));
             }
@@ -360,9 +360,9 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if group.founder_identity_id != own_identity_id {
-            return Err("Sadece kurucu profil fotoğrafını değiştirebilir".to_string());
+            return Err("Only the founder can change the profile photo".to_string());
         }
-        let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
+        let new_version = group.version.checked_add(1).ok_or("Group version exhausted")?;
         let change = GroupChange::AvatarUpdate(avatar_jpeg);
         let update = self.sign_group_change(&group, &change)?;
 
@@ -390,15 +390,15 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if group.founder_identity_id != own_identity_id {
-            return Err("Sadece kurucu yetkiyi devredebilir".to_string());
+            return Err("Only the founder can transfer ownership".to_string());
         }
         if new_founder_identity_id == own_identity_id {
-            return Err("Yetki zaten sizde".to_string());
+            return Err("You already have ownership".to_string());
         }
         if !group.is_member(new_founder_identity_id) {
-            return Err("Yeni kurucu grubun üyesi olmalı".to_string());
+            return Err("Invalid: new founder must be a group member".to_string());
         }
-        let new_version = group.version.checked_add(1).ok_or("Grup sürümü tükendi")?;
+        let new_version = group.version.checked_add(1).ok_or("Group version exhausted")?;
         let change = GroupChange::TransferFounder(new_founder_identity_id.to_string());
         let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
         // See `packet::FounderTransfer`: the transfer's own verifiable, compact proof. It is appended to the chain, so a member who missed this update
@@ -433,7 +433,7 @@ impl P2PCore {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
         self.send_group_update_to_siblings(&update);
-        info!("Grup kurucu yetkisi devredildi: {} -> {}", group_id, crate::log_id(&new_founder_identity_id));
+        info!("Group founder rights transferred: {} -> {}", group_id, crate::log_id(&new_founder_identity_id));
         Ok(())
     }
 
@@ -441,7 +441,7 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if group.founder_identity_id != own_identity_id {
-            return Err("Sadece kurucu grubu silebilir".to_string());
+            return Err("Only the founder can delete the group".to_string());
         }
         let update = self.sign_group_change(&group, &GroupChange::Delete)?;
 
@@ -490,13 +490,13 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if group.founder_identity_id == own_identity_id {
-            return Err("Kurucu gruptan ayrılamaz — grubu herkes için silebilir".to_string());
+            return Err("The founder cannot leave the group; they can delete it for everyone".to_string());
         }
         // Every founder device, like the other group sends: one dead device
         // must not swallow the request.
         let founder_devices = self.active_devices_for_identity(&group.founder_identity_id);
         if founder_devices.is_empty() {
-            return Err("Kurucunun cihazı bilinmiyor, ayrılma isteği gönderilemedi".to_string());
+            return Err("Founder's device unknown, leave request could not be sent".to_string());
         }
         let content = MessageContent::LeaveGroupRequest { group_id: group_id.to_string() };
         // See the `needs_delivery_confirmation` note: even if the founder is not reachable right now (sleep, offline), this request is retried
@@ -509,13 +509,13 @@ impl P2PCore {
             match self.send_message_content(founder_fp, &content, None) {
                 Ok(_) => sent = true,
                 Err(e) => {
-                    error!("LeaveGroupRequest gönderilemedi: {}", e);
+                    error!("LeaveGroupRequest could not be sent: {}", e);
                     last_err = Some(e);
                 }
             }
         }
         if !sent {
-            return Err(last_err.unwrap_or_else(|| "Ayrılma isteği gönderilemedi".to_string()));
+            return Err(last_err.unwrap_or_else(|| "Leave request could not be sent".to_string()));
         }
         // The siblings keep the group until the founder's update reaches
         // them otherwise. Before the removal: the echo needs the group.
@@ -542,7 +542,7 @@ impl P2PCore {
                 tx.commit()
             });
             if let Err(e) = done {
-                error!("Grup kaldırılamadı ({}): {}", group_id, e);
+                error!("Could not remove group ({}): {}", group_id, e);
                 return;
             }
         }
@@ -609,7 +609,7 @@ impl P2PCore {
                 match self.send_message_content(peer_fp.clone(), content, None) {
                     Ok(_) => sent_to_any_device = true,
                     Err(e) => {
-                        error!("Grup mesajı bir üyenin cihazına gönderilemedi ({}): {}", crate::log_id(&peer_fp), e);
+                        error!("Group message could not be sent to a member's device ({}): {}", crate::log_id(&peer_fp), e);
                         refused.push(peer_fp);
                     }
                 }
@@ -621,13 +621,13 @@ impl P2PCore {
             // Every device refused (no session, keys, persist failure): queue
             // like an unresolved member instead of dropping it.
             warn!(
-                "Grup mesajı: {} hiçbir cihazına gönderilemedi (group={}) — kuyruğa alındı (bkz. group_sync_sweep)",
+                "Group message: {} could not be sent to any device (group={}) — queued (see group_sync_sweep)",
                 crate::log_id(&member_identity_id), group_id
             );
         } else {
             // None of the member's active devices is known yet. Instead of losing it silently, queue it. `group_sync_sweep` retries once one resolves.
             warn!(
-                "Grup mesajı: {} için aktif cihaz henüz bilinmiyor (group={}) — periyodik olarak yeniden denenecek (bkz. group_sync_sweep)",
+                "Group message: no active device known yet for {} (group={}) — will retry periodically (see group_sync_sweep)",
                 crate::log_id(&member_identity_id), group_id
             );
         }
@@ -644,7 +644,7 @@ impl P2PCore {
             let dropped = self.pending_group_messages.get_mut(&key).map(|q| q.remove(0));
             // Not silently: the dropped text's bubble turns to "error".
             if let Some(MessageContent::Text { group_message_local_id: Some(local_id), .. }) = dropped {
-                warn!("Grup kuyruğu dolu (group={}): en eski mesaj atıldı", group_id);
+                warn!("Group queue full (group={}): oldest message dropped", group_id);
                 self.attachment_events.push(serde_json::json!({
                     "type": "status", "peer": member_identity_id, "group_id": group_id,
                     "message_id": local_id, "status": "error"
@@ -689,7 +689,7 @@ impl P2PCore {
             match self.send_message_content(peer_fp.clone(), &content, None) {
                 Ok(_) => sent = true,
                 Err(e) => {
-                    error!("GroupUpdate bir üyenin cihazına gönderilemedi: {}", e);
+                    error!("GroupUpdate could not be sent to a member's device: {}", e);
                     refused.push(peer_fp);
                 }
             }
@@ -713,7 +713,7 @@ impl P2PCore {
                 }
             }
             error!(
-                "GroupUpdate: {} için aktif cihaz henüz bilinmiyor (group={}) — periyodik olarak yeniden denenecek (bkz. group_sync_sweep)",
+                "GroupUpdate: no active device known yet for {} (group={}) — will retry periodically (see group_sync_sweep)",
                 crate::log_id(&member_identity_id), group_id
             );
             self.pending_group_syncs.insert((group_id.to_string(), member_identity_id.to_string()), update.clone());
@@ -762,7 +762,7 @@ impl P2PCore {
                     let dropped = self.pending_group_messages.remove(&(group_id.clone(), member_identity_id.clone()))
                         .map(|q| q.len()).unwrap_or(0);
                     self.remove_persisted_pending_group_messages(&group_id, &member_identity_id);
-                    info!("group_sync_sweep: {} artık grup üyesi değil (group={}) — bekleyen {} mesaj atıldı",
+                    info!("group_sync_sweep: {} is no longer a group member (group={}) — dropped {} pending messages",
                         crate::log_id(&member_identity_id), group_id, dropped);
                     continue;
                 }
@@ -774,7 +774,7 @@ impl P2PCore {
                     None => continue,
                 };
                 info!(
-                    "group_sync_sweep: {} artık çözülebiliyor, {} bekleyen grup mesajı gönderiliyor (group={})",
+                    "group_sync_sweep: {} is resolvable now, sending {} pending group messages (group={})",
                     crate::log_id(&member_identity_id), queued.len(), group_id
                 );
                 // Send first, drop the disk rows after: a crash in between
@@ -791,7 +791,7 @@ impl P2PCore {
                             match self.send_message_content(peer_fp.clone(), &content, None) {
                                 Ok(_) => ok = true,
                                 Err(e) => {
-                                    error!("group_sync_sweep: grup mesajı yine gönderilemedi: {}", e);
+                                    error!("group_sync_sweep: group message still could not be sent: {}", e);
                                     refused.push(peer_fp.clone());
                                 }
                             }
@@ -875,7 +875,7 @@ impl P2PCore {
             };
             floor = next.version;
             info!(
-                "Kaçırılmış kurucu devri onarıldı (group={}, v{}): {} -> {}",
+                "Missed founder transfer repaired (group={}, v{}): {} -> {}",
                 group_id, next.version, crate::log_id(&next.from_identity), crate::log_id(&next.to_identity)
             );
             founder = next.to_identity.clone();
@@ -934,7 +934,7 @@ impl P2PCore {
         // otherwise be a contact's identity id, and the two share key spaces
         // (archive conversation key, whiteboard board).
         if !is_group_id(&update.group_id) {
-            return Err("GroupUpdate: geçersiz grup kimliği".to_string());
+            return Err("GroupUpdate: invalid group id".to_string());
         }
         let signer = self.known_remote_devices.get(&update.signed_by_device).cloned()
             .ok_or("Unknown signer device")?;
@@ -948,7 +948,7 @@ impl P2PCore {
             .map_err(|_| "GroupUpdate signature verification failed".to_string())?;
         // Stored, and returned by every `list_groups`.
         if update.group_name.len() > 256 || matches!(&update.change, GroupChange::Rename(n) if n.len() > 256) {
-            return Err("GroupUpdate: grup adı çok uzun".to_string());
+            return Err("GroupUpdate: group name too long".to_string());
         }
 
         // Check that `signed_by_device` is an Active device of the founder.
@@ -962,7 +962,7 @@ impl P2PCore {
             || update.members.iter().any(|m| !is_fingerprint_hex(m))
             || matches!(&update.change, GroupChange::Add(id) | GroupChange::Remove(id) | GroupChange::TransferFounder(id) if !is_fingerprint_hex(id))
         {
-            return Err("GroupUpdate: üye listesi geçersiz ya da çok büyük".to_string());
+            return Err("GroupUpdate: member list invalid or too large".to_string());
         }
 
         let group_exists = self.groups.contains_key(&update.group_id);
@@ -989,7 +989,7 @@ impl P2PCore {
                     .chain(update.founder_chain.iter().map(|t| &t.from_identity))
                     .find(|f| Self::group_id_for_founder(f.as_str(), nonce) == update.group_id)
                     .cloned()
-                    .ok_or("GroupUpdate: grup kimliği kurucusuna bağlı değil")?
+                    .ok_or("GroupUpdate: group id is not bound to its founder")?
             }
         };
         let default_group = || Group::new(update.group_id.clone(), update.group_name.clone(), default_founder.clone(), current_time_ms());
@@ -1090,7 +1090,7 @@ impl P2PCore {
                         }
                     }
                 }
-                info!("GroupUpdate zaten uygulanmış/bayat (group={}, gelen version={}, yerel version={}) — zararsız, onaylanıyor", update.group_id, update.new_version, group_ref.version);
+                info!("GroupUpdate already applied/stale (group={}, incoming version={}, local version={}) — harmless, acknowledging", update.group_id, update.new_version, group_ref.version);
                 return Ok(());
             }
             return Err(format!("{:?}", e));
@@ -1100,7 +1100,7 @@ impl P2PCore {
         // deadlock (see the `StaleOrOutOfOrderVersion` note in group.rs), but we make this visible.
         if gap {
             error!(
-                "GroupUpdate gap (group={}): yerel version {} -> gelen {} (aradaki {} güncelleme kaçırıldı; üyelik listesi eksik olabilir)",
+                "GroupUpdate gap (group={}): local version {} -> incoming {} ({} updates missed; member list may be incomplete)",
                 update.group_id, group_ref.version, update.new_version,
                 update.new_version - group_ref.version - 1
             );
@@ -1122,7 +1122,7 @@ impl P2PCore {
             return Ok(());
         }
         if matches!(update.change, GroupChange::Delete) {
-            info!("Grup kurucusu tarafından silindi: {}", update.group_id);
+            info!("Group deleted by founder: {}", update.group_id);
             // The version of the Delete, not the local one: an update between
             // the two that we missed would bring the group back.
             if let Some(g) = self.groups.get_mut(&update.group_id) {
@@ -1153,7 +1153,7 @@ impl P2PCore {
             }
             if !me.is_empty() && !makes_us_a_member {
                 warn!(
-                    "GroupUpdate REDDEDİLDİ: bilinmeyen bir grup ve bizi üye yapmıyor (group={}, imzalayan={})",
+                    "GroupUpdate REJECTED: unknown group and does not add us as a member (group={}, signer={})",
                     update.group_id, crate::log_id(&update.signed_by)
                 );
                 return Err("Unknown group that does not name us as a member".to_string());
@@ -1165,7 +1165,7 @@ impl P2PCore {
             // before it handled our leave still lists us and has a higher
             // version.
             if removed.as_ref().map_or(false, |(v, _)| update.new_version <= *v || !adds_us) {
-                warn!("GroupUpdate yok sayıldı: ayrıldığımız grubu geri getirmiyor (group={}, version={})", update.group_id, update.new_version);
+                warn!("GroupUpdate ignored: does not restore a group we left (group={}, version={})", update.group_id, update.new_version);
                 return Ok(());
             }
             // The `removed_groups` row goes once the group is persisted (below).
@@ -1176,7 +1176,7 @@ impl P2PCore {
         let change = match &update.change {
             GroupChange::AvatarUpdate(Some(a)) if a.len() > MAX_AVATAR_BYTES => {
                 warn!(
-                    "Grup avatarı çok büyük ({} bayt), yok sayıldı (group={})",
+                    "Group avatar too large ({} bytes), ignored (group={})",
                     a.len(), update.group_id
                 );
                 GroupChange::AvatarUpdate(None)
@@ -1226,7 +1226,7 @@ impl P2PCore {
         // close the group here, exactly like a founder delete.
         let me = self.my_identity_id().unwrap_or_default();
         if matches!(&update.change, GroupChange::Remove(id) if *id == me) && !me.is_empty() {
-            info!("Kurucu bizi gruptan çıkardı: {}", update.group_id);
+            info!("Founder removed us from group: {}", update.group_id);
             self.remove_group_locally(&update.group_id);
             let _ = self.clear_group_history(&update.group_id);  // Deleting a group: see `delete_group`.
             return Ok(());
@@ -1347,7 +1347,7 @@ impl P2PCore {
             // A founder cannot bring a blocked person back by vouching for them (see `block_identity`). The block targets that person, and it is lifted only
             // by a face-to-face pairing.
             if self.is_blocked(&d.identity_id) {
-                warn!("Engelli kimlik grup kefaletiyle eklenmeye çalışıldı, reddedildi: {}", crate::log_id(&d.identity_id));
+                warn!("Blocked identity tried to be added via group vouching, rejected: {}", crate::log_id(&d.identity_id));
                 continue;
             }
             if self.known_remote_devices.contains_key(&d.device_fingerprint) {
@@ -1355,14 +1355,14 @@ impl P2PCore {
             }
             // Is the fingerprint consistent with the keys? (Same check as in IdentityExchange.)
             if !d.keys_match_fingerprint() {
-                error!("Grup üyesi cihaz kaydı tutarsız ({}) — reddedildi", crate::log_id(&d.device_fingerprint));
+                error!("Group member device record inconsistent ({}) — rejected", crate::log_id(&d.device_fingerprint));
                 continue;
             }
             // If we already know ANOTHER device for this identity, we do not add a second device on the founder's word. That could be an impersonation
             // attempt on a known person. The "unrecognised new device" flow is for QR and IdentityExchange.
             if self.known_remote_devices.values().any(|k| k.identity_id == d.identity_id) {
                 info!(
-                    "Grup üyesi {} için zaten bilinen bir cihaz var — kefil edilen yeni cihaz eklenmedi",
+                    "Group member {} already has a known device — vouched new device not added",
                     crate::log_id(&d.identity_id)
                 );
                 continue;
@@ -1379,7 +1379,7 @@ impl P2PCore {
             // could otherwise hand out its own key as any member we had not
             // met, and read and write as that member.
             if !Self::claim_is_bound(&d.identity_id, &d.device_fingerprint, proofs, &d.sign_pubkey_ed25519, &d.sign_pubkey_mldsa) {
-                warn!("Kefil edilen cihaz {} kimliğine bağlanamadı, eklenmedi", crate::log_id(&d.identity_id));
+                warn!("Vouched device {} could not be linked to identity, not added", crate::log_id(&d.identity_id));
                 continue;
             }
             if let Some(p) = proofs.iter().find(|p| p.device_add.new_device_fingerprint == d.device_fingerprint) {
@@ -1401,7 +1401,7 @@ impl P2PCore {
             let is_new_contact = !self.identity_to_contact.contains_key(&d.identity_id);
             if is_new_contact && self.contacts.len() >= MAX_CONTACTS {
                 warn!(
-                    "Grup kefaleti reddedildi: contacts tablosu üst sınırda ({} >= {}), identity {} eklenmedi",
+                    "Group vouching rejected: contacts table at limit ({} >= {}), identity {} not added",
                     self.contacts.len(), MAX_CONTACTS, crate::log_id(&d.identity_id)
                 );
                 continue;
@@ -1446,7 +1446,7 @@ impl P2PCore {
                 self.meta_put(&format!("vah:{}", d.device_fingerprint), addr);
             }
             info!(
-                "Grup üzerinden yeni kişi eklendi (kurucu kefaletiyle, DOĞRULANMADI): {} / {}",
+                "New contact added via group (founder vouching, NOT VERIFIED): {} / {}",
                 crate::log_id(&d.identity_id), crate::log_id(&d.device_fingerprint)
             );
         }
@@ -1498,7 +1498,7 @@ impl P2PCore {
             match self.send_message_content(device.clone(), &content, None) {
                 Ok(_) => sent = true,
                 Err(e) => {
-                    error!("Grup mesajı yeniden gönderilemedi ({}): {}", crate::log_id(&device), e);
+                    error!("Group message could not be sent again ({}): {}", crate::log_id(&device), e);
                     self.note_group_copy_failed(&content, &device);
                 }
             }
@@ -1510,7 +1510,7 @@ impl P2PCore {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if !group.is_member(&own_identity_id) {
-            return Err("Grup üyesi değilsiniz".to_string());
+            return Err("You are not a group member".to_string());
         }
         // Each member is encrypted separately with the existing 1:1 ratchet. `group_id: Some(...)`: real group integration, so the receiver can tell this
         // apart from an ordinary 1:1 message and route it to GroupChatActivity (see the receive_message note). Starts with our author tag: receivers
@@ -1544,7 +1544,7 @@ impl P2PCore {
         };
         // Not sent when our own copy cannot be kept (see the 1:1 twin).
         self.archive_group_message(group_id, &own_identity_id, "sent", plaintext.as_bytes(), Some(&local_id), reply_to_id, reply_to_prev, reply_to_sender, sent_at_ms, Some(&author_proof))
-            .map_err(|e| format!("Mesaj kaydedilemedi: {}", e))?;
+            .map_err(|e| format!("Could not save message: {}", e))?;
         for member_identity_id in group.other_members(&own_identity_id) {
             self.send_group_message_to_member(group_id, &member_identity_id, &content);
         }

@@ -65,7 +65,7 @@ object SkippedKeyManager {
             return try {
                 KeystoreCrypto.decrypt(file.readBytes(), KeystoreCrypto.ALIAS_SKIPPED_KEYS)
             } catch (e: Exception) {
-                com.p2p.messenger.util.Log.e(TAG, "Anahtar cozulemedi, YENIDEN URETILMIYOR", e)
+                com.p2p.messenger.util.Log.e(TAG, "Key could not be decrypted, NOT REGENERATING", e)
                 null
             }
         }

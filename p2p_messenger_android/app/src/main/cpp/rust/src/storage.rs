@@ -13,7 +13,7 @@ impl P2PCore {
     // ---------------------------------------------------------------
 
     pub(crate) fn attachments_dir(&self) -> Result<std::path::PathBuf, String> {
-        let base = self.app_files_dir.as_ref().ok_or("initDatabase henüz çağrılmadı")?;
+        let base = self.app_files_dir.as_ref().ok_or("initDatabase not called yet")?;
         Ok(std::path::Path::new(base).join("attachments"))
     }
 
@@ -21,7 +21,7 @@ impl P2PCore {
     /// paths, so the check is repeated here. A future call path that forgets the check still cannot leave the directory.
     pub(crate) fn enc_path_for(&self, file_id: &str) -> Result<std::path::PathBuf, String> {
         if !is_safe_file_id(file_id) {
-            return Err(format!("Geçersiz file_id (yol olarak kullanılamaz): {}", file_id));
+            return Err(format!("Invalid file_id (cannot be used as a path): {}", file_id));
         }
         Ok(self.attachments_dir()?.join(format!("{}.enc", file_id)))
     }
@@ -47,7 +47,7 @@ impl P2PCore {
     }
 
     pub(crate) fn stickers_dir(&self) -> Result<std::path::PathBuf, String> {
-        let base = self.app_files_dir.as_ref().ok_or("initDatabase henüz çağrılmadı")?;
+        let base = self.app_files_dir.as_ref().ok_or("initDatabase not called yet")?;
         Ok(std::path::Path::new(base).join("stickers"))
     }
 
@@ -220,7 +220,7 @@ impl P2PCore {
         let content = MessageContent::SiblingEcho { conversation_identity_id: None, group_id: None, body };
         for fp in self.sibling_active_devices() {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
-                error!("SiblingEcho (sticker) gönderimi başarısız (sibling={}): {}", crate::log_id(&fp), e);
+                error!("SiblingEcho (sticker) send failed (sibling={}): {}", crate::log_id(&fp), e);
             }
         }
     }
@@ -301,7 +301,7 @@ impl P2PCore {
         // user lowered the limit to a very small value), that limit still takes priority. In that case recent files are evicted too, oldest first.
         if remaining > limit {
             warn!(
-                "history_storage_limit ({} bayt) korumalı (henüz {} saatten yeni) dosyalar hariç tutularak bile aşılıyor — kullanıcının belirlediği sınır önceliklidir, gerekirse onlar da tahliye edilecek",
+                "history_storage_limit ({} bytes) is exceeded even excluding protected files (newer than {} hours) — the user's limit takes priority, those will be evicted too if needed",
                 limit, FILE_RETENTION_GRACE_MS / 3_600_000
             );
             for (file_id, size, _) in &rows[protected_from_idx..] {
@@ -318,7 +318,7 @@ impl P2PCore {
         }
         if deleted_count > 0 {
             info!(
-                "history_storage_limit ({} bayt) aşıldı — {} en eski dosya silindi (kalan kullanım ~{} bayt)",
+                "history_storage_limit ({} bytes) exceeded — {} oldest files deleted (remaining usage ~{} bytes)",
                 limit, deleted_count, remaining
             );
         }
@@ -589,7 +589,7 @@ impl P2PCore {
     /// Storage → "delete older than": this device's messages and attachments
     /// of one chat older than `before_ms`; the pairing and newer history stay.
     pub(crate) fn prune_chat_before(&mut self, kind: &str, id: &str, before_ms: i64) -> Result<(), String> {
-        let (fps, group, floor_key) = self.chat_prune_scope(kind, id).ok_or("Sohbet bulunamadı")?;
+        let (fps, group, floor_key) = self.chat_prune_scope(kind, id).ok_or("Chat not found")?;
         if before_ms <= 0 {
             return Ok(());
         }
@@ -597,7 +597,7 @@ impl P2PCore {
             .filter(|(_, created)| *created < before_ms)
             .map(|(file_id, _)| file_id)
             .collect();
-        let conn = self.db.as_ref().ok_or("DB yok")?;
+        let conn = self.db.as_ref().ok_or("No DB")?;
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         // Reactions and seen marks on the attachments, before their rows go.
         for file_id in &old_files {
@@ -632,14 +632,14 @@ impl P2PCore {
     /// The row stays, back to 'offered' (the bubble offers the download
     /// again); the peer is not told.
     pub(crate) fn remove_local_attachment(&mut self, file_id: &str) -> Result<(), String> {
-        let conn = self.db.as_ref().ok_or("DB yok")?;
+        let conn = self.db.as_ref().ok_or("No DB")?;
         let changed = conn.execute(
             "UPDATE files SET status = 'offered', bytes_transferred = 0 WHERE file_id = ?1 AND direction != 'sent'",
             params![file_id],
         ).map_err(|e| e.to_string())?;
         // A sent row's copy is what the peers download from: kept.
         if changed == 0 {
-            return Err(format!("Bilinmeyen veya gönderilmiş file_id: {}", file_id));
+            return Err(format!("Unknown or previously sent file_id: {}", file_id));
         }
         self.remove_attachment_copy(file_id);
         self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());

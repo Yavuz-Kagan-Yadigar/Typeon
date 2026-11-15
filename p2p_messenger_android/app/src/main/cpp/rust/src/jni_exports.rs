@@ -978,7 +978,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_peekDeviceLink<'local>(mut 
             "device_fingerprint": req.device_fingerprint,
             "device_name": sanitize_display_name(&req.device_name).unwrap_or_default(),
         }).to_string(),
-        Ok(Ok(_)) => coded_error("Geçersiz cihaz kodu"),
+        Ok(Ok(_)) => coded_error("Invalid device code"),
         Ok(Err(e)) => coded_error(&e),
         Err(e) => coded_error(&format!("panic: {}", e)),
     };
@@ -2093,7 +2093,7 @@ pub(crate) fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
         } else if let Some(s) = payload.downcast_ref::<String>() {
             s.clone()
         } else {
-            "internal panic (bkz. logcat 'PANIC yakalandı')".to_string()
+            "internal panic (see logcat 'PANIC caught')".to_string()
         }
     })
 }
@@ -2103,16 +2103,16 @@ pub(crate) fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
 pub(crate) fn error_code(detail: &str) -> &'static str {
     const TABLE: &[(&str, &[&str])] = &[
         ("INTERNAL", &["panic"]),
-        ("LOCKED", &["henüz yüklenmedi", "anahtarları yüklenmedi", "not loaded", "initdatabase", "db not open", "veritabanı açık değil", "no identity", "kimlik yok", "önce bir kimlik"]),
-        ("NOT_FOUNDER", &["sadece kurucu", "only the founder"]),
-        ("ALREADY", &["zaten", "already"]),
-        ("BLOCKED", &["engellenmiş", "engelli", "iptal edilmiş", "revoked", "hesabını sildi"]),
-        ("TOO_LARGE", &["too large", "too long", "çok büyük", "çok uzun", "sınırından büyük", "sınırını aşıyor", "sınırına ulaşıldı", "en fazla"]),
-        ("NO_SESSION", &["no ratchet session", "oturum anahtarı yok", "key exchange", "unknown peer device", "aktif cihazı çözülemedi", "bilinmeyen karşı taraf"]),
-        ("INVALID", &["geçersiz", "invalid", "bad ", "boş olamaz", "olmalı", "içermeli", "mismatch", "tutarsız", "unsupported", "desteklenmeyen", "bozuk", "kodunda", "kodundaki", "not an rgba"]),
-        ("NOT_ALLOWED", &["only the primary", "edemezsiniz", "ekleyemezsiniz", "engelleyemezsiniz", "edilemez", "çıkaramaz", "ayrılamaz", "değilsiniz"]),
-        ("NETWORK", &["tor kapalı", "tor başlatılamadı", "ulaşılamıyor", "ulaşılabilir", "bağlı değil", "ağ henüz", "ağ adresi", "could not be sent", "gönderilemedi", "network"]),
-        ("NOT_FOUND", &["bulunamadı", "not found", "unknown", "bilinmeyen", "bilinmiyor", "no pending", "üyesi değil", "yok"]),
+        ("LOCKED", &["not loaded", "initdatabase", "db not open", "database not open", "no identity", "identity first"]),
+        ("NOT_FOUNDER", &["only the founder"]),
+        ("ALREADY", &["already"]),
+        ("BLOCKED", &["blocked", "revoked", "deleted their account"]),
+        ("TOO_LARGE", &["too large", "too long", "at most", "exceeds the limit", "limit reached"]),
+        ("NO_SESSION", &["no ratchet session", "no session", "key exchange", "unknown peer", "could not be resolved"]),
+        ("INVALID", &["invalid", "bad ", "cannot be empty", "must be", "must contain", "mismatch", "inconsistent", "unsupported", "corrupt", "in code", "not an rgba"]),
+        ("NOT_ALLOWED", &["only the primary", "you cannot", "cannot be", "cannot remove", "cannot leave", "you are not"]),
+        ("NETWORK", &["tor is off", "tor failed", "unreachable", "reachable", "not connected", "network address", "could not be sent", "could not send", "network"]),
+        ("NOT_FOUND", &["not found", "unknown", "no pending", "is not a member", "no call", "no members", "no chat", "no db", "no sibling", "missing"]),
     ];
     let lower = detail.to_lowercase();
     TABLE.iter()
@@ -2141,23 +2141,23 @@ mod error_code_tests {
     #[test]
     fn main_messages_get_their_codes() {
         for (msg, code) in [
-            ("Sadece kurucu üye çıkarabilir", "NOT_FOUNDER"),
-            ("Bu kişi zaten grubun üyesi", "ALREADY"),
-            ("Bu kişi engellenmiş", "BLOCKED"),
+            ("Only the founder can remove members", "NOT_FOUNDER"),
+            ("This contact is already a group member", "ALREADY"),
+            ("This contact is blocked", "BLOCKED"),
             ("File too large", "TOO_LARGE"),
             ("Unknown peer device; complete key exchange first", "NO_SESSION"),
-            ("Geçersiz kişi kodu", "INVALID"),
-            ("Kendi kodunuzu kişi olarak ekleyemezsiniz", "NOT_ALLOWED"),
-            ("Tor kapalı: ağ yalnızca Tor üzerinden çalışır", "NETWORK"),
-            ("Grup bulunamadı", "NOT_FOUND"),
+            ("Invalid contact code", "INVALID"),
+            ("You cannot add your own code as a contact", "NOT_ALLOWED"),
+            ("Tor is off: network only works over Tor", "NETWORK"),
+            ("Group not found", "NOT_FOUND"),
             ("Unknown file_id", "NOT_FOUND"),
-            ("Şifreleme anahtarı henüz yüklenmedi", "LOCKED"),
+            ("Encryption key not loaded yet", "LOCKED"),
             ("panic: boom", "INTERNAL"),
-            ("Grup sürümü tükendi", "INTERNAL"),
+            ("Group version exhausted", "INTERNAL"),
         ] {
             assert_eq!(error_code(msg), code, "{msg}");
         }
-        assert_eq!(coded_error("Grup bulunamadı"), "Error: NOT_FOUND: Grup bulunamadı");
+        assert_eq!(coded_error("Group not found"), "Error: NOT_FOUND: Group not found");
     }
 }
 
@@ -2199,9 +2199,9 @@ pub(crate) fn page_bytes_full(budget: &mut usize, cut_at: &mut Option<i64>, curs
 /// read is logged, not dropped in silence.
 pub(crate) fn newest_first_rows<T>(rows: rusqlite::Result<rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>>) -> Vec<T> {
     let mut out: Vec<T> = match rows {
-        Ok(it) => it.filter_map(|r| r.map_err(|e| warn!("Ek satırı okunamadı: {}", e)).ok()).collect(),
+        Ok(it) => it.filter_map(|r| r.map_err(|e| warn!("Attachment row could not be read: {}", e)).ok()).collect(),
         Err(e) => {
-            warn!("Ek listesi sorgusu başarısız: {}", e);
+            warn!("Attachment list query failed: {}", e);
             Vec::new()
         }
     };
@@ -2214,7 +2214,7 @@ pub(crate) fn bytes_to_jbytearray<'local>(env: &mut JNIEnv<'local>, bytes: &[u8]
     match env.byte_array_from_slice(bytes) {
         Ok(arr) => arr.into_raw(),
         Err(e) => {
-            log::error!("JNI byte_array_from_slice başarısız (JVM bellek baskısı olabilir): {e}");
+            log::error!("JNI byte_array_from_slice failed (JVM may be under memory pressure): {e}");
             std::ptr::null_mut()
         }
     }
@@ -2226,7 +2226,7 @@ pub(crate) fn jbytearray_to_vec<'local>(env: &mut JNIEnv<'local>, data: &JByteAr
     match env.convert_byte_array(data) {
         Ok(bytes) => bytes,
         Err(e) => {
-            log::error!("JNI convert_byte_array başarısız, boş dönülüyor: {e}");
+            log::error!("JNI convert_byte_array failed, returning empty: {e}");
             let _ = env.exception_clear();
             Vec::new()
         }
@@ -2250,7 +2250,7 @@ pub(crate) fn jstr(env: &mut JNIEnv, s: &JString) -> Option<String> {
         Ok(v) => Some(v.into()),
         Err(e) => {
             if !s.is_null() {
-                log::error!("JNI get_string başarısız: {e}");
+                log::error!("JNI get_string failed: {e}");
             }
             let _ = env.exception_clear();
             None
@@ -2263,7 +2263,7 @@ pub(crate) fn safe_new_jstring<'local>(env: &mut JNIEnv<'local>, s: impl AsRef<s
     match env.new_string(s.as_ref()) {
         Ok(js) => js.into_raw(),
         Err(e) => {
-            log::error!("JNI new_string başarısız (JVM bellek baskısı olabilir): {e}");
+            log::error!("JNI new_string failed (JVM may be under memory pressure): {e}");
             std::ptr::null_mut()
         }
     }
@@ -2273,21 +2273,21 @@ pub(crate) fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &
     let string_class = match env.find_class("java/lang/String") {
         Ok(c) => c,
         Err(e) => {
-            log::error!("JNI find_class(java/lang/String) başarısız: {e}");
+            log::error!("JNI find_class(java/lang/String) failed: {e}");
             return std::ptr::null_mut();
         }
     };
     let empty = match env.new_string("") {
         Ok(s) => s,
         Err(e) => {
-            log::error!("JNI new_string(\"\") başarısız: {e}");
+            log::error!("JNI new_string(\"\") failed: {e}");
             return std::ptr::null_mut();
         }
     };
     let arr = match env.new_object_array(texts.len() as i32, string_class, empty) {
         Ok(a) => a,
         Err(e) => {
-            log::error!("JNI new_object_array başarısız: {e}");
+            log::error!("JNI new_object_array failed: {e}");
             return std::ptr::null_mut();
         }
     };
@@ -2297,13 +2297,13 @@ pub(crate) fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &
         let jstr = match env.new_string(text) {
             Ok(s) => s,
             Err(e) => {
-                log::error!("JNI new_string başarısız (dizin {i}): {e}");
+                log::error!("JNI new_string failed (index {i}): {e}");
                 let _ = env.exception_clear();
                 continue;
             }
         };
         if let Err(e) = env.set_object_array_element(&arr, i as i32, &jstr) {
-            log::error!("JNI set_object_array_element başarısız (dizin {i}): {e}");
+            log::error!("JNI set_object_array_element failed (index {i}): {e}");
             let _ = env.exception_clear();
         }
         // A burst of events must not fill the local reference table.

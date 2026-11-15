@@ -30,7 +30,7 @@ impl P2PCore {
         retry_interval_ms_override: Option<u64>,
     ) -> Result<(String, String), String> {
         if !self.ratchets_loaded {
-            return Err("Oturum durumu henüz yüklenmedi".to_string()); // see `initiate_handshake_with`
+            return Err("Session state not loaded yet".to_string()); // see `initiate_handshake_with`
         }
         let own_fp = self.get_active_own_device_fingerprint()?;
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
@@ -57,7 +57,7 @@ impl P2PCore {
             // send (like `publish_envelope` below) fails transiently, we do not stop here: the state exists, and we can keep encrypting and sending the
             // real message. If the HandshakeInit itself failed, `publish_envelope` already added it to the retry queue.
             if let Err(e) = self.initiate_handshake_with(&peer_device_fingerprint) {
-                error!("Handshake gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+                error!("Handshake send temporarily failed (will retry): {}", e);
             }
             // KNOWN GAP (carried over from an earlier design): the handshake and the message are sent back to back, and gossipsub gives no ordering guarantee.
         }
@@ -157,7 +157,7 @@ impl P2PCore {
         // stale. (If a rotation happened, `maybe_rotate_ratchet` already wrote it above. This second write is harmless and idempotent.)
         if !self.persist_ratchet_state(&peer_device_fingerprint) {
             self.ratchets.insert(peer_device_fingerprint.clone(), snapshot);
-            return Err("Oturum durumu yazılamadı, paket gönderilmedi".to_string());
+            return Err("Session state could not be written, packet not sent".to_string());
         }
         drop(snapshot);
 
@@ -216,8 +216,8 @@ impl P2PCore {
             // Not sent when our own copy cannot be kept: the peer would hold
             // a message our history never has. The skipped number is harmless.
             if let Err(e) = self.archive_message(&peer_device_fingerprint, "sent", plaintext, Some(&message_id), Some(MessageSendStatus::Pending.as_str()), reply_to_id, reply_to_prev, sent_at) {
-                error!("Gönderilen mesaj arşive yazılamadı, gönderilmedi: {}", e);
-                return Err(format!("Mesaj kaydedilemedi: {}", e));
+                error!("Sent message could not be written to archive, not sent: {}", e);
+                return Err(format!("Message could not be saved: {}", e));
             }
         }
 
@@ -270,7 +270,7 @@ impl P2PCore {
                 original_sent_at_override, retry_interval_ms_override,
             );
         } else if let Err(e) = self.publish_envelope(&peer_device_fingerprint, &NetworkEnvelope::Message(packet)) {
-            error!("Mesaj gönderimi geçici olarak başarısız (yeniden denenecek): {}", e);
+            error!("Message send temporarily failed (will retry): {}", e);
         }
         let status = self.message_status.remove(&message_id).unwrap_or(MessageSendStatus::Pending);
         Ok((message_id, status.as_str().to_string()))
@@ -281,7 +281,7 @@ impl P2PCore {
         if self.known_remote_devices.get(&peer_device_fingerprint)
             .map_or(false, |d| self.deleted_identities.contains(&d.identity_id))
         {
-            return Err("Bu kişi hesabını sildi".to_string());
+            return Err("This contact deleted their account".to_string());
         }
         // See packet.rs `MessageContent::Text.sent_at_ms`: it is stamped HERE, once, on first write. `regen_content` refreshes (see
         // `retry_unconfirmed_messages` in network.rs) clone the `content` that already contains this value and re-encrypt it unchanged.
@@ -296,7 +296,7 @@ impl P2PCore {
             reply_to_message_id: reply_to_message_id.clone(), reply_to_preview: reply_to_preview.clone(),
             reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
         };
-        info!("Metin gönderiliyor: id={} peer={}", &conv_id[..8], &peer_device_fingerprint[..8.min(peer_device_fingerprint.len())]);
+        info!("Sending text: id={} peer={}", &conv_id[..8], &peer_device_fingerprint[..8.min(peer_device_fingerprint.len())]);
         let result = self.send_message_content_inner(
             peer_device_fingerprint.clone(), &content, Some(plaintext.as_bytes()), Some(conv_id.clone()), None, None,
         );
@@ -320,7 +320,7 @@ impl P2PCore {
         for fp in self.fanout_targets(primary_fp) {
             if fp == primary_fp { continue; }
             if let Err(e) = self.send_message_content(fp.clone(), content, None) {
-                error!("Çoklu-cihaz fan-out kopyası ({}) başarısız: {}", crate::log_id(&fp), e);
+                error!("Multi-device fan-out copy ({}) failed: {}", crate::log_id(&fp), e);
             }
         }
     }
@@ -396,7 +396,7 @@ impl P2PCore {
             params![target_message_id, reactor_identity_id, emoji, reacted_at_ms.min(i64::MAX as u64) as i64],
         ) {
             Ok(_) => true,
-            Err(e) => { error!("Tepki yazılamadı: {}", e); false }
+            Err(e) => { error!("Reaction could not be written: {}", e); false }
         }
     }
 
@@ -685,7 +685,7 @@ impl P2PCore {
             }
         }
         if !sent_to_any {
-            return Err("Ulaşılabilir grup üyesi yok".to_string());
+            return Err("No reachable group member".to_string());
         }
         self.apply_edit_to_archive(Some(&group_id), "", &target_group_message_local_id, &new_text, edited_at_ms);
         self.echo_group_to_siblings(&group_id, SiblingEchoBody::Edit {
@@ -712,7 +712,7 @@ impl P2PCore {
             }
         }
         if !sent_to_any {
-            return Err("Ulaşılabilir grup üyesi yok".to_string());
+            return Err("No reachable group member".to_string());
         }
         self.withdraw_unsent(&target_group_message_local_id);
         self.purge_attachment_if_exists(&target_group_message_local_id);
@@ -820,7 +820,7 @@ impl P2PCore {
     pub(crate) fn send_ack_message(&mut self, peer_device_fingerprint: &str, target_message_id: &str) {
         let content = MessageContent::Ack { target_message_id: target_message_id.to_string() };
         if let Err(e) = self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
-            error!("Ack gönderilemedi: {}", e);
+            error!("Ack could not be sent: {}", e);
         }
     }
 
@@ -843,7 +843,7 @@ impl P2PCore {
                     }
                 }
                 _ => {
-                    info!("Ack: {} adet şifreli paketle, canlı bağlantı yok (peer={})", ids.len(), crate::log_id(&fp));
+                    info!("Ack: {} encrypted packets, no live connection (peer={})", ids.len(), crate::log_id(&fp));
                     for id in &ids {
                         self.send_ack_message(&fp, id);
                     }
@@ -906,7 +906,7 @@ impl P2PCore {
         match self.send_message_content(peer_device_fingerprint.to_string(), &content, None) {
             Ok(_) => true,
             Err(e) => {
-                error!("Görüldü bildirimi gönderilemedi: {}", e);
+                error!("Seen notice could not be sent: {}", e);
                 false
             }
         }
@@ -943,7 +943,7 @@ impl P2PCore {
                 .filter(|fp| self.is_connected_to_device(fp) && self.has_active_session(fp))
             {
                 if let Err(e) = self.send_message_content(peer_fp, &content, None) {
-                    error!("Grup yazıyor göstergesi bir üyeye gönderilemedi: {}", e);
+                    error!("Group typing indicator could not be sent to a member: {}", e);
                 }
             }
         }

@@ -388,7 +388,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (persistError != null) {
                 // Keystore or disk failure, handled as in `createIdentityAndStart`.
-                com.p2p.messenger.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
+                com.p2p.messenger.util.Log.w("MainActivity", "Identity secret bundle could not be saved: $persistError")
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
                     com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
@@ -442,7 +442,7 @@ class MainActivity : AppCompatActivity() {
                 // Keystore or disk failure. Without this step the identity exists in the database, but its
                 // secret keys are lost at the next restart, and the install gets stuck at "identity read
                 // failed". The identity is only seconds old, so it is removed and the setup starts again.
-                com.p2p.messenger.util.Log.w("MainActivity", "Kimlik secret bundle'ı kaydedilemedi: $persistError")
+                com.p2p.messenger.util.Log.w("MainActivity", "Identity secret bundle could not be saved: $persistError")
                 Toast.makeText(this@MainActivity, R.string.error_identity_persist_failed, Toast.LENGTH_LONG).show()
                 com.p2p.messenger.util.LocalWipe.wipe(applicationContext)
                 com.p2p.messenger.util.AppRestarter.restart(applicationContext)
@@ -677,7 +677,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 if (accept) P2PLib.acceptDeviceAlert(fingerprint) else P2PLib.rejectDeviceAlert(fingerprint)
             } catch (e: Exception) {
-                com.p2p.messenger.util.Log.w("MainActivity", "Cihaz uyarısı yanıtlanamadı: ${e.message}")
+                com.p2p.messenger.util.Log.w("MainActivity", "Device alert could not be answered: ${e.message}")
             }
         }
     }

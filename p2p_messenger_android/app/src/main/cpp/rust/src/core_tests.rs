@@ -69,7 +69,7 @@ mod wipe_coverage_tests {
                 }
             }
         }
-        assert!(fields.len() > 50, "alan ayristirma bozuk: {} alan bulundu", fields.len());
+        assert!(fields.len() > 50, "field parsing broken: {} fields found", fields.len());
 
         // Two traps at once:
         //   1) Doc comments in the file mention this name, so a plain search would first hit one of them.
@@ -357,7 +357,7 @@ mod review_oct2026_tests {
         stranger.link_request_open_until = current_time_ms() + 60_000; // pairing open
         let bare = IdentityExchange { device_add: None, device_add_signer: None, ..ix.clone() };
         let refused = stranger.process_identity_exchange(None, &bare).unwrap_err();
-        assert!(!refused.contains("imzası"), "refused for the claim, not the signature: {refused}");
+        assert!(!refused.contains("signature"), "refused for the claim, not the signature: {refused}");
         // The device signs its name and identity: a relay cannot change them,
         // and an unsigned packet (a version before the signature) is refused.
         for forged in [
@@ -367,16 +367,16 @@ mod review_oct2026_tests {
             // signed for another recipient, or at another time.
             IdentityExchange { timestamp: ix.timestamp - 1, ..ix.clone() },
         ] {
-            assert!(stranger.process_identity_exchange(None, &forged).unwrap_err().contains("imzası"));
+            assert!(stranger.process_identity_exchange(None, &forged).unwrap_err().contains("signature"));
         }
         // addressed to the stranger, so another device refuses it; and
         // one older than the window is refused before the signature.
         let mut other = P2PCore::new();
         other.generate_identity("O".into()).unwrap();
         other.link_request_open_until = current_time_ms() + 60_000;
-        assert!(other.process_identity_exchange(None, &ix).unwrap_err().contains("imzası"));
+        assert!(other.process_identity_exchange(None, &ix).unwrap_err().contains("signature"));
         let old = IdentityExchange { timestamp: ix.timestamp - HANDSHAKE_MAX_AGE_MS - 1, ..ix.clone() };
-        assert!(stranger.process_identity_exchange(None, &old).unwrap_err().contains("pencere"));
+        assert!(stranger.process_identity_exchange(None, &old).unwrap_err().contains("window"));
         // The secondary's own keys as "signer": they do not hash to the identity id.
         let own = IdentityExchange { device_add_signer: secondary.own_synced_device(), ..ix.clone() };
         assert!(stranger.process_identity_exchange(None, &own).is_err());
@@ -1378,11 +1378,11 @@ mod delivery_ack_coverage_tests {
 
         assert!(
             arm_body.contains("self.send_ack("),
-            "receive_message'ın `Reaction` kolu `send_ack` çağırmıyor. `Reaction` \
-             `needs_delivery_confirmation` listesinde olduğu için gönderen onu \
-             onaylanana kadar (7 güne) yeniden dener + `pending_durable_retries`'e \
-             yazar — bir tepki alıcıda uygulansa bile gönderende sonsuza dek asılı \
-             kalır (bkz. 2026-09-07 iki cihazlı test bulgusu)."
+            "receive_message's `Reaction` arm does not call `send_ack`. `Reaction` \
+             is on the `needs_delivery_confirmation` list, so the sender retries it \
+             until confirmed (7 days) + writes it to `pending_durable_retries` — even if a \
+             reaction is applied on the receiver, it hangs on the sender forever \
+             (see the 2026-09-07 two-device test finding)."
         );
     }
 }
@@ -1654,7 +1654,7 @@ mod authz_coverage_tests {
     /// `P2PCore` cannot be built here, so the source is scanned (see `wipe_coverage_tests`).
     fn body_of<'a>(src: &'a str, start_parts: &[&str], len: usize) -> &'a str {
         let pat = start_parts.concat();
-        let at = src.find(&pat).unwrap_or_else(|| panic!("bulunamadı: {pat}"));
+        let at = src.find(&pat).unwrap_or_else(|| panic!("not found: {pat}"));
         let end = (at + len).min(src.len());
         &src[at..src.floor_char_boundary(end)]
     }
@@ -1682,7 +1682,7 @@ mod authz_coverage_tests {
         for (start, len, guard) in cases {
             assert!(
                 body_of(src, start, *len).contains(guard),
-                "{:?} kolunda `{}` yetki kontrolü yok",
+                "{:?} arm has no `{}` authority check",
                 start.concat(),
                 guard
             );
@@ -1697,8 +1697,8 @@ mod authz_coverage_tests {
     fn receive_sends_nothing_before_the_ratchet_is_saved() {
         let src = crate::CORE_SRC;
         let body = body_of(src, &["fn receive_message", "(&mut self"], 40000);
-        let saved = body.find("drop(snapshot);").expect("drop(snapshot) bulunamadı");
-        let touch = body.find(&["self.touch_device_seen", "(&packet.header"].concat()).expect("touch_device_seen bulunamadı");
+        let saved = body.find("drop(snapshot);").expect("drop(snapshot) not found");
+        let touch = body.find(&["self.touch_device_seen", "(&packet.header"].concat()).expect("touch_device_seen not found");
         assert!(touch > saved, "touch_device_seen runs before the ratchet state is saved");
     }
 }

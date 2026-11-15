@@ -8,7 +8,7 @@ impl P2PCore {
         // installed here as well because release builds are stripped (`strip = true` in Cargo.toml), so a panic's crash dump would have no symbols.
         // The hook runs BEFORE unwinding starts, so it logs the full panic message and file/line to logcat before `catch_unwind` catches it.
         std::panic::set_hook(Box::new(|info| {
-            error!("PANIC yakalandı: {}", info);
+            error!("PANIC caught: {}", info);
             // Tests have no logger: without this a failed assert prints nothing.
             #[cfg(test)]
             eprintln!("PANIC: {info}");
@@ -169,7 +169,7 @@ impl P2PCore {
             if self.app_files_dir.as_deref() != Some(app_files_dir) {
                 // the open database stays; say so instead of writing to
                 // the old path silently.
-                error!("init_db: veritabanı zaten {:?} altında açık, {} yok sayıldı", self.app_files_dir, app_files_dir);
+                error!("init_db: database already open under {:?}, {} ignored", self.app_files_dir, app_files_dir);
             }
             return Ok(());
         }
@@ -189,11 +189,11 @@ impl P2PCore {
         // secure_delete: deleted rows (acked queue entries, removed contacts) are zeroed instead of lingering in free pages.
         for (k, v) in [("journal_mode", "WAL"), ("synchronous", "NORMAL"), ("secure_delete", "ON")] {
             if let Err(e) = conn.pragma_update(None, k, v) {
-                warn!("SQLite PRAGMA {} = {} uygulanamadı: {}", k, v, e);
+                warn!("SQLite PRAGMA {} = {} could not be applied: {}", k, v, e);
             }
         }
         if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
-            warn!("SQLite busy_timeout uygulanamadı: {}", e);
+            warn!("SQLite busy_timeout could not be applied: {}", e);
         }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, primary_device TEXT, avatar_jpeg BLOB);
@@ -393,7 +393,7 @@ impl P2PCore {
         let migrate = |sql: &str| -> Result<(), rusqlite::Error> {
             match conn.execute(sql, []) {
                 Err(e) if !e.to_string().contains("duplicate column name") => {
-                    error!("DB geçişi başarısız ({}): {}", sql, e);
+                    error!("DB migration failed ({}): {}", sql, e);
                     // Only a missing column breaks later writes. An index or
                     // backfill that fails on data (e.g. duplicate rows) would
                     // fail every start, so it stays best-effort.
@@ -428,7 +428,7 @@ impl P2PCore {
         // Whether a contact was added through a group (with the founder's vouch). See Contact.added_via_group.
         migrate("ALTER TABLE contacts ADD COLUMN added_via_group INTEGER")?;
         if let Err(e) = conn.execute_batch(CONTACTS_ONE_ROW_PER_IDENTITY_SQL) {
-            error!("contacts tekillik indeksi kurulamadı: {}", e);
+            error!("contacts unique index could not be created: {}", e);
         }
         migrate("ALTER TABLE groups ADD COLUMN avatar_jpeg BLOB")?;
         // See `packet::FounderTransfer`. The founder transfer chain prevents a missed transfer from permanently removing a member from the group.
@@ -491,7 +491,7 @@ impl P2PCore {
                     FROM messages WHERE message_id IS NOT NULL AND message_id != '') WHERE rn > 1)",
                 [],
             ) {
-                error!("DB geçişi başarısız (message_id dedupe): {}", e);
+                error!("DB migration failed (message_id dedupe): {}", e);
             }
             migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msgid_unique ON messages(COALESCE(group_id, ''), message_id) WHERE message_id IS NOT NULL AND message_id != ''")?;
         }
@@ -589,7 +589,7 @@ impl P2PCore {
             match ciborium::from_reader::<DeviceAdd, _>(bytes.as_slice()) {
                 Ok(da) => self.own_device_add = Some(da),
                 // Without it this device cannot prove its identity to contacts.
-                Err(e) => error!("own_device_add çözülemedi: {}", e),
+                Err(e) => error!("own_device_add could not be resolved: {}", e),
             }
         }
         // See `outstanding_history_requests`: pending history requests.
@@ -657,10 +657,10 @@ impl P2PCore {
         match &self.db {
             Some(conn) => {
                 if let Err(e) = conn.execute("INSERT OR REPLACE INTO app_meta (k, v) VALUES (?1, ?2)", params![k, v]) {
-                    error!("app_meta yazılamadı ({}): {}", k.split(':').next().unwrap_or(""), e);
+                    error!("app_meta could not be written ({}): {}", k.split(':').next().unwrap_or(""), e);
                 }
             }
-            None => warn!("app_meta yazılamadı ({}): DB yok", k.split(':').next().unwrap_or("")),
+            None => warn!("app_meta could not be written ({}): no DB", k.split(':').next().unwrap_or("")),
         }
     }
 
