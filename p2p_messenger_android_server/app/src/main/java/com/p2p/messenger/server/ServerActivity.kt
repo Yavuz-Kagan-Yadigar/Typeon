@@ -62,6 +62,7 @@ class ServerActivity : AppCompatActivity() {
     private val refreshRunnable = object : Runnable {
         override fun run() {
             refreshStatus()
+            findViewById<TextView>(R.id.update_status).text = SelfUpdate.statusText(this@ServerActivity)
             handler.postDelayed(this, 2000)
         }
     }
@@ -115,6 +116,7 @@ class ServerActivity : AppCompatActivity() {
         val betaSwitch = findViewById<SwitchMaterial>(R.id.switch_beta_updates)
         betaSwitch.isChecked = SelfUpdate.beta(this)
         betaSwitch.setOnCheckedChangeListener { _, checked -> SelfUpdate.setBeta(this, checked) }
+        findViewById<Button>(R.id.btn_check_updates).setOnClickListener { SelfUpdate.checkNow(this, true) }
 
         findViewById<Button>(R.id.btn_new_invite).setOnClickListener { confirmRotateJoinCode() }
         findViewById<Button>(R.id.btn_copy_invite).setOnClickListener { copyInvite() }

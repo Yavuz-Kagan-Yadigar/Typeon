@@ -6,7 +6,8 @@
 //!   60 requests/hour of the unauthenticated API) and lists pre-releases too.
 //! - A tag with a `-` (`v7.4.0-beta.1`) is a beta. Without the beta flag only plain versions count.
 //! - The download is checked against the release's `SHA256SUMS`. TLS uses the webpki roots, not the OS store.
-//! - State lives in one directory per app: `beta` (flag file), `last-check` (stamp), the verified download.
+//! - State lives in one directory per app: `beta` (flag file), `last-check` (stamp), `status` (for the
+//!   settings screens), the verified download.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -272,15 +273,39 @@ fn sha256_file(path: &Path) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
+/// `status` file, one line `<newest GitHub version> <state>`, read by the settings screens. State is
+/// `latest`, `waiting` (newer tag, release not built yet), `downloading <MB>`, `ready` or `error <text>`.
+/// The version is `-` until the feed was read once.
+fn set_status(dir: &Path, github: Option<&str>, state: &str) {
+    let prev = std::fs::read_to_string(dir.join("status")).unwrap_or_default();
+    let github = github.unwrap_or_else(|| prev.split(' ').next().filter(|v| !v.is_empty()).unwrap_or("-"));
+    let state = state.replace('\n', " ");
+    let _ = std::fs::write(dir.join("status"), format!("{github} {state}"));
+}
+
 /// Looks for a newer release and downloads `asset` from it into `dir`. `asset` names the release file, with
 /// `{v}` standing for the version (`typeon-client-{v}.apk`). Returns the verified file and its version, or
 /// `None` when this app is up to date or was checked less than a day ago (`force` skips that wait).
-pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: bool) -> Result<Option<(String, PathBuf)>, String> {
+/// `downgrade`: a beta build with the beta switch off goes back to the newest release, even an older one.
+/// Android passes false: PackageInstaller refuses a lower versionCode, so a phone waits for the next release.
+pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: bool, downgrade: bool) -> Result<Option<(String, PathBuf)>, String> {
+    let result = check_inner(tor, dir, current, asset, force, downgrade).await;
+    if let Err(e) = &result {
+        set_status(dir, None, &format!("error {e}"));
+    }
+    result
+}
+
+async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: bool, downgrade: bool) -> Result<Option<(String, PathBuf)>, String> {
     // One check per process: two at once (switch flipped twice, periodic + immediate work) wrote the same
     // `.part` file.
     static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one = RUNNING.lock().await;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // The download of the version now running is installed: drop it. Android cannot do this itself, the
+    // install kills the process that would.
+    let running = current.trim_start_matches('v');
+    let _ = std::fs::remove_file(dir.join(format!("{running}-{}", asset.replace("{v}", running))));
     let stamp = dir.join("last-check");
     if !force {
         let fresh = std::fs::metadata(&stamp)
@@ -297,9 +322,13 @@ pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: boo
     // The newest release that has our asset. A tag without one (release not published yet, or a build that
     // left this platform out) is skipped, and the stamp is not written so the next tick looks again.
     // ponytail: a bare tag that never gets a release keeps the check hourly; fine at two small requests.
+    let rollback = downgrade && !beta && current.contains('-');
+    let tags = pick_tags(&atom, beta);
+    let github = tags.first().map(|t| t.trim_start_matches('v').to_string());
+    let github = github.as_deref();
     let mut found = None;
     let mut skipped = false;
-    for tag in pick_tags(&atom, beta).into_iter().filter(|t| is_newer(t, current)) {
+    for tag in tags.into_iter().filter(|t| rollback || is_newer(t, current)) {
         let version = tag.trim_start_matches('v').to_string();
         let name = asset.replace("{v}", &version);
         let base = format!("https://github.com/{REPO}/releases/download/{tag}");
@@ -327,6 +356,7 @@ pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: boo
         if !skipped {
             let _ = std::fs::write(&stamp, b"");
         }
+        set_status(dir, github, if skipped { "waiting" } else { "latest" });
         return Ok(None);
     };
 
@@ -336,7 +366,7 @@ pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: boo
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 let n = e.file_name();
-                if n != "beta" && n != "last-check" {
+                if n != "beta" && n != "last-check" && n != "status" {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -345,7 +375,14 @@ pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: boo
         let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
         let mut hasher = Sha256::new();
         log::info!("update: downloading {name} ({tag})");
+        set_status(dir, github, "downloading 0");
+        let mut done = 0u64;
         let result = get(tor, &format!("{base}/{name}"), MAX_ASSET_BYTES, &mut |b| {
+            let before = done >> 20;
+            done += b.len() as u64;
+            if done >> 20 != before {
+                set_status(dir, github, &format!("downloading {}", done >> 20));
+            }
             hasher.update(b);
             std::io::Write::write_all(&mut file, b).map_err(|e| e.to_string())
         })
@@ -360,20 +397,22 @@ pub async fn check(tor: &Tor, dir: &Path, current: &str, asset: &str, force: boo
     }
     // The switch may have gone off during a download that takes minutes: no beta for a stable-only app.
     if version.contains('-') && !beta_enabled(dir) {
+        set_status(dir, Some("-"), "latest");
         return Ok(None);
     }
     let _ = std::fs::write(&stamp, b"");
+    set_status(dir, github, "ready");
     log::info!("update: {tag} ready at {}", target.display());
     Ok(Some((version, target)))
 }
 
 /// Blocking form for the client apps (JNI, desktop): uses the core's running Tor client.
-pub fn check_blocking(dir: &str, current: &str, asset: &str, force: bool) -> Result<Option<(String, PathBuf)>, String> {
+pub fn check_blocking(dir: &str, current: &str, asset: &str, force: bool, downgrade: bool) -> Result<Option<(String, PathBuf)>, String> {
     let tor = crate::catch_panic(|| crate::core_lock_read().tor.as_ref().map(|t| t.client.clone()))
         .map_err(|e| e)?
         .ok_or("Tor is not running")?;
     crate::RUNTIME.block_on(async {
-        tokio::time::timeout(Duration::from_secs(3600), check(&tor, Path::new(dir), current, asset, force))
+        tokio::time::timeout(Duration::from_secs(3600), check(&tor, Path::new(dir), current, asset, force, downgrade))
             .await
             .map_err(|_| "update check timed out".to_string())?
     })
@@ -421,7 +460,7 @@ mod tests {
             let beta = std::env::var("TYPEON_UPDATE_BETA").is_ok();
             set_beta(&dir.join("u"), beta).unwrap();
             let asset = std::env::var("TYPEON_UPDATE_ASSET").unwrap_or("typeon-server.service".into());
-            let got = check(&tor, &dir.join("u"), "0.0.1", &asset, true).await.unwrap();
+            let got = check(&tor, &dir.join("u"), "0.0.1", &asset, true, false).await.unwrap();
             println!("{got:?}");
             assert!(got.is_some());
         });

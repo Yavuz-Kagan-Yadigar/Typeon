@@ -579,6 +579,14 @@
     </plurals>
     <string name="lbl_beta_updates">Beta güncellemeleri</string>
     <string name="lbl_beta_updates_desc">Typeon günde bir kez GitHub sürümlerinden, Tor üzerinden kendini günceller. Açık: beta sürümleri de kurar.</string>
+    <string name="action_check_updates">Güncellemeleri denetle</string>
+    <string name="update_status">Kurulu: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">Henüz kontrol edilmedi</string>
+    <string name="update_state_latest">Güncel</string>
+    <string name="update_state_waiting">Yeni sürüm henüz derleniyor</string>
+    <string name="update_state_downloading">İndiriliyor… %1$s MB</string>
+    <string name="update_state_ready">İndirildi, kuruluyor</string>
+    <string name="update_state_error">Son kontrol başarısız: %1$s</string>
     <string name="update_ready_title">Güncelleme hazır</string>
     <string name="update_ready_text">Typeon %1$s kurmak için dokun</string>
 </resources>

@@ -473,7 +473,7 @@ async fn update_loop(tor: std::sync::Weak<p2p_messenger::update::TorClientRt>) {
     loop {
         if let Some(tor) = tor.upgrade() {
             let dir = update_dir();
-            match p2p_messenger::update::check(&tor, &dir, env!("CARGO_PKG_VERSION"), "typeon-server-linux", false).await {
+            match p2p_messenger::update::check(&tor, &dir, env!("CARGO_PKG_VERSION"), "typeon-server-linux", false, true).await {
                 Ok(Some((version, path))) => apply_update(&version, &path),
                 Ok(None) => {}
                 Err(e) => log::warn!("update check: {e}"),

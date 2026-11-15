@@ -50,13 +50,38 @@ pub fn start(app: &Rc<App>) {
     });
 }
 
-fn tick(app: &Rc<App>) {
+/// Installed version, newest on GitHub, and what the core is doing (the core's `status` file).
+pub fn status_text() -> String {
+    let installed = env!("CARGO_PKG_VERSION");
+    let raw = std::fs::read_to_string(dir().join("status")).unwrap_or_default();
+    let raw = raw.trim();
+    let (github, state) = raw.split_once(' ').unwrap_or((if raw.is_empty() { "-" } else { raw }, ""));
+    let word = if raw.is_empty() {
+        "Not checked yet".to_string()
+    } else if let Some(e) = state.strip_prefix("error") {
+        format!("Last check failed: {}", e.trim())
+    } else if let Some(mb) = state.strip_prefix("downloading") {
+        format!("Downloading… {} MB", mb.trim())
+    } else if github == installed {
+        "Up to date".to_string()
+    } else if state == "waiting" {
+        "New release is still being built".to_string()
+    } else if state == "ready" {
+        "Downloaded, installing".to_string()
+    } else {
+        "Up to date".to_string()
+    };
+    format!("Installed: {installed} · GitHub: {github} · {word}")
+}
+
+/// Runs a check now, for a changed channel (`set_beta` removed the day stamp).
+pub fn tick(app: &Rc<App>) {
     if let Some((version, path)) = PENDING.with(|p| p.borrow_mut().take()) {
         return install(app, version, path);
     }
     let app = app.clone();
     app::run_in_background(
-        || p2p_messenger::update::check_blocking(&dir().to_string_lossy(), env!("CARGO_PKG_VERSION"), ASSET, false),
+        || p2p_messenger::update::check_blocking(&dir().to_string_lossy(), env!("CARGO_PKG_VERSION"), ASSET, false, true),
         move |result| match result {
             Ok(Some((version, path))) => install(&app, version, path),
             Ok(None) => {}

@@ -31,17 +31,18 @@ object SelfUpdate {
         val d = dir(context).apply { mkdirs() }
         File(d, "last-check").delete()
         if (on) File(d, "beta").createNewFile() else File(d, "beta").delete()
-        checkNow(context)
+        checkNow(context, true)
     }
 
     /** Downloads take minutes over Tor: never on `ServerService.core`, which serialises start/stop. */
     private val worker = Executors.newSingleThreadExecutor()
 
     /** ServerService calls this hourly; the core skips a check younger than 20 h, so this is one check a day. */
-    fun checkNow(context: Context) {
+    /** `force` (check button, channel change) skips the day wait. */
+    fun checkNow(context: Context, force: Boolean = false) {
         val ctx = context.applicationContext
         worker.execute {
-            val out = ServerLib.checkUpdate(dir(ctx).absolutePath, currentVersion(ctx), false)
+            val out = ServerLib.checkUpdate(dir(ctx).absolutePath, currentVersion(ctx), force)
             if (out.startsWith("Error:")) Log.w(TAG, out)
             else if (out.isNotEmpty()) try { install(ctx, File(out)) } catch (e: Exception) { Log.w(TAG, "install: ${e.message}") }
         }
@@ -49,6 +50,24 @@ object SelfUpdate {
 
     fun currentVersion(context: Context): String =
         context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0"
+
+    /** Line under the beta switch: installed version, newest on GitHub, and what the core is doing (update.rs `status`). */
+    fun statusText(context: Context): String {
+        val installed = currentVersion(context)
+        val raw = try { File(dir(context), "status").readText().trim() } catch (e: Exception) { "" }
+        val github = raw.substringBefore(' ').ifEmpty { "-" }
+        val state = raw.substringAfter(' ', "")
+        val word = when {
+            raw.isEmpty() -> context.getString(R.string.update_state_none)
+            state.startsWith("error") -> context.getString(R.string.update_state_error, state.removePrefix("error").trim())
+            state.startsWith("downloading") -> context.getString(R.string.update_state_downloading, state.substringAfter(' ', "0"))
+            github == installed -> context.getString(R.string.update_state_latest)
+            state == "waiting" -> context.getString(R.string.update_state_waiting)
+            state == "ready" -> context.getString(R.string.update_state_ready)
+            else -> context.getString(R.string.update_state_latest)
+        }
+        return context.getString(R.string.update_status, installed, github, word)
+    }
 
     fun install(context: Context, apk: File) {
         val installer = context.packageManager.packageInstaller

@@ -548,7 +548,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_checkUpdate<'loca
         let result = RUNTIME.block_on(async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(3600),
-                p2p_messenger::update::check(&tor, std::path::Path::new(&dir), &current, "typeon-server-{v}.apk", force != 0),
+                p2p_messenger::update::check(&tor, std::path::Path::new(&dir), &current, "typeon-server-{v}.apk", force != 0, false),
             )
             .await
             .unwrap_or_else(|_| Err("update check timed out".to_string()))

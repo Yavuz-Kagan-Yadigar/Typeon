@@ -2344,7 +2344,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_checkUpdate<'local>(
     let (Some(dir), Some(current)) = (jstr(&mut env, &dir), jstr(&mut env, &current)) else {
         return safe_new_jstring(&mut env, "Error: bad arguments");
     };
-    let out = match crate::update::check_blocking(&dir, &current, "typeon-client-{v}.apk", force != 0) {
+    let out = match crate::update::check_blocking(&dir, &current, "typeon-client-{v}.apk", force != 0, false) {
         Ok(Some((_, path))) => path.to_string_lossy().into_owned(),
         Ok(None) => String::new(),
         Err(e) => format!("Error: {e}"),

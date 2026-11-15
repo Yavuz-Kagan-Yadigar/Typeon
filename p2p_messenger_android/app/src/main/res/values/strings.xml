@@ -614,6 +614,14 @@
     </plurals>
     <string name="lbl_beta_updates">Beta updates</string>
     <string name="lbl_beta_updates_desc">Typeon updates itself once a day from GitHub releases, over Tor. On: also install beta releases.</string>
+    <string name="action_check_updates">Check for updates</string>
+    <string name="update_status">Installed: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">Not checked yet</string>
+    <string name="update_state_latest">Up to date</string>
+    <string name="update_state_waiting">New release is still being built</string>
+    <string name="update_state_downloading">Downloading… %1$s MB</string>
+    <string name="update_state_ready">Downloaded, installing</string>
+    <string name="update_state_error">Last check failed: %1$s</string>
     <string name="update_ready_title">Update ready</string>
     <string name="update_ready_text">Tap to install Typeon %1$s</string>
 </resources>

@@ -434,6 +434,11 @@
                     android:textSize="15sp"
                     android:text="@string/lbl_beta_updates" />
                 <TextView style="@style/Settings.Desc" android:text="@string/lbl_beta_updates_desc" />
+                <TextView android:id="@+id/update_status" style="@style/Settings.Desc" />
+                <Button
+                    android:id="@+id/btn_check_updates"
+                    style="@style/Settings.Button"
+                    android:text="@string/action_check_updates" />
 
                 <View style="@style/Settings.Divider" />
 

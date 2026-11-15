@@ -42,6 +42,12 @@ object SelfUpdate {
         val d = dir(context).apply { mkdirs() }
         File(d, "last-check").delete()
         if (on) File(d, "beta").createNewFile() else File(d, "beta").delete()
+        checkNow(context)
+    }
+
+    /** Check button and channel change: skip the day wait, run the worker now. */
+    fun checkNow(context: Context) {
+        File(dir(context), "last-check").delete()
         WorkManager.getInstance(context).enqueueUniqueWork(
             "self_update_now", ExistingWorkPolicy.REPLACE,
             OneTimeWorkRequestBuilder<UpdateWorker>().setConstraints(constraints()).build()
@@ -60,6 +66,24 @@ object SelfUpdate {
 
     fun currentVersion(context: Context): String =
         context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0"
+
+    /** Line under the beta switch: installed version, newest on GitHub, and what the core is doing (update.rs `status`). */
+    fun statusText(context: Context): String {
+        val installed = currentVersion(context)
+        val raw = try { File(dir(context), "status").readText().trim() } catch (e: Exception) { "" }
+        val github = raw.substringBefore(' ').ifEmpty { "-" }
+        val state = raw.substringAfter(' ', "")
+        val word = when {
+            raw.isEmpty() -> context.getString(R.string.update_state_none)
+            state.startsWith("error") -> context.getString(R.string.update_state_error, state.removePrefix("error").trim())
+            state.startsWith("downloading") -> context.getString(R.string.update_state_downloading, state.substringAfter(' ', "0"))
+            github == installed -> context.getString(R.string.update_state_latest)
+            state == "waiting" -> context.getString(R.string.update_state_waiting)
+            state == "ready" -> context.getString(R.string.update_state_ready)
+            else -> context.getString(R.string.update_state_latest)
+        }
+        return context.getString(R.string.update_status, installed, github, word)
+    }
 
     fun install(context: Context, apk: File) {
         val installer = context.packageManager.packageInstaller

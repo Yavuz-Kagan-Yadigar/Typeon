@@ -140,10 +140,12 @@ class SettingsFragment : Fragment() {
     /** Status label and periodic poll. The poll starts in `onResume` and stops in `onPause`. A JNI poll every 2 s from view creation would keep running
      *  while the app is in the background, wasting battery and core-lock time. */
     private var torStatusView: TextView? = null
+    private var updateStatusView: TextView? = null
     private val torStatusHandler = Handler(Looper.getMainLooper())
     private val torStatusRunnable = object : Runnable {
         override fun run() {
             updateTorStatusLabel()
+            updateStatusView?.text = context?.let { com.p2p.messenger.service.SelfUpdate.statusText(it) }
             // The Tor status (bootstrap) can change within seconds, so refresh every 2 s.
             torStatusHandler.postDelayed(this, 2000)
         }
@@ -325,6 +327,10 @@ class SettingsFragment : Fragment() {
             if (!isChecked) Toast.makeText(requireContext(), R.string.tor_off_no_network, Toast.LENGTH_LONG).show()
         }
         val betaSwitch = view.findViewById<SwitchMaterial>(R.id.beta_updates_switch)
+        updateStatusView = view.findViewById(R.id.update_status)
+        view.findViewById<Button>(R.id.btn_check_updates).setOnClickListener {
+            com.p2p.messenger.service.SelfUpdate.checkNow(requireContext())
+        }
         betaSwitch.isChecked = com.p2p.messenger.service.SelfUpdate.beta(requireContext())
         betaSwitch.setOnCheckedChangeListener { _, isChecked ->
             com.p2p.messenger.service.SelfUpdate.setBeta(requireContext(), isChecked)
@@ -1515,6 +1521,7 @@ class SettingsFragment : Fragment() {
         super.onDestroyView()
         torStatusHandler.removeCallbacks(torStatusRunnable)
         torStatusView = null
+        updateStatusView = null
     }
 
     // -----------------------------------------------------------------

@@ -114,13 +114,29 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
             .subtitle("Typeon updates itself once a day from GitHub releases, over Tor. On: also install beta releases.")
             .active(p2p_messenger::update::beta_enabled(&crate::update::dir()))
             .build();
-        let app = app.clone();
-        beta.connect_active_notify(move |row| {
-            if let Err(error) = p2p_messenger::update::set_beta(&crate::update::dir(), row.is_active()) {
-                app.toast(&format!("Could not change the update channel: {error}"));
-            }
+        let app_beta = app.clone();
+        beta.connect_active_notify(move |row| match p2p_messenger::update::set_beta(&crate::update::dir(), row.is_active()) {
+            Ok(()) => crate::update::tick(&app_beta),
+            Err(error) => app_beta.toast(&format!("Could not change the update channel: {error}")),
         });
         connectivity.add(&beta);
+        let status = adw::ActionRow::builder().title("Update status").use_markup(false).subtitle(crate::update::status_text()).build();
+        let weak = status.downgrade();
+        glib::timeout_add_seconds_local(2, move || match weak.upgrade() {
+            Some(row) => {
+                row.set_subtitle(&crate::update::status_text());
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        });
+        let check = gtk::Button::builder().label("Check now").valign(gtk::Align::Center).build();
+        let app = app.clone();
+        check.connect_clicked(move |_| {
+            let _ = std::fs::remove_file(crate::update::dir().join("last-check"));
+            crate::update::tick(&app);
+        });
+        status.add_suffix(&check);
+        connectivity.add(&status);
     }
 
     let node = adw::SwitchRow::builder()
