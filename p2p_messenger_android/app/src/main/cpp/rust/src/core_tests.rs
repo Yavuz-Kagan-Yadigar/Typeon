@@ -1851,4 +1851,50 @@ mod fable_review_tests {
         assert!(core.ratchets_loaded);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A ring answered on a sibling stops here but the group call stays
+    /// joinable ("Attend"); joining it here hides the offer.
+    #[test]
+    fn sibling_busy_stops_the_ring_and_the_group_call_stays_joinable() {
+        use crate::packet::CallAction;
+        let (mut me, mut other) = (P2PCore::new(), P2PCore::new());
+        me.generate_identity("me".into()).unwrap();
+        let other_fp = other.generate_identity("o".into()).unwrap().0;
+        let my_id = me.my_identity_id().unwrap();
+        let other_id = other.my_identity_id().unwrap();
+        me.known_remote_devices.insert(other_fp.clone(), other.own_devices[&other_fp].clone());
+        let gid = "group-attend-0123456789".to_string();
+        let mut g = Group::new(gid.clone(), "g".into(), other_id.clone(), 1);
+        g.sync_members(&[other_id.clone(), my_id.clone()], 1);
+        me.groups.insert(gid.clone(), g);
+        let call_id = "call-attend-1".to_string();
+        let signal = |core: &mut P2PCore, fp: &str, id: &str, action| {
+            core.handle_call_signal(fp, id, call_id.clone(), action, Some(gid.clone()), true, vec![1; 32], vec![2; 8], current_time_ms(), Vec::new())
+        };
+
+        signal(&mut me, &other_fp, &other_id, CallAction::Invite);
+        assert!(me.call.is_some(), "rings");
+        assert_eq!(me.group_call_offer(&gid), 2);
+
+        // Answered on my other device: the ring stops, nobody missed it.
+        let ev = signal(&mut me, "sibling-device", &my_id, CallAction::Busy);
+        assert!(me.call.is_none());
+        assert_eq!(ev["ended"], true);
+        assert_eq!(ev["missed"], false);
+        // A repeat Invite of the same call does not ring again, but keeps the offer.
+        signal(&mut me, &other_fp, &other_id, CallAction::Invite);
+        assert!(me.call.is_none());
+        assert_eq!(me.group_call_offer(&gid), 2);
+
+        // Attend: joins the running call instead of starting a new one.
+        assert_eq!(me.start_group_call(gid.clone(), false).unwrap(), call_id);
+        let state: serde_json::Value = serde_json::from_str(&me.call_state_json()).unwrap();
+        assert_eq!(state["state"], "active");
+        assert_eq!(me.group_call_offer(&gid), 0);
+        // A sibling's Busy never ends a call I am in.
+        signal(&mut me, "sibling-device", &my_id, CallAction::Busy);
+        assert!(me.call.is_some());
+        me.end_call();
+        assert_eq!(me.group_call_offer(&gid), 2, "after leaving, Attend shows again");
+    }
 }
