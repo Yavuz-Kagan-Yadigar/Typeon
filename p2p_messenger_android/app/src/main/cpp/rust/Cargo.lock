@@ -3773,7 +3773,7 @@ dependencies = [
 
 [[package]]
 name = "p2p_messenger_core"
-version = "7.5.0"
+version = "8.0.0"
 dependencies = [
  "android_logger",
  "argon2",
