@@ -1021,7 +1021,8 @@ impl P2PCore {
                             error!("Could not save profile photo: {}", e);
                         }
                     }
-                    return Ok(serde_json::json!({"type": "noop"}).to_string());
+                    // Not "noop": an open Settings screen must redraw my own picture (it only read it when it was created).
+                    return Ok(serde_json::json!({"type": "own_profile_changed"}).to_string());
                 }
                 let new_name = display_name.as_deref().and_then(sanitize_display_name);
                 let mut renamed_from: Option<String> = None;

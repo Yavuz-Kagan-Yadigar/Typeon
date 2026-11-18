@@ -1955,6 +1955,20 @@ mod signing_input_tests {
         assert_ne!(revokes_digest(&[revoke(b"s")]), revokes_digest(&[revoke(b"s"), revoke(b"s")]));
     }
 
+    /// A removed photo travels as `avatar_jpeg: None` and must decode as None, not fail.
+    #[test]
+    fn profile_update_without_photo_round_trips() {
+        for avatar in [None, Some(vec![1u8, 2, 3])] {
+            let content = MessageContent::ProfileUpdate { avatar_jpeg: avatar.clone(), display_name: Some("n".into()) };
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&content, &mut bytes).unwrap();
+            match MessageContent::from_cbor(&bytes).unwrap() {
+                MessageContent::ProfileUpdate { avatar_jpeg, .. } => assert_eq!(avatar_jpeg, avatar),
+                _ => panic!("wrong variant"),
+            }
+        }
+    }
+
     /// Peer-filled collections stop at their limit while decoding (CRY-9).
     #[test]
     fn collection_counts_are_bounded() {

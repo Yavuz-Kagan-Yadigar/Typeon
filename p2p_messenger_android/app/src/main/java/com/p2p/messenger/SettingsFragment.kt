@@ -427,10 +427,18 @@ class SettingsFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         startTorStatusPolling()
+        // A linked device changed or removed my picture: redraw it (it was read only when the screen was created).
+        refreshOwnAvatar()
+        P2PService.addMessageListener(ownProfileListener)
+    }
+
+    private val ownProfileListener: (String) -> Unit = { msg ->
+        if (msg.contains("\"own_profile_changed\"")) refreshOwnAvatar()
     }
 
     override fun onPause() {
         super.onPause()
+        P2PService.removeMessageListener(ownProfileListener)
         torStatusHandler.removeCallbacks(torStatusRunnable)
     }
 
