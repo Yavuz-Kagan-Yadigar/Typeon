@@ -5,13 +5,18 @@ fn jpeg_trailer_and_png_text_are_dropped() {
     let path = std::env::temp_dir().join(format!("typeon-meta-{}", std::process::id()));
     // SOI, APP0, SOS, entropy data with a stuffed byte and a restart
     // marker, a DHT between scans, a second SOS, EOI, then a trailer.
-    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 7, b'J', b'F', b'I', b'F', 0, 0xFF, 0xDA, 0, 3, 9, 0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD3, 0x33];
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xFF, 0xDA, 0, 3, 9, 0x11, 0xFF, 0x00, 0x22, 0xFF, 0xD3, 0x33];
     jpeg.extend_from_slice(&[0xFF, 0xC4, 0, 3, 7, 0xFF, 0xDA, 0, 3, 9, 0x44, 0xFF, 0xD9]);
     let eoi = jpeg.len() as u64;
     jpeg.extend_from_slice(b"MOTIONPHOTO");
     std::fs::write(&path, &jpeg).unwrap();
     let (ranges, _) = jpeg_metadata_ranges(&mut File::open(&path).unwrap()).unwrap();
     assert_eq!(ranges, vec![(eoi, jpeg.len() as u64)]);
+    // A JFIF APP0 with a 1x1 thumbnail goes.
+    let thumb = [0xFF, 0xD8, 0xFF, 0xE0, 0, 19, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 9, 9, 9, 0xFF, 0xDA, 0, 3, 9, 0x11, 0xFF, 0xD9];
+    std::fs::write(&path, thumb).unwrap();
+    let (ranges, _) = jpeg_metadata_ranges(&mut File::open(&path).unwrap()).unwrap();
+    assert_eq!(ranges, vec![(2, 23)]);
 
     let chunk = |kind: &[u8; 4], body: &[u8]| {
         let mut c = (body.len() as u32).to_be_bytes().to_vec();
@@ -51,10 +56,13 @@ fn jxl_exif_and_xml_boxes_are_dropped() {
     jxl.extend(boxed(b"Exif", b"\0\0\0\0GPS!"));
     jxl.extend(boxed(b"xml ", b"<x/>"));
     jxl.extend(boxed(b"jbrd", b"IPTC"));
+    let jbrd_end = jxl.len() as u64;
+    // An unknown box goes too (allow-list).
+    jxl.extend(boxed(b"uuid", b"vendor"));
     let xml_end = jxl.len() as u64;
     jxl.extend(boxed(b"jxlc", &[0xFF, 0x0A, 1, 2]));
     std::fs::write(&path, &jxl).unwrap();
-    assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(exif_at, exif_at + 16), (exif_at + 16, exif_at + 28), (exif_at + 28, xml_end)]));
+    assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![(exif_at, exif_at + 16), (exif_at + 16, exif_at + 28), (exif_at + 28, jbrd_end), (jbrd_end, xml_end)]));
 
     std::fs::write(&path, [0xFF, 0x0A, 1, 2, 3]).unwrap();
     assert_eq!(jxl_metadata_ranges(&mut File::open(&path).unwrap()), Some(vec![]));
@@ -316,7 +324,8 @@ fn exif_is_cut_from_a_jpeg_and_a_doubtful_jpeg_is_refused() {
         out
     };
     let soi = [0xFF, 0xD8];
-    let jfif = [0xFF, 0xE0, 0, 7, b'J', b'F', b'I', b'F', 0];
+    // A real JFIF APP0 (16 bytes, no thumbnail): kept.
+    let jfif = [0xFF, 0xE0, 0, 16, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
     let exif = [0xFF, 0xE1, 0, 6, b'E', b'x', b'i', b'f'];
     let icc = [&[0xFF, 0xE2, 0, 14][..], b"ICC_PROFILE\0"].concat();
     let iptc = [0xFF, 0xED, 0, 4, b'P', b'S'];

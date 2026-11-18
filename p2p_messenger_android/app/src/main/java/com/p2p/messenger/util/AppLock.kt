@@ -109,7 +109,7 @@ object AppLock {
         return try {
             val expected = Base64.decode(hashB64, Base64.NO_WRAP)
             val actual = derive(password, Base64.decode(saltB64, Base64.NO_WRAP), iterations)
-            MessageDigest.isEqual(expected, actual)
+            try { MessageDigest.isEqual(expected, actual) } finally { actual.fill(0) }
         } catch (e: Exception) {
             false
         }
@@ -176,7 +176,8 @@ object AppLock {
                 .putLong(KEY_WAIT_WALL, System.currentTimeMillis())
                 .putLong(KEY_WAIT_MS, 30_000L shl over.coerceAtMost(5))
         }
-        edit.apply()
+        // Synchronous: a process killed right after a wrong guess must still count it.
+        edit.commit()
     }
 
     /** Password check for flows outside the lock screen (password change). It applies the same wait and failure counting as the

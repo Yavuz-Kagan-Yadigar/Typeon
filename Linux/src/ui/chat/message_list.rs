@@ -23,9 +23,22 @@ impl ChatView {
     /// correct for a message delayed in transit, which slots into the spot it
     /// was written in rather than the spot it arrived in.
     pub(super) fn insert_entry(self: &Rc<Self>, entry: Entry, scroll: bool) {
+        // Live inserts include my own sends, which emit no event for the list.
+        if scroll {
+            self.main.refresh_chats();
+        }
         if let Some(existing) = self.bubbles.borrow().get(&entry.id) {
             // Already on screen — a duplicate can legitimately arrive when a
             // reload races an event. Refresh in place instead of doubling it.
+            {
+                let mut current = existing.entry.borrow_mut();
+                let (deleted, seen) = (current.deleted || entry.deleted, current.seen || entry.seen);
+                let reactions = if entry.reactions.is_empty() { current.reactions.clone() } else { entry.reactions.clone() };
+                *current = entry.clone();
+                current.deleted = deleted;
+                current.seen = seen;
+                current.reactions = reactions;
+            }
             existing.text.set_markup(&display_text(&entry));
             self.search_lower.borrow_mut().clear();
             existing.edited.set(entry.edited);
@@ -36,6 +49,7 @@ impl ChatView {
                 _ => entry.status.clone(),
             };
             *existing.status.borrow_mut() = status.clone();
+            existing.entry.borrow_mut().status = status.clone();
             existing.meta.set_markup(&format_meta(
                 entry.order_key,
                 status.as_deref(),
@@ -144,16 +158,27 @@ impl ChatView {
         // Acknowledge on screen: only for what someone else sent, and at most
         // once per message for as long as this view lives. Without the guard
         // every `reload()` — which several events trigger — would re-send a
-        // receipt for the whole visible history.
+        // receipt for the whole visible history. Nobody looking (window
+        // hidden, minimised, in the background, locked or idle): the receipt
+        // waits for `flush_deferred_reads`.
         if !entry.mine
             && entry.attachment.is_none()
             && !entry.id.starts_with("legacy:")
             && self.seen_sent.borrow_mut().insert(entry.id.clone())
         {
-            self.send_seen(&entry);
+            if self.is_watched() {
+                self.send_seen(&entry);
+            } else {
+                self.seen_deferred.borrow_mut().push(entry.clone());
+            }
         }
 
         self.schedule_shading();
+        if scroll {
+            // A live row may start a new day (after midnight, or a file sent
+            // into an older day's slot).
+            self.refresh_day_separators();
+        }
         // Own messages always jump to the bottom. Others only follow when the
         // view is already there (`follow_bottom`), so reading history is not
         // interrupted.
@@ -282,6 +307,7 @@ impl ChatView {
             let label = gtk::Label::builder().label("↪ Forwarded").xalign(0.0).build();
             label.add_css_class("caption");
             label.add_css_class("dim-label");
+            label.add_css_class("forwarded-label");
             column.append(&label);
         }
         if !entry.deleted {
@@ -357,15 +383,22 @@ impl ChatView {
         let content_width = overlay.measure(gtk::Orientation::Horizontal, -1).1;
         let root: gtk::Widget = overlay.clone().upcast();
 
-        // Right-click for reply / edit / delete / copy.
+        // Right-click for reply / edit / delete / copy. The menu is built from
+        // the bubble's current entry (edits, deletes, reactions that arrived
+        // live), not the one it was built from. Weak and looked up by id: the
+        // controller lives on the bubble, a strong capture would be a cycle.
         let gesture = gtk::GestureClick::new();
         gesture.set_button(3);
         {
-            let view = self.clone();
-            let entry = entry.clone();
-            let anchor = column.clone();
-            gesture.connect_pressed(move |_, _, x, y| {
-                view.bubble_menu(&anchor, &entry, x, y);
+            let view = Rc::downgrade(self);
+            let id = entry.id.clone();
+            gesture.connect_pressed(move |gesture, _, x, y| {
+                let Some(view) = view.upgrade() else { return };
+                let Some(anchor) = gesture.widget().and_downcast::<gtk::Box>() else { return };
+                let current = view.bubbles.borrow().get(&id).map(|bubble| bubble.entry.borrow().clone());
+                if let Some(entry) = current {
+                    view.bubble_menu(&anchor, &entry, x, y);
+                }
             });
         }
         column.add_controller(gesture);
@@ -388,6 +421,7 @@ impl ChatView {
             reactions,
             status: RefCell::new(entry.status.clone()),
             edited: Cell::new(entry.edited),
+            entry: RefCell::new(entry.clone()),
         })
     }
 

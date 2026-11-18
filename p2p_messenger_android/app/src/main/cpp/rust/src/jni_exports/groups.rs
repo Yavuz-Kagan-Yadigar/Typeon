@@ -173,10 +173,11 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.send_group_message(&gid, &msg_str, reply_id_opt, reply_preview_opt, reply_sender_opt, mentions)
+        core.send_group_message_with_status(&gid, &msg_str, reply_id_opt, reply_preview_opt, reply_sender_opt, mentions)
     });
+    // The same shape as `sendMessage`.
     let out = match result {
-        Ok(Ok(local_id)) => local_id,
+        Ok(Ok((local_id, status))) => serde_json::json!({"message_id": local_id, "status": status}).to_string(),
         Ok(Err(e)) => { error!("send_group_message failed: {}", e); coded_error(&e) }
         Err(e) => { error!("send_group_message panicked: {}", e); coded_error(&format!("panic: {}", e)) }
     };

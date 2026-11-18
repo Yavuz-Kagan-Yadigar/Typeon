@@ -73,33 +73,36 @@ class LinkDeviceActivity : AppCompatActivity() {
 
     /** Retries QR generation until the network address is ready. */
     private fun tryBuildQr(attemptsLeft: Int) {
-        // the JNI call (core lock) runs off the main thread.
+        // The JNI call (core lock) and the QR encode run off the main thread.
         Thread {
             val bytes = try { P2PLib.buildDeviceLinkRequest() } catch (e: Exception) { ByteArray(0) }
-            handler.post { if (!isDestroyed) showQr(bytes, attemptsLeft) }
+            var bmp: Bitmap? = null
+            var code = ""
+            if (bytes.isNotEmpty()) {
+                // WriterException: the request does not fit a QR code.
+                bmp = try { encodeBinaryAsQrBitmap(bytes, 1000, 1000) } catch (e: Exception) { null }
+                code = try { P2PLib.deviceLinkCode(bytes) } catch (e: Throwable) { "" }
+            }
+            handler.post { if (!isDestroyed) showQr(bytes.isNotEmpty(), bmp, code, attemptsLeft) }
         }.start()
     }
 
-    private fun showQr(bytes: ByteArray, attemptsLeft: Int) {
-        if (bytes.isEmpty()) {
-            if (attemptsLeft > 0) {
-                handler.postDelayed({ tryBuildQr(attemptsLeft - 1) }, 500)
-            } else {
-                statusText.text = getString(R.string.link_device_network_not_ready)
-            }
+    private fun showQr(haveBytes: Boolean, bmp: Bitmap?, code: String, attemptsLeft: Int) {
+        if (!haveBytes) {
+            // Fast retries first, then a slow one for as long as the screen is open (Tor can need minutes).
+            if (attemptsLeft <= 0) statusText.text = getString(R.string.link_device_network_not_ready)
+            handler.postDelayed({ tryBuildQr(maxOf(attemptsLeft - 1, 0)) }, if (attemptsLeft > 0) 500L else 5000L)
             return
         }
-        try {
-            qrImage.setImageBitmap(encodeBinaryAsQrBitmap(bytes, 1000, 1000))
-            // The approving device shows the same code in its confirm dialog.
-            val code = try { P2PLib.deviceLinkCode(bytes) } catch (e: Throwable) { "" }
-            if (code.isNotEmpty()) {
-                statusText.textAlignment = View.TEXT_ALIGNMENT_CENTER
-                statusText.text = getString(R.string.link_device_waiting) + "\n\n" + getString(R.string.link_device_code_shown, code)
-            }
-        } catch (e: Exception) {
-            // WriterException: the request does not fit a QR code.
+        if (bmp == null) {
             statusText.text = getString(R.string.link_device_network_not_ready)
+            return
+        }
+        qrImage.setImageBitmap(bmp)
+        // The approving device shows the same code in its confirm dialog.
+        if (code.isNotEmpty()) {
+            statusText.textAlignment = View.TEXT_ALIGNMENT_CENTER
+            statusText.text = getString(R.string.link_device_waiting) + "\n\n" + getString(R.string.link_device_code_shown, code)
         }
     }
 
@@ -108,7 +111,8 @@ class LinkDeviceActivity : AppCompatActivity() {
         handler.removeCallbacksAndMessages(null)
         // Left without a link: a grant that comes later must not be accepted.
         if (isFinishing && !done) {
-            try { P2PLib.closeDeviceLinkWindow() } catch (e: Throwable) { }
+            // Takes the core lock: not on the UI thread.
+            Thread { try { P2PLib.closeDeviceLinkWindow() } catch (e: Throwable) { } }.start()
         }
         super.onDestroy()
     }

@@ -276,8 +276,7 @@ internal fun SettingsFragment.setupChatAppearanceControls(view: View) {
             darknessSlider.progress = ThemePrefs.getWallpaperDarkness(requireContext())
             blurValue.text = "%.1f".format(blurSlider.progress / 10f)
             darknessValue.text = "${darknessSlider.progress}%"
-            wallpaperThumb.setImageBitmap(android.graphics.BitmapFactory.decodeFile(file.absolutePath))
-            previewEffects()
+            previewEffects() // sets the thumbnail from a small decode, off the main thread
             wallpaperThumb.visibility = View.VISIBLE
             btnRemoveWallpaper.visibility = View.VISIBLE
             blurRow.visibility = View.VISIBLE
@@ -403,13 +402,15 @@ internal fun SettingsFragment.onChatWallpaperPicked(uri: Uri) {
             ThemePrefs.chatWallpaperFile(app).writeBytes(compressed)
             // New image: rebuild the processed copy with the current slider values.
             ThemePrefs.regenerateProcessedWallpaper(app)
+            // Thumbnail only (40 dp): a small decode here, not the full image on the main thread.
+            val thumbBitmap = ThemePrefs.wallpaperPreview(app, ThemePrefs.getWallpaperBlur(app), ThemePrefs.getWallpaperDarkness(app), 160)
             withContext(Dispatchers.Main) {
                 view?.let { v ->
                     val thumb = v.findViewById<ImageView>(R.id.chat_wallpaper_thumb)
                     val btnRemove = v.findViewById<Button>(R.id.btn_remove_chat_wallpaper)
                     val file = ThemePrefs.chatWallpaperFile(app)
                     if (file.exists()) {
-                        thumb.setImageBitmap(android.graphics.BitmapFactory.decodeFile(file.absolutePath))
+                        thumb.setImageBitmap(thumbBitmap)
                         thumb.visibility = View.VISIBLE
                         btnRemove.visibility = View.VISIBLE
                         v.findViewById<View>(R.id.wallpaper_blur_row).visibility = View.VISIBLE

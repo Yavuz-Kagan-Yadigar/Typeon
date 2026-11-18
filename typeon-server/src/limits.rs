@@ -9,10 +9,15 @@ impl ServerCore {
         /// server with enough records (or just enough users) could use far more than the budget. Disk-full on a phone or
         /// tablet is exactly what this mechanism exists to prevent. Blobs are the largest consumer, but not the only one:
         /// 30-day TTL mail and the archive grow too.
-    pub(super) fn total_budget_exceeded(&self, incoming: usize) -> bool {
-        let Some(total_budget) = self.config.total_storage_budget_bytes else {
+    ///
+    /// `mail`: a mail deposit may use the whole budget. Archive and blob writes leave `MAIL_RESERVE_DIVISOR` free.
+    pub(super) fn total_budget_exceeded(&self, incoming: usize, mail: bool) -> bool {
+        let Some(mut total_budget) = self.config.total_storage_budget_bytes else {
             return false;
         };
+        if !mail {
+            total_budget -= total_budget / MAIL_RESERVE_DIVISOR;
+        }
         // The sum reads every mail, archive and blob row: at most once per `TOTAL_CACHE_MS`, with the bytes written
         // since then added on top (`note_total_written`).
         let mono = mono_ms();
@@ -105,11 +110,13 @@ pub(super) fn verify_hybrid(pk: &[u8], pk_pq: &[u8], message: &[u8], sig: &[u8],
 }
 
 /// Cost of a request against `ServerLimits.requests_per_minute`: one, plus one per 8 list elements (each is a query
-/// on the event loop). An `ArchivePut` also pays one per 64 KiB of record bytes. A `MailboxProof` is a hybrid verify,
-/// and so is `Enroll` and `Rebind`.
+/// on the event loop). An `ArchivePut` also pays one per 64 KiB of record bytes, an `ArchiveProbe` one per bucket. A
+/// `MailboxProof` is a hybrid verify, and so is `Enroll` and `Rebind`.
 pub(super) fn request_cost(req: &ServerRequest) -> u32 {
     let n = match req {
         ServerRequest::Enroll { .. } | ServerRequest::Rebind { .. } => return 30,
+        // Each bucket counts up to 65,536 index entries, so each one pays a full unit.
+        ServerRequest::ArchiveProbe { buckets } => return 1u32.saturating_add(buckets.len() as u32),
         ServerRequest::Register { add, drop, proofs } => add.len() + drop.len() + 64 * proofs.len(),
         ServerRequest::Fetch { cursors: list, .. } | ServerRequest::Ack { acks: list } => list.len(),
         ServerRequest::Cancel { seqs, .. } => seqs.len(),
@@ -118,7 +125,7 @@ pub(super) fn request_cost(req: &ServerRequest) -> u32 {
         ServerRequest::ArchivePut { records, .. } => {
             records.len() + records.iter().map(|r| r.sealed.len()).sum::<usize>() / (64 * 1024) * 8
         }
-        ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { purge_secrets: buckets } => buckets.len(),
+        ServerRequest::ArchivePurge { purge_secrets: buckets } => buckets.len(),
         _ => 0,
     };
     1u32.saturating_add(u32::try_from(n / 8).unwrap_or(u32::MAX))

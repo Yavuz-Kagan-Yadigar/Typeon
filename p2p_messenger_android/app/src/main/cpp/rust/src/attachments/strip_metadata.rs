@@ -57,7 +57,8 @@ pub(super) fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, 
                 }
                 let tag = &tag[..want];
                 let keep = match marker {
-                    0xE0 => tag.starts_with(b"JFIF\0"),
+                    // Only a JFIF APP0 without a thumbnail (length 16): the thumbnail can show the uncropped original.
+                    0xE0 => tag.starts_with(b"JFIF\0") && size == 16,
                     0xE2 => tag.starts_with(b"ICC_PROFILE\0"),
                     0xEE => tag.starts_with(b"Adobe"),
                     _ => false,
@@ -227,17 +228,8 @@ pub(super) fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
             if size < header || end > len {
                 return None;
             }
-            let dropped = match &h[4..8] {
-                b"Exif" | b"xml " | b"jumb" | b"jbrd" => true,
-                b"brob" => {
-                    let mut inner = [0u8; 4];
-                    file.seek(SeekFrom::Start(at + header)).ok()?;
-                    size >= header + 4
-                        && read_full(file, &mut inner).ok()? == 4
-                        && matches!(&inner, b"Exif" | b"xml " | b"jumb" | b"jbrd")
-                }
-                _ => false,
-            };
+            // Allow-list, like the other formats: only the boxes that carry the image stay.
+            let dropped = !matches!(&h[4..8], b"ftyp" | b"jxll" | b"jxlc" | b"jxlp" | b"jxli");
             if dropped {
                 ranges.push((at, end));
             }

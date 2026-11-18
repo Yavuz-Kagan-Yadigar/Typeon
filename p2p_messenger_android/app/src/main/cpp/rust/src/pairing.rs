@@ -354,26 +354,58 @@ impl P2PCore {
     /// valid, with their expiry, oldest first. On disk, so a process restart
     /// keeps them.
     pub(crate) fn pairing_nonces(&self) -> Vec<(Vec<u8>, u64)> {
+        self.pairing_nonce_entries().into_iter().map(|(n, until, _)| (n, until)).collect()
+    }
+
+    /// `pairing_nonces` with the identity each code already made a contact
+    /// of ("nonce:until[:identity]").
+    pub(crate) fn pairing_nonce_entries(&self) -> Vec<(Vec<u8>, u64, Option<String>)> {
         let now = current_time_ms();
         self.meta_str("pairing_nonces").unwrap_or_default()
             .split(',')
             .filter_map(|entry| {
-                let (nonce, until) = entry.split_once(':')?;
-                Some((hex::decode(nonce).ok()?, until.parse::<u64>().ok()?))
+                let mut it = entry.splitn(3, ':');
+                let nonce = hex::decode(it.next()?).ok()?;
+                let until = it.next()?.parse::<u64>().ok()?;
+                Some((nonce, until, it.next().filter(|id| !id.is_empty()).map(str::to_string)))
             })
-            .filter(|(_, until)| *until > now)
+            .filter(|(_, until, _)| *until > now)
             .collect()
     }
 
+    fn save_pairing_nonces(&self, all: &[(Vec<u8>, u64, Option<String>)]) -> Result<(), String> {
+        let v: Vec<String> = all.iter().map(|(n, until, owner)| match owner {
+            Some(id) => format!("{}:{}:{}", hex::encode(n), until, id),
+            None => format!("{}:{}", hex::encode(n), until),
+        }).collect();
+        let conn = self.db.as_ref().ok_or("DB not open, could not generate pairing code")?;
+        conn.execute("INSERT OR REPLACE INTO app_meta (k, v) VALUES (?1, ?2)", params!["pairing_nonces", v.join(",")])
+            .map_err(|e| format!("Could not save pairing code: {}", e))?;
+        bump_first_contact_gen("pairing_nonces");
+        Ok(())
+    }
+
+    /// A code makes a contact of one identity only: a photo of it taken by
+    /// someone else no longer adds that person silently.
+    pub(crate) fn bind_pairing_nonce(&self, nonce: &[u8], identity_id: &str) {
+        let mut all = self.pairing_nonce_entries();
+        let Some(e) = all.iter_mut().find(|(n, _, owner)| n.as_slice() == nonce && owner.is_none()) else { return };
+        e.2 = Some(identity_id.to_string());
+        if let Err(e) = self.save_pairing_nonces(&all) {
+            warn!("Pairing code could not be bound: {}", e);
+        }
+    }
+
     /// The nonce for a pairing code shown now. Each one is valid for
-    /// `PAIRING_WINDOW_MS` and for any number of scans; at most
-    /// `PAIRING_WINDOW_MS / PAIRING_NONCE_REUSE_MS` are valid at a time.
+    /// `PAIRING_WINDOW_MS` and makes a contact of the first identity that
+    /// reads it (`bind_pairing_nonce`); at most
+    /// `PAIRING_WINDOW_MS / PAIRING_NONCE_REUSE_MS` unused ones are valid at a time.
     /// Err when the nonce is not on disk: a code whose proof can never
     /// verify must not be shown.
     pub(crate) fn issue_pairing_nonce(&self) -> Result<Vec<u8>, String> {
         let now = current_time_ms();
-        let mut all = self.pairing_nonces();
-        if let Some((nonce, until)) = all.last() {
+        let mut all = self.pairing_nonce_entries();
+        if let Some((nonce, until, None)) = all.last() {
             if until.saturating_add(PAIRING_NONCE_REUSE_MS) > now.saturating_add(PAIRING_WINDOW_MS) {
                 return Ok(nonce.clone());
             }
@@ -381,31 +413,30 @@ impl P2PCore {
         use rand::RngCore;
         let mut nonce = [0u8; 16];
         OsRng.fill_bytes(&mut nonce);
-        all.push((nonce.to_vec(), now + PAIRING_WINDOW_MS));
-        let v: Vec<String> = all.iter().map(|(n, until)| format!("{}:{}", hex::encode(n), until)).collect();
-        let conn = self.db.as_ref().ok_or("DB not open, could not generate pairing code")?;
-        conn.execute("INSERT OR REPLACE INTO app_meta (k, v) VALUES (?1, ?2)", params!["pairing_nonces", v.join(",")])
-            .map_err(|e| format!("Could not save pairing code: {}", e))?;
-        bump_first_contact_gen("pairing_nonces");
+        all.push((nonce.to_vec(), now + PAIRING_WINDOW_MS, None));
+        self.save_pairing_nonces(&all)?;
         Ok(nonce.to_vec())
     }
 
     /// The sender read a code this device shows: `pairing_proof` is made from
-    /// a nonce this device issued and that is still valid.
+    /// a nonce this device issued, that is still valid and that no other
+    /// identity used.
     pub(crate) fn pairing_proof_valid(&self, exchange: &IdentityExchange) -> bool {
-        let made_from = |nonce: &[u8]| packet::pairing_nonce_proof(nonce, &exchange.device_fingerprint) == exchange.pairing_proof;
+        let made_from = |nonce: &[u8]| ct_eq(&packet::pairing_nonce_proof(nonce, &exchange.device_fingerprint), &exchange.pairing_proof);
         // The link code makes a contact only of the first device to read it,
         // on a device with no contacts yet (the only kind a grant can move,
         // `adopt_device_link`). Anyone else who saw that code does not
         // become a contact of an identity in use.
-        (self.contacts.is_empty() && self.link_proof_valid(exchange)) || self.pairing_nonces().iter().any(|(nonce, _)| made_from(nonce))
+        (self.contacts.is_empty() && self.link_proof_valid(exchange))
+            || self.pairing_nonce_entries().iter()
+                .any(|(nonce, _, owner)| owner.as_deref().map_or(true, |o| o == exchange.identity_id) && made_from(nonce))
     }
 
     /// As `pairing_proof_valid`, for the link code this device shows now.
     pub(crate) fn link_proof_valid(&self, exchange: &IdentityExchange) -> bool {
         self.link_request_nonce.len() == 16
             && self.link_request_open_until > current_time_ms()
-            && packet::pairing_nonce_proof(&self.link_request_nonce, &exchange.device_fingerprint) == exchange.pairing_proof
+            && ct_eq(&packet::pairing_nonce_proof(&self.link_request_nonce, &exchange.device_fingerprint), &exchange.pairing_proof)
     }
 
     /// The 5 relays seen last, for a pairing or link code.
@@ -610,8 +641,7 @@ impl P2PCore {
         h.finalize()[..16].to_vec()
     }
 
-    /// The signed revokes of my own identity, oldest first (see `IdentityExchange.revokes`).
-    /// ponytail: a device linked later does not get the earlier ones from its siblings. Put the list into `SyncPayload` if that matters.
+    /// The signed revokes of my own identity, oldest first (see `IdentityExchange.revokes`; a device linked later gets them in `SyncPayload.own_revokes`).
     pub(crate) fn own_revokes(&self) -> Vec<DeviceRevoke> {
         self.db.as_ref()
             .and_then(|conn| conn.query_row("SELECT v FROM app_meta WHERE k = 'own_revokes'", [], |r| r.get::<_, String>(0)).ok())
@@ -640,6 +670,8 @@ impl P2PCore {
         if let Ok(bytes) = ciborium_bytes(&all) {
             self.meta_put("own_revokes", &hex::encode(bytes));
         }
+        // See `touch_device_seen`: contact devices not seen since get the revokes again.
+        self.meta_put("own_revoke_at", &current_time_ms().to_string());
     }
 
     /// The contact revoked this device with a signed notice (see
@@ -673,7 +705,7 @@ impl P2PCore {
             .and_then(|c| c.find_device(device_fingerprint))
             .map_or(false, |d| d.owner_revoked)
             // a non-contact identity's (group member's) revoke.
-            || self.non_contact_revoke(device_fingerprint).map_or(false, |(id, _)| id == identity_id)
+            || self.non_contact_revoke(identity_id, device_fingerprint).is_some()
             // A device of my own identity that I revoked: siblings that never
             // held its record have only `own_revokes` to go by. A device
             // linked again since is an active record and is not refused.
@@ -682,13 +714,11 @@ impl P2PCore {
                 && self.own_revokes().iter().any(|r| r.revoked_device_fingerprint == device_fingerprint))
     }
 
-    /// A non-contact identity's revoke of `device_fingerprint` (`orv:` row,
-    /// "identity|revoked_at"): the identity, and when we applied the revoke.
-    pub(crate) fn non_contact_revoke(&self, device_fingerprint: &str) -> Option<(String, Option<u64>)> {
-        let v = self.meta_str(&format!("orv:{}", device_fingerprint))?;
-        let mut parts = v.splitn(2, '|');
-        let id = parts.next()?.to_string();
-        Some((id, parts.next().and_then(|t| t.parse().ok())))
+    /// A non-contact identity's revoke of `device_fingerprint` (`orv:<identity>:<fp>`
+    /// row): `Some` if there is one, with when we applied it.
+    pub(crate) fn non_contact_revoke(&self, identity_id: &str, device_fingerprint: &str) -> Option<Option<u64>> {
+        let v = self.meta_str(&format!("orv:{}:{}", identity_id, device_fingerprint))?;
+        Some(v.parse().ok())
     }
 
     /// Processes a scanned QR (or the same-format text typed in by hand, ). It records the contact as TOFU, adds the rendezvous node to the swarm as a
@@ -748,6 +778,8 @@ impl P2PCore {
         }
         // Peer-chosen text: it is returned to the UI as the chat title.
         let device_name = sanitize_display_name(device_name).unwrap_or_default();
+        // Taken before the removed marker is cleared below.
+        let gen = self.contact_next_gen(&identity_id);
         // A device this contact already lists as Active: the code proves
         // nothing (identity id and fingerprint are public), so it changes no
         // state of that device: no new pairing secret, no block lifted, and
@@ -758,16 +790,22 @@ impl P2PCore {
             .and_then(|c| self.contacts.get(c))
             .and_then(|c| c.find_device(&device_fingerprint))
             .map_or(false, |d| d.status == contact::KnownDeviceStatus::Active);
+        let had_contact = self.identity_to_contact.contains_key(&identity_id);
         self.register_contact_from_pairing(identity_id.clone(), device_fingerprint.clone(), device_name.clone())?;
         if known_active {
             if let Err(e) = self.send_identity_exchange_fresh(&device_fingerprint) {
                 error!("IdentityExchange send temporarily failed (will retry): {}", e);
             }
             // Still the user pairing again: a sibling that removed this contact
-            // takes it back only from a roster whose pairing time is newer.
-            self.note_contact_added(&identity_id, current_time_ms());
+            // takes it back only from a roster whose pairing generation is not older.
+            self.note_contact_added(&identity_id, gen);
             self.sync_to_siblings();
             return Ok((identity_id, device_fingerprint, device_name));
+        }
+        // A code proves nothing about the device: until its IdentityExchange binds it to the identity, the contact is
+        // removed again at the end of the pairing window (`sweep_unproved_contacts`).
+        if !had_contact {
+            self.meta_put(&format!("cunp:{}", identity_id), &(current_time_ms() + 2 * PAIRING_WINDOW_MS).to_string());
         }
         // Goes into each IdentityExchange to this device (`pairing_proof`).
         // ponytail: the row stays after the nonce expires (the proof is then ignored), and is replaced by the next code of the same device.
@@ -783,7 +821,7 @@ impl P2PCore {
             let _ = conn.execute("DELETE FROM removed_contacts WHERE identity_id = ?1", params![identity_id]);
         }
         // Siblings that removed the contact earlier take it back from the roster (`SyncedContact.added_at_ms`).
-        self.note_contact_added(&identity_id, current_time_ms());
+        self.note_contact_added(&identity_id, gen);
         self.dial_pairing_addr(&device_fingerprint, rendezvous_node, known_relays);
         // See `pairing_mailbox_subs`: during pairing, also subscribe to the other side's mailbox topic (a real mesh gives fast IX/Handshake).
         self.subscribe_pairing_mailbox(&device_fingerprint);
@@ -874,13 +912,7 @@ impl P2PCore {
         let now = current_time_ms();
         let timestamp = now - now % HANDSHAKE_REDO_MIN_INTERVAL_MS;
         let revokes = self.own_revokes_to_send(Some(target_device_fingerprint));
-        let to_sign = packet::identity_exchange_signing_input(
-            &own_identity_id, &own_fp, &own_record.device_name, &pairing_proof, target_device_fingerprint, timestamp, &revokes,
-        );
-        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
-        let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
-        let exchange = IdentityExchange {
+        let mut exchange = IdentityExchange {
             identity_id: own_identity_id,
             device_fingerprint: own_fp,
             device_name: own_record.device_name,
@@ -899,9 +931,18 @@ impl P2PCore {
             link_consent_pq,
             prekey,
             timestamp,
-            signature: sig_classical.to_bytes().to_vec(),
-            signature_pq: sig_pq.encode().to_vec(),
+            signature: Vec::new(),
+            signature_pq: Vec::new(),
         };
+        let to_sign = packet::identity_exchange_signing_input(
+            &exchange.identity_id, &exchange.device_fingerprint, &exchange.device_name, &exchange.pairing_proof,
+            target_device_fingerprint, timestamp, &exchange.revokes, &packet::identity_exchange_extras_digest(&exchange),
+        );
+        let own_keys = self.own_device_keys.get(&exchange.device_fingerprint).ok_or("Missing own keys")?;
+        let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
+        let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
+        exchange.signature = sig_classical.to_bytes().to_vec();
+        exchange.signature_pq = sig_pq.encode().to_vec();
         let envelope = NetworkEnvelope::IdentityExchange(exchange);
         if fresh {
             if let Ok(bytes) = ciborium_bytes(&envelope) {
@@ -941,7 +982,7 @@ impl P2PCore {
         verify_hybrid_signature_with(
             &packet::identity_exchange_signing_input(
                 &exchange.identity_id, &exchange.device_fingerprint, &exchange.device_name, &exchange.pairing_proof,
-                &own_fp, exchange.timestamp, &exchange.revokes,
+                &own_fp, exchange.timestamp, &exchange.revokes, &packet::identity_exchange_extras_digest(exchange),
             ),
             &exchange.signature, &exchange.signature_pq,
             &exchange.sign_pubkey_ed25519, &exchange.sign_pubkey_mldsa,
@@ -953,14 +994,20 @@ impl P2PCore {
         // Our reply goes back over the connection this came in on (see `pairing_reply_peer`). It carries only our public IX and a HandshakeInit sealed
         // to this device's keys.
         if let Some(pid) = source.filter(|p| !self.is_server_peer(p)) {
-            self.pairing_reply_peer.insert(exchange.device_fingerprint.clone(), pid);
+            // Written before the device is accepted, and removed only once a
+            // session exists: refused strangers left one entry each.
+            if self.pairing_reply_peer.len() >= 256 {
+                let known = &self.known_remote_devices;
+                self.pairing_reply_peer.retain(|fp, _| known.contains_key(fp));
+            }
+            if self.pairing_reply_peer.len() < 256 {
+                self.pairing_reply_peer.insert(exchange.device_fingerprint.clone(), pid);
+            }
         }
         // A first device that read the link code this device shows: our reply
-        // carries our half of its DeviceAdd (see `link_consent_peer`).
+        // carries our half of its DeviceAdd (see `link_consent_peer`). Set
+        // after the revoked-device checks below.
         let link_proved = exchange.identity_id == exchange.device_fingerprint && self.link_proof_valid(exchange);
-        if link_proved {
-            self.link_consent_peer = Some(exchange.device_fingerprint.clone());
-        }
 
         // Same decision tree as `process_qr_packet` and `process_manual_entry`. A new contact goes through TOFU (`evaluate_sender_device` does it inside this arm,
         // so `register_contact_from_pairing` is not called here). An unexpected new device of a known contact follows the block rule: nothing is written to
@@ -997,6 +1044,9 @@ impl P2PCore {
         // (The link the user is making now may bring back a device revoked earlier.)
         if !is_pending_link && self.owner_revoked(&exchange.identity_id, &fp) {
             return Err("IdentityExchange from a device its owner withdrew: unknown source, ignored".to_string());
+        }
+        if link_proved {
+            self.link_consent_peer = Some(fp.clone());
         }
         // Checked before `as_sibling` is computed: a sibling that introduces
         // itself with its signed DeviceAdd is a sibling from this first packet.
@@ -1157,6 +1207,9 @@ impl P2PCore {
             self.persist_remote_device(&record);
             self.known_remote_devices.insert(fp.clone(), record);
         }
+        if !as_sibling {
+            self.meta_del(&format!("cunp:{}", exchange.identity_id));
+        }
         // A contact device whose keys we learn only now: the roster sync sent
         // at scan time (`pair_with_code`) had no keys for it, and a contact
         // that scanned our code sent none at all. Without its keys a sibling
@@ -1172,23 +1225,24 @@ impl P2PCore {
             Some(self.link_request_nonce.clone())
         } else {
             self.pairing_nonces().into_iter().map(|(n, _)| n)
-                .find(|n| {
-                    // Constant time.
-                    let proof = packet::pairing_nonce_proof(n, &fp);
-                    proof.len() == exchange.pairing_proof.len()
-                        && proof.iter().zip(&exchange.pairing_proof).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
-                })
+                .find(|n| ct_eq(&packet::pairing_nonce_proof(n, &fp), &exchange.pairing_proof))
         };
         if let Some(nonce) = proved_nonce {
             self.put_pairing_secret("pk", &fp, &nonce);
+            if !link_proved && !as_sibling {
+                self.bind_pairing_nonce(&nonce, &exchange.identity_id);
+            }
         }
         // The revokes this contact's identity signed (see
         // `IdentityExchange.revokes`). The packet is not authenticated, each
         // revoke is: it is checked against a known active device of the
         // identity, the sender included now that its keys are stored.
         if !as_sibling {
-            // At most as many as the owner-revoke tombstones hold: a list of hundreds re-ran every check on each exchange.
-            for revoke in exchange.revokes.iter().take(32) {
+            // The newest, at most as many as the owner-revoke tombstones hold (32), oldest of them first so the
+            // tombstone eviction drops the oldest: taking the first 32 of the list applied the OLDEST revokes and never
+            // the newest one, and with more than 32 every exchange evicted and re-applied tombstones.
+            let start = exchange.revokes.len().saturating_sub(32);
+            for revoke in &exchange.revokes[start..] {
                 if revoke.identity_id == exchange.identity_id
                     && !self.own_device_keys.contains_key(&revoke.revoked_device_fingerprint)
                     && !self.owner_revoked(&revoke.identity_id, &revoke.revoked_device_fingerprint)
@@ -1235,11 +1289,8 @@ impl P2PCore {
                         if let Err(e) = self.send_message_content(fp.clone(), &grant, None) {
                             error!("DeviceLinkGrant send temporarily failed (will retry): {}", e);
                         }
-                        // The other parts: `sync_to_siblings` below sends every part to every sibling, this device included.
-                        // Announce the new device to all contacts.
-                        self.broadcast_device_add_to_contacts(&device_add);
-                        // Existing sibling devices should learn about the new device too (3+ devices).
-                        self.sync_to_siblings();
+                        // The announcement to contacts, the other roster parts and the other siblings wait for the
+                        // grant's Ack: the device acks only once it adopted us (`finish_device_link`).
                     }
                     Err(e) => error!("sign_device_add failed (device linking not completed): {}", e),
                 }
@@ -1500,6 +1551,11 @@ impl P2PCore {
             contact_id
         }
     }
+}
+
+/// Constant-time comparison of two byte strings (lengths are not secret).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// The last `n` items, oldest first, preceded by the first older item `is_target` picks (if any).

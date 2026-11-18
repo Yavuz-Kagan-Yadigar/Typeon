@@ -767,6 +767,9 @@ impl P2PCore {
             };
             match result {
                 Ok(()) => {
+                    // The record's deleted/edited marks (a delete re-uploads the row as a tombstone).
+                    let chat_key = if group { String::new() } else { self.canonical_device_for_identity(conv_key).unwrap_or_default() };
+                    self.mark_restored_flags(group.then_some(conv_key), &chat_key, &record_id, archived.is_deleted, archived.is_edited);
                     merged += 1;
                     oldest_written = Some(oldest_written.map_or(at, |o| o.min(at)));
                 }

@@ -37,8 +37,6 @@ import kotlinx.coroutines.launch
 object OutgoingMedia {
     private const val TAG = "OutgoingMedia"
     private const val JPEG_QUALITY = 90
-    /** Larger images are scaled down (sampled decode) to at most MAX_JXL_PIXELS. */
-    private const val MAX_PIXELS = 64_000_000L
     /** Same cap as the core's `attachments::MAX_IMAGE_PIXELS`: a larger
      *  hi-res image becomes JPEG, the receiver could not open the JPEG XL. */
     private const val MAX_JXL_PIXELS = 24_000_000L
@@ -60,6 +58,9 @@ object OutgoingMedia {
         confirmUnscrubbed: suspend () -> Boolean,
     ): Prepared {
         val unchanged = Prepared(src, fileName, mimeType)
+        // A WebP under a generic or wrong label can carry EXIF/XMP (GPS): treat it as the image it is.
+        @Suppress("NAME_SHADOWING")
+        val mimeType = if (!mimeType.startsWith("image/") && !mimeType.startsWith("video/") && isWebpFile(src)) "image/webp" else mimeType
         return try {
             when {
                 // The core strips only JPEG/PNG/JPEG XL metadata: anything else left as it is asks first.
@@ -128,18 +129,14 @@ object OutgoingMedia {
             } catch (e: Exception) {
                 "Error: ${e.message}"
             }
-            val copied = !path.startsWith("Error:") && runCatching {
-                val uri = androidx.core.content.FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(path))
-                val clip = android.content.ClipData.newUri(activity.contentResolver, "image", uri)
-                // Keyboards and the system overlay do not preview it.
-                if (Build.VERSION.SDK_INT >= 33) {
-                    clip.description.extras = android.os.PersistableBundle().apply {
-                        putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true)
-                    }
-                }
-                activity.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
-            }.isSuccess
+            val uri = if (path.startsWith("Error:")) null else runCatching {
+                androidx.core.content.FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", File(path))
+            }.getOrNull()
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                // Sensitive (no keyboard or overlay preview) and cleared after 60 s, like text copies.
+                val copied = uri != null && runCatching {
+                    copySensitiveClip(activity, android.content.ClipData.newUri(activity.contentResolver, "image", uri))
+                }.isSuccess
                 // Android 13+ shows its own confirmation.
                 if (!copied || Build.VERSION.SDK_INT < 33) {
                     android.widget.Toast.makeText(
@@ -165,9 +162,10 @@ object OutgoingMedia {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(src.absolutePath, bounds)
         val pixels = bounds.outWidth.toLong() * bounds.outHeight
-        // Over the cap: sampled decode (power of 2), aspect kept.
+        // Over the cap: sampled decode (power of 2), aspect kept. A full 48 MP
+        // decode is ~200 MB and could run a 3-4 GB phone out of memory.
         var sample = 1
-        if (pixels > MAX_PIXELS) while (pixels / (sample.toLong() * sample) > MAX_JXL_PIXELS) sample *= 2
+        while (pixels / (sample.toLong() * sample) > MAX_JXL_PIXELS) sample *= 2
         @Suppress("NAME_SHADOWING")
         val hiRes = hiRes && pixels <= MAX_JXL_PIXELS
         val bitmap = decode(src, sample) ?: throw java.io.IOException("decode failed")
@@ -265,6 +263,12 @@ object OutgoingMedia {
     }
 
     private val IMAGE_BRANDS = setOf("heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1", "avif", "avis")
+
+    private fun isWebpFile(src: File): Boolean = try {
+        val h = ByteArray(12)
+        src.inputStream().use { it.read(h) } == 12 &&
+            String(h, 0, 4, Charsets.ISO_8859_1) == "RIFF" && String(h, 8, 4, Charsets.ISO_8859_1) == "WEBP"
+    } catch (e: Exception) { false }
 
     private fun isJpeg(h: ByteArray) = h[0] == 0xFF.toByte() && h[1] == 0xD8.toByte() && h[2] == 0xFF.toByte()
 

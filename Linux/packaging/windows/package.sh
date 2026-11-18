@@ -13,14 +13,16 @@ OUT="$ROOT/target/windows-package/Typeon"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/bin" "$OUT/lib/gstreamer-1.0" "$OUT/share/glib-2.0/schemas" "$OUT/share/icons"
-# Debug build with a console window, for RUST_LOG=info diagnostics on Windows.
-"$HERE/build.sh"
-cp "$ROOT/target/x86_64-pc-windows-gnullvm/debug/typeon.exe" "$OUT/bin/typeon-debug.exe"
-# Debug assertions + console stay; the 700 MB of DWARF does not.
-"$LLVM/bin/llvm-strip" --strip-debug "$OUT/bin/typeon-debug.exe"
-# TYPEON_WIN_DEBUG=1 (local test builds only, CI never sets it): typeon.exe is that debug build too.
+# Release build with a console window (feature `console`), for RUST_LOG=info
+# diagnostics on Windows. No debug assertions or debug-only test hooks.
+"$HERE/build.sh" --release --features console
+cp "$ROOT/target/x86_64-pc-windows-gnullvm/release/typeon.exe" "$OUT/bin/typeon-debug.exe"
+# TYPEON_WIN_DEBUG=1 (local test builds only, CI never sets it): typeon.exe is a debug build.
 if [ "${TYPEON_WIN_DEBUG:-}" = 1 ]; then
-    cp "$OUT/bin/typeon-debug.exe" "$OUT/bin/typeon.exe"
+    "$HERE/build.sh"
+    cp "$ROOT/target/x86_64-pc-windows-gnullvm/debug/typeon.exe" "$OUT/bin/typeon.exe"
+    # The 700 MB of DWARF does not ship.
+    "$LLVM/bin/llvm-strip" --strip-debug "$OUT/bin/typeon.exe"
 else
     "$HERE/build.sh" --release
     cp "$ROOT/target/x86_64-pc-windows-gnullvm/release/typeon.exe" "$OUT/bin/"
@@ -58,6 +60,9 @@ while [ -n "$todo" ]; do
 done
 # gspawn helpers are started by name, never imported.
 cp "$SYS"/bin/gspawn-win64-*.exe "$OUT/bin/" 2>/dev/null || true
+# GLib autolaunches gdbus.exe for the session bus; without it GApplication
+# silently loses single-instance mode.
+cp "$SYS/bin/gdbus.exe" "$OUT/bin/"
 
 cp "$SYS"/share/glib-2.0/schemas/*.xml "$OUT/share/glib-2.0/schemas/"
 glib-compile-schemas "$OUT/share/glib-2.0/schemas"

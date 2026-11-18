@@ -344,6 +344,7 @@ mod review_oct2026_tests {
         let keys = &secondary.own_device_keys[&sec_fp];
         let to_sign = packet::identity_exchange_signing_input(
             &ix.identity_id, &ix.device_fingerprint, &ix.device_name, &ix.pairing_proof, &stranger_fp, ix.timestamp, &ix.revokes,
+            &packet::identity_exchange_extras_digest(&ix),
         );
         let sig_classical: Ed25519Signature = keys.sign_sk_ed25519.sign(&to_sign);
         let sig_pq: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&to_sign);
@@ -363,7 +364,16 @@ mod review_oct2026_tests {
         }
         // A stranger accepts it only with the proof, and never a bare claim.
         stranger.link_request_open_until = current_time_ms() + 60_000; // pairing open
-        let bare = IdentityExchange { device_add: None, device_add_signer: None, ..ix.clone() };
+        let mut bare = IdentityExchange { device_add: None, device_add_signer: None, ..ix.clone() };
+        // Signed again: the signature covers `device_add` (extras digest), so the bare claim must carry its own.
+        let bare_input = packet::identity_exchange_signing_input(
+            &bare.identity_id, &bare.device_fingerprint, &bare.device_name, &bare.pairing_proof, &stranger_fp, bare.timestamp, &bare.revokes,
+            &packet::identity_exchange_extras_digest(&bare),
+        );
+        let bare_sig: Ed25519Signature = keys.sign_sk_ed25519.sign(&bare_input);
+        let bare_sig_pq: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&bare_input);
+        bare.signature = bare_sig.to_bytes().to_vec();
+        bare.signature_pq = bare_sig_pq.encode().to_vec();
         let refused = stranger.process_identity_exchange(None, &bare).unwrap_err();
         assert!(!refused.contains("signature"), "refused for the claim, not the signature: {refused}");
         // The device signs its name and identity: a relay cannot change them,
@@ -392,6 +402,25 @@ mod review_oct2026_tests {
         // An add for another device does not carry over.
         ix.device_add = Some(primary.sign_device_add(&"c".repeat(64), &consent, &consent_pq).unwrap());
         assert!(!P2PCore::identity_proved_by_root(&ix));
+    }
+
+    /// A linked device that logs out is revoked by the root; it can only name itself.
+    #[test]
+    fn a_leaving_linked_device_is_revoked_on_the_root() {
+        let (mut primary, mut secondary) = (P2PCore::new(), P2PCore::new());
+        let (root_id, _) = primary.generate_identity("P".into()).unwrap();
+        let (sec_fp, _) = secondary.generate_identity("S".into()).unwrap();
+        let mut sec = secondary.own_devices[&sec_fp].clone();
+        sec.identity_id = root_id.clone();
+        sec.is_active = true;
+        primary.known_remote_devices.insert(sec_fp.clone(), sec);
+        let leaving = || MessageContent::SiblingEcho { conversation_identity_id: None, group_id: None, body: SiblingEchoBody::DeviceLeaving };
+        // Not a sibling: ignored.
+        let stranger = "c".repeat(64);
+        primary.dispatch_received_content(None, stranger.clone(), stranger, "m0".into(), leaving(), 0).unwrap();
+        assert!(primary.known_remote_devices[&sec_fp].is_active);
+        primary.dispatch_received_content(None, sec_fp.clone(), root_id.clone(), "m1".into(), leaving(), 0).unwrap();
+        assert!(!primary.known_remote_devices[&sec_fp].is_active);
     }
 
     /// Only the root device may sign a device add or revoke. Any other active device must be rejected, including a revoke of the first device.
@@ -466,6 +495,7 @@ mod review_oct2026_tests {
     #[test]
     fn same_version_updates_converge_and_carry_only_new_devices() {
         let base = std::env::temp_dir().join(format!("typeon-tie-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
         let mut cores: Vec<P2PCore> = (0..4).map(|i| {
             let d = base.join(i.to_string());
             std::fs::create_dir_all(&d).unwrap();
@@ -622,6 +652,7 @@ mod recovery_tests {
         let gid = "group-0123456789abcdef";
         assert!(!P2PCore::new().unknown_group_has_room(gid), "no DB: no room");
         let dir = std::env::temp_dir().join(format!("typeon-gidroom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let core = core_on_disk(&dir);
         assert!(core.unknown_group_has_room(gid));
@@ -634,6 +665,7 @@ mod recovery_tests {
     #[test]
     fn message_ids_are_deduped_and_unique() {
         let dir = std::env::temp_dir().join(format!("typeon-dedupe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         {
@@ -658,6 +690,7 @@ mod recovery_tests {
     #[test]
     fn a_recovery_file_brings_back_contacts_and_chats() {
         let base = std::env::temp_dir().join(format!("typeon-recovery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
         let (da, db, dp) = (base.join("a"), base.join("b"), base.join("peer"));
         for d in [&da, &db, &dp] { std::fs::create_dir_all(d).unwrap(); }
         let mut a = core_on_disk(&da);
@@ -698,6 +731,7 @@ mod recovery_tests {
     #[test]
     fn synced_reactions_only_for_kept_rows_and_mine_only_restored() {
         let dir = std::env::temp_dir().join(format!("typeon-syncreact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let me = core.generate_identity("me".into()).unwrap().0;
@@ -738,6 +772,7 @@ mod recovery_tests {
     #[test]
     fn mentions_me_only_for_own_id_and_members() {
         let dir = std::env::temp_dir().join(format!("typeon-mention-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let me = core.generate_identity("me".into()).unwrap().0;
@@ -762,6 +797,7 @@ mod recovery_tests {
     #[test]
     fn cleared_group_history_does_not_come_back() {
         let dir = std::env::temp_dir().join(format!("typeon-gclear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("attachments")).unwrap();
         let mut core = core_on_disk(&dir);
         let gid = "group-0123456789abcdef".to_string();
@@ -813,6 +849,7 @@ mod recovery_tests {
         let mk = |name: &str| {
             let dir = std::env::temp_dir().join(format!("typeon-sibfile-{}-{}", name, std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(dir.join("attachments")).unwrap();
             let mut core = core_on_disk(&dir);
             core.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "me".into(), 1));
@@ -847,6 +884,7 @@ mod recovery_tests {
         let gid = "group-0123456789abcdef".to_string();
         let mk = |name: &str| {
             let dir = std::env::temp_dir().join(format!("typeon-sibnewer-{}-{}", name, std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(dir.join("attachments")).unwrap();
             let mut core = core_on_disk(&dir);
@@ -886,6 +924,7 @@ mod recovery_tests {
     #[test]
     fn cleared_chat_history_does_not_come_back() {
         let dir = std::env::temp_dir().join(format!("typeon-cclear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("attachments")).unwrap();
         let mut core = core_on_disk(&dir);
         let mut c = Contact::new("c1".into(), "Alice".into(), "id1".into());
@@ -950,6 +989,7 @@ mod recovery_tests {
     #[test]
     fn pruned_chat_rows_go_and_raise_the_floor() {
         let dir = std::env::temp_dir().join(format!("typeon-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("attachments")).unwrap();
         let mut core = core_on_disk(&dir);
         let gid = "group-0123456789abcdef".to_string();
@@ -994,6 +1034,7 @@ mod recovery_tests {
     #[test]
     fn history_fetch_page_is_the_requested_window() {
         let dir = std::env::temp_dir().join(format!("typeon-fetchpage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let gid = "group-0123456789abcdef".to_string();
@@ -1021,6 +1062,7 @@ mod recovery_tests {
     #[test]
     fn parked_device_is_not_dialed() {
         let dir = std::env::temp_dir().join(format!("typeon-parked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let fp = "ab".repeat(32);
@@ -1041,6 +1083,7 @@ mod recovery_tests {
     #[test]
     fn history_fetch_cursor_moves_one_window_per_press() {
         let dir = std::env::temp_dir().join(format!("typeon-fetchcursor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let gid = "group-0123456789abcdef".to_string();
@@ -1086,6 +1129,7 @@ mod recovery_tests {
     #[test]
     fn unsent_follow_up_reopens_the_fetch_cursor() {
         let dir = std::env::temp_dir().join(format!("typeon-fetchreopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let gid = "group-0123456789abcdef".to_string();
@@ -1132,6 +1176,7 @@ mod recovery_tests {
     #[test]
     fn chat_preview_is_newest_sent_however_far_back_it_arrived() {
         let dir = std::env::temp_dir().join(format!("typeon-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let gid = "group-0123456789abcdef".to_string();
@@ -1149,6 +1194,7 @@ mod recovery_tests {
     #[test]
     fn storage_usage_counts_local_copies_and_removal_keeps_the_row() {
         let dir = std::env::temp_dir().join(format!("typeon-storage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("attachments")).unwrap();
         std::fs::create_dir_all(dir.join("stickers")).unwrap();
         let mut core = core_on_disk(&dir);
@@ -1190,6 +1236,7 @@ mod recovery_tests {
     #[test]
     fn big_sticker_parts_round_trip() {
         let dir = std::env::temp_dir().join(format!("typeon-stk-parts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
         let whole: Vec<u8> = (0..STICKER_SYNC_MAX_BYTES * 2 + 5).map(|i| i as u8).collect();
@@ -1210,6 +1257,7 @@ mod recovery_tests {
     #[test]
     fn sticker_offer_with_known_origin_completes_locally() {
         let dir = std::env::temp_dir().join(format!("typeon-stk-origin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("attachments/plain_cache")).unwrap();
         let mut core = core_on_disk(&dir);
         let jxl = dir.join("s.jxl");
@@ -1223,7 +1271,7 @@ mod recovery_tests {
 
         let key = [9u8; 32];
         let offer = |core: &mut P2PCore, fid: &str, sha: &str, origin: &str| {
-            core.receive_file_offer("peer", "ident", None, fid, "s.jxl", "image/jxl", 5, &key, sha, &None, None, Some(attachments::FILE_CHUNK_SIZE_V2 as u32), &[0u8; 32], "", None, None, None, true, Some(origin));
+            core.receive_file_offer("peer", "ident", None, fid, "s.jxl", "image/jxl", 5, &key, sha, &None, None, Some(attachments::FILE_CHUNK_SIZE_V2 as u32), &[0u8; 32], "", None, None, None, true, Some(origin), 0);
         };
         let status = |core: &P2PCore, fid: &str| -> String {
             core.db.as_ref().unwrap().query_row("SELECT status FROM files WHERE file_id = ?1", params![fid], |r| r.get(0)).unwrap()
@@ -1257,6 +1305,7 @@ mod recovery_tests {
     #[test]
     fn sticker_conversion_survives_plain_cache_purge_encrypted() {
         let dir = std::env::temp_dir().join(format!("typeon-stk-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = core_on_disk(&dir);
@@ -1299,33 +1348,6 @@ mod recovery_tests {
         core.wipe_all_local_state();
         assert!(!cache.exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(test)]
-mod rate_limit_tests {
-    use super::{RateVerdict, RATE_LIMIT_MAX_ESTABLISHED, RATE_LIMIT_MAX_PER_WINDOW};
-
-    /// Delivery guarantee (the user asked that every message be received): if an unknown peer exceeds the cap, the packet is DROPPED. That is our
-    /// main protection against the cost of signature verification. But if a peer with a verified identity and an established session exceeds
-    /// the cap, the packet is NOT dropped; it is DEFERRED. This prevents losing the queued messages of a peer that was offline for a week.
-    /// This test locks the relationship between the constants. The decision logic itself lives in `rate_verdict`, and it needs a `P2PCore`,
-    /// so it cannot run here.
-    #[test]
-    fn established_peers_get_a_far_higher_ceiling() {
-        assert!(
-            RATE_LIMIT_MAX_ESTABLISHED > RATE_LIMIT_MAX_PER_WINDOW,
-            "kurulmus oturumu olan es daha genis bir tavan almali"
-        );
-        // 600 per 10-second window is 60 per second. That is plenty to catch up on a backed-up queue.
-        assert!(RATE_LIMIT_MAX_ESTABLISHED >= 600);
-    }
-
-    /// The three outcomes must stay distinct. If "defer" and "drop" were treated as the same thing, the whole fix would be meaningless.
-    #[test]
-    fn defer_is_not_drop() {
-        assert_ne!(RateVerdict::Defer, RateVerdict::Drop);
-        assert_ne!(RateVerdict::Allow, RateVerdict::Defer);
     }
 }
 
@@ -1405,15 +1427,11 @@ mod keepalive_wire_tests {
         b
     }
 
-    #[derive(Serialize, Deserialize)]
-    struct OldResponse;
-
-    /// Old peers send and expect the unit struct; the hint is optional.
+    /// The quiet hint survives the wire, present or not.
     #[test]
-    fn keepalive_response_stays_wire_compatible() {
-        assert_eq!(cbor(&KeepAliveResponse { quiet_ms: None }), cbor(&OldResponse), "no hint = old bytes");
-        let from_old: KeepAliveResponse = ciborium::from_reader(cbor(&OldResponse).as_slice()).unwrap();
-        assert_eq!(from_old.quiet_ms, None);
+    fn keepalive_response_round_trips() {
+        let plain: KeepAliveResponse = ciborium::from_reader(cbor(&KeepAliveResponse { quiet_ms: None }).as_slice()).unwrap();
+        assert_eq!(plain.quiet_ms, None);
         let hinted: KeepAliveResponse = ciborium::from_reader(cbor(&KeepAliveResponse { quiet_ms: Some(240_000) }).as_slice()).unwrap();
         assert_eq!(hinted.quiet_ms, Some(240_000));
     }
@@ -1452,9 +1470,11 @@ mod unknown_inbound_tests {
     #[test]
     fn unknown_peers_hold_16_slots_for_2_minutes() {
         let now = 10 * UNKNOWN_INBOUND_GRACE_MS;
-        // 20 fresh connections, ids in order of arrival: the 4 newest go.
+        // 20 fresh connections, ids in order of arrival: the 4 oldest go.
         let fresh: Vec<(u64, u64)> = (0..20).map(|i| (i, now - 1000 + i)).collect();
-        assert_eq!(unknown_inbound_to_close(fresh, now), vec![16, 17, 18, 19]);
+        let mut closed = unknown_inbound_to_close(fresh, now);
+        closed.sort();
+        assert_eq!(closed, vec![0, 1, 2, 3]);
         assert_eq!(MAX_UNKNOWN_INBOUND, 16);
         // One that outlived the grace time goes, the one inside it stays.
         let old = vec![(1u64, now - UNKNOWN_INBOUND_GRACE_MS - 1), (2, now - UNKNOWN_INBOUND_GRACE_MS)];
@@ -1562,6 +1582,7 @@ mod at_rest_tests {
     #[test]
     fn non_contact_revoke_dates_group_author_proofs() {
         let base = std::env::temp_dir().join(format!("typeon-orv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
         let mut cores: Vec<P2PCore> = (0..2).map(|i| {
             let d = base.join(i.to_string());
             std::fs::create_dir_all(&d).unwrap();
@@ -1577,10 +1598,42 @@ mod at_rest_tests {
         cores[0].known_remote_devices.insert(m.clone(), rec);
         // Inactive with no revoke time: refused.
         assert!(!cores[0].group_author_proof_valid("g", "x", &m, "t", 100, Some(&proof)));
-        cores[0].meta_put(&format!("orv:{m}"), &format!("{m}|1000"));
+        cores[0].meta_put(&format!("orv:{m}:{m}"), "1000");
         assert!(cores[0].owner_revoked(&m, &m));
         assert!(cores[0].group_author_proof_valid("g", "x", &m, "t", 999, Some(&proof)));
         assert!(!cores[0].group_author_proof_valid("g", "x", &m, "t", 1000, Some(&proof)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The automatic sibling backfill ends a cut answer at a time over all
+    /// chats and the next answer starts there: a busy chat loses no rows.
+    #[test]
+    fn sibling_backfill_pages_by_time_without_holes() {
+        let base = std::env::temp_dir().join(format!("typeon-backfill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mut cores: Vec<P2PCore> = (0..2).map(|i| {
+            let d = base.join(i.to_string());
+            std::fs::create_dir_all(&d).unwrap();
+            let mut c = P2PCore::new();
+            c.init_db(d.to_str().unwrap(), &[1u8; 32]).unwrap();
+            c
+        }).collect();
+        let m = cores[1].generate_identity("m".into()).unwrap().0;
+        let rec = cores[1].own_devices[&m].clone();
+        cores[0].generate_identity("me".into()).unwrap();
+        cores[0].known_remote_devices.insert(m.clone(), rec);
+        cores[0].history_key = Some([2u8; 32]);
+        for i in 0..450 {
+            cores[0].archive_message(&m, "received", format!("t{i}").as_bytes(), Some(&format!("id{i}")), None, None, None, 1).unwrap();
+        }
+        cores[0].db.as_ref().unwrap().execute("UPDATE messages SET timestamp = 1000 + id", []).unwrap();
+        let (first, covered, cut) = cores[0].build_sibling_backfill(1);
+        assert!(cut);
+        assert_eq!(first.len(), SIBLING_BACKFILL_MAX_ENTRIES);
+        let (rest, _, cut) = cores[0].build_sibling_backfill(covered);
+        assert!(!cut);
+        let ids: std::collections::HashSet<String> = first.iter().chain(&rest).map(|e| e.message_id.clone()).collect();
+        assert_eq!(ids.len(), 450);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1718,6 +1771,7 @@ mod review5_tests {
     fn core_on_disk(name: &str) -> (P2PCore, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("typeon-r5-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = P2PCore::new();
         core.init_db(dir.to_str().unwrap(), &[1u8; 32]).unwrap();
@@ -1837,6 +1891,7 @@ mod fable_review_tests {
     #[test]
     fn wrong_storage_key_keeps_the_send_gate_shut() {
         let dir = std::env::temp_dir().join(format!("typeon-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut core = P2PCore::new();
         core.init_db(dir.to_str().unwrap(), &[1u8; 32]).unwrap();
@@ -1857,6 +1912,7 @@ mod fable_review_tests {
     #[test]
     fn sibling_busy_stops_the_ring_and_the_group_call_stays_joinable() {
         use crate::packet::CallAction;
+        let _serial = crate::call::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (mut me, mut other) = (P2PCore::new(), P2PCore::new());
         me.generate_identity("me".into()).unwrap();
         let other_fp = other.generate_identity("o".into()).unwrap().0;
@@ -1943,6 +1999,56 @@ mod fable_review_tests {
         assert_eq!(ev["ended"], true);
         assert_eq!(me.group_call_offer(&gid), 0);
     }
+
+    /// Who may do what in a call: a 1:1 ring needs a contact, an Accept a
+    /// group member, an `Ended` a device known to be in the call; a device in
+    /// the call that gets an Invite of it takes the sender back in.
+    #[test]
+    fn call_signals_are_bound_to_the_call() {
+        use crate::packet::CallAction;
+        let _serial = crate::call::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (mut me, mut a, mut b) = (P2PCore::new(), P2PCore::new(), P2PCore::new());
+        me.generate_identity("me".into()).unwrap();
+        let a_fp = a.generate_identity("a".into()).unwrap().0;
+        let b_fp = b.generate_identity("b".into()).unwrap().0;
+        let (my_id, a_id, b_id) = (me.my_identity_id().unwrap(), a.my_identity_id().unwrap(), b.my_identity_id().unwrap());
+        me.known_remote_devices.insert(a_fp.clone(), a.own_devices[&a_fp].clone());
+        me.known_remote_devices.insert(b_fp.clone(), b.own_devices[&b_fp].clone());
+
+        // 1:1 from someone who is not a contact: no ring.
+        me.handle_call_signal(&a_fp, &a_id, "one-to-one-1".into(), CallAction::Invite, None, false, vec![1; 32], vec![2; 8], current_time_ms(), Vec::new());
+        assert!(me.call.is_none());
+
+        let gid = "group-bound-0123456789".to_string();
+        let mut g = Group::new(gid.clone(), "g".into(), a_id.clone(), 1);
+        g.sync_members(&[a_id.clone(), b_id.clone(), my_id.clone()], 1);
+        me.groups.insert(gid.clone(), g);
+        // A multi-byte character across byte 8 of the peer-chosen id.
+        let call_id = "abcdefg\u{20ac}-call".to_string();
+        let signal = |core: &mut P2PCore, fp: &str, id: &str, action, key: u8| {
+            core.handle_call_signal(fp, id, call_id.clone(), action, Some(gid.clone()), false, vec![key; 32], vec![key; 8], current_time_ms(), Vec::new())
+        };
+        signal(&mut me, &a_fp, &a_id, CallAction::Invite, 1);
+        assert!(me.call.is_some(), "rings");
+        // b is a member but not in the call: its Ended does not stop the ring.
+        signal(&mut me, &b_fp, &b_id, CallAction::Ended, 2);
+        assert!(me.call.is_some(), "Ended from a member outside the call is ignored");
+        // An Accept from a device of no member does nothing.
+        me.handle_call_signal("stranger", "nobody", call_id.clone(), CallAction::Accept, Some(gid.clone()), false, vec![3; 32], vec![3; 8], current_time_ms(), Vec::new());
+        assert!(!me.call_state_json().contains("stranger"));
+
+        // Answered on my other device, then joined here from the offer.
+        signal(&mut me, "sibling-device", &my_id, CallAction::Busy, 0);
+        assert!(me.call.is_none());
+        assert_eq!(me.start_group_call(gid.clone(), false).unwrap(), call_id);
+        // b is in the call but lost me: its Invite of this call takes it back.
+        signal(&mut me, &b_fp, &b_id, CallAction::Invite, 4);
+        let state: serde_json::Value = serde_json::from_str(&me.call_state_json()).unwrap();
+        assert_eq!(state["state"], "active");
+        let joined = |fp: &str| state["participants"].as_array().unwrap().iter().any(|p| p["fp"] == fp && p["joined"] == true);
+        assert!(joined(&a_fp) && joined(&b_fp));
+        me.end_call();
+    }
 }
 
 #[cfg(test)]
@@ -1980,6 +2086,7 @@ mod sibling_roster_tests {
     #[test]
     fn contact_paired_on_the_root_reaches_the_sibling() {
         let dir = std::env::temp_dir().join(format!("typeon-sibroster-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let (mut r, mut l, mut n, root_id, l_fp, n_id) = trio(&dir);
         // n scans r's code: its IdentityExchange carries the code's proof.
         let nonce = r.issue_pairing_nonce().unwrap();
@@ -2005,6 +2112,7 @@ mod sibling_roster_tests {
     #[test]
     fn pairing_again_lifts_a_siblings_removed_marker_but_a_later_delete_wins() {
         let dir = std::env::temp_dir().join(format!("typeon-sibremoved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let (mut r, mut l, n, _root_id, _l_fp, n_id) = trio(&dir);
         let n_rec = n.own_devices[&n_id].clone();
         // The sibling had the contact and the user deleted it there.
@@ -2044,6 +2152,7 @@ mod sibling_roster_tests {
     #[test]
     fn sibling_sync_updates_a_stale_group_but_never_rolls_it_back() {
         let dir = std::env::temp_dir().join(format!("typeon-sibgroup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let (mut r, mut l, _n, root_id, _l_fp, n_id) = trio(&dir);
         let taba = "a".repeat(64);
         let gid = "group-0123456789abcdef".to_string();

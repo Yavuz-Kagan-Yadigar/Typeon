@@ -8,7 +8,7 @@
 //! Traffic is built around the fact that one ratchet packet costs ~8 KB on the
 //! wire while a stroke is ~100 bytes: the cost is packets, not points.
 //!   * `WbOps`: strokes drawn/erased, batched per burst, sent once and never
-//!     retried (an offline device finds them on the store-and-forward server).
+//!     retried, to connected devices only.
 //!   * `WbDigest`: sent once a burst has settled, reliable, at most one pending
 //!     per board and device. It is the only packet an offline device gets for
 //!     a whole drawing session; whoever sees a page differ pulls that page
@@ -176,9 +176,20 @@ fn wb_stroke_signed(signed: &Signed, stroke: &WbStroke, author: &str) -> bool {
 }
 
 /// One stroke's share of the page digest hash.
-fn wb_digest_item(s: &WbStroke, author: &str) -> u64 {
-    let full: [u8; 32] = Sha256::digest(length_prefixed(b"typeon-wb-digest-v1", &[&wb_stroke_hash(s), author.as_bytes(), s.sig.as_slice()])).into();
-    u64::from_le_bytes(full[..8].try_into().unwrap_or_default())
+fn wb_digest_item(s: &WbStroke, author: &str) -> [u8; 32] {
+    Sha256::digest(length_prefixed(b"typeon-wb-digest-v1", &[&wb_stroke_hash(s), author.as_bytes(), s.sig.as_slice()])).into()
+}
+
+/// The page digest hash: SHA-256 over the sorted items. An XOR of truncated
+/// items could be made equal for two different pages.
+fn wb_page_hash(mut items: Vec<[u8; 32]>) -> [u8; 32] {
+    items.sort_unstable();
+    let mut h = Sha256::new();
+    h.update(b"typeon-wb-page-digest-v2");
+    for item in &items {
+        h.update(item);
+    }
+    h.finalize().into()
 }
 
 fn noop() -> serde_json::Value {
@@ -398,18 +409,17 @@ impl P2PCore {
         ids
     }
 
-    /// Enforces `MAX_TOMBSTONES` per page. Once per packet, not per erase.
-    fn wb_trim_tombstones(&self, board: &str) {
+    /// Enforces `MAX_TOMBSTONES` on the pages a packet touched. Once per
+    /// packet, not per erase, and never a count over the whole board.
+    fn wb_trim_tombstones(&self, board: &str, pages: &BTreeSet<u8>) {
         let Some(conn) = &self.db else { return };
         // a count per page first; the sorted delete runs only for a
-        // page over the cap (the window function sorted every tombstone of
-        // the board on every packet).
-        let mut over: Vec<u8> = Vec::new();
-        if let Ok(mut stmt) = conn.prepare_cached("SELECT page FROM wb_tombstones WHERE board = ?1 GROUP BY page HAVING COUNT(*) > ?2") {
-            if let Ok(rows) = stmt.query_map(params![board, MAX_TOMBSTONES as i64], |r| r.get::<_, u8>(0)) {
-                over = rows.flatten().collect();
-            }
-        }
+        // page over the cap.
+        let over: Vec<u8> = pages.iter().copied().filter(|page| {
+            conn.prepare_cached("SELECT COUNT(*) FROM wb_tombstones WHERE board = ?1 AND page = ?2")
+                .and_then(|mut stmt| stmt.query_row(params![board, page], |r| r.get::<_, i64>(0)))
+                .map_or(false, |n| n > MAX_TOMBSTONES as i64)
+        }).collect();
         for page in over {
             let _ = conn.execute(
                 "DELETE FROM wb_tombstones WHERE seq IN (
@@ -423,9 +433,14 @@ impl P2PCore {
     /// Token bucket (as a virtual clock in `wb_reply_at`) for what `peer_fp`
     /// may make us send on a board. `false` = over budget, drop the request.
     fn wb_pull_allowed(&mut self, kind: &str, board: &str, peer_fp: &str, units: u64) -> bool {
+        self.wb_cost_allowed(kind, board, peer_fp, units * PULL_COST_MS)
+    }
+
+    /// `wb_pull_allowed` with the cost in ms of budget (a fraction of a unit).
+    fn wb_cost_allowed(&mut self, kind: &str, board: &str, peer_fp: &str, cost_ms: u64) -> bool {
         let now = current_time_ms();
         let slot = (format!("{}#{}", board, kind), peer_fp.to_string());
-        let due = self.wb_reply_at.get(&slot).copied().unwrap_or(0).max(now) + units * PULL_COST_MS;
+        let due = self.wb_reply_at.get(&slot).copied().unwrap_or(0).max(now) + cost_ms;
         if due - now > MAX_PAGES as u64 * PULL_COST_MS {
             warn!("Whiteboard {} from {} dropped: over budget", kind, &peer_fp[..peer_fp.len().min(8)]);
             return false;
@@ -460,7 +475,7 @@ impl P2PCore {
     /// hash (id, page, shade, width, points, author, signing device), so two
     /// copies with the same ids but different content do not compare equal.
     fn wb_digest(&self, board: &str) -> Vec<WbPageDigest> {
-        let mut pages: BTreeMap<u8, (u32, u64)> = BTreeMap::new();
+        let mut pages: BTreeMap<u8, Vec<[u8; 32]>> = BTreeMap::new();
         if let Some(conn) = &self.db {
             if let Ok(mut stmt) = conn.prepare("SELECT page, stroke_id, shade, points, author, width, sig FROM wb_strokes WHERE board = ?1") {
                 let rows = stmt.query_map(params![board], |r| {
@@ -472,14 +487,36 @@ impl P2PCore {
                         // it still differs from a peer's good copy.
                         let points = self.wb_unseal(points).unwrap_or_default();
                         let stroke = WbStroke { id, page, shade, author: 0, width, points, sig };
-                        let entry = pages.entry(page).or_insert((0, 0));
-                        entry.0 += 1;
-                        entry.1 ^= wb_digest_item(&stroke, &author);
+                        pages.entry(page).or_default().push(wb_digest_item(&stroke, &author));
                     }
                 }
             }
         }
-        pages.into_iter().map(|(page, (count, hash))| WbPageDigest { page, count, hash }).collect()
+        pages.into_iter().map(|(page, items)| WbPageDigest { page, count: items.len() as u32, hash: wb_page_hash(items) }).collect()
+    }
+
+    /// Drops the strokes of authors no longer on the board (a removed group
+    /// member). Nobody can hand them on to a device that joins later
+    /// (`wb_on_page` takes participants' strokes only), so old and new devices
+    /// would differ for good and re-pull the page after every digest.
+    fn wb_prune_departed(&self, board: &Board) {
+        // An unknown group or identity would make everyone "departed".
+        if self.my_identity_id().is_none() || board.group_id.as_ref().map_or(false, |g| !self.groups.contains_key(g)) {
+            return;
+        }
+        let Some(conn) = &self.db else { return };
+        let participants = self.wb_participants(board);
+        let mut authors: Vec<String> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare_cached("SELECT DISTINCT author FROM wb_strokes WHERE board = ?1") {
+            if let Ok(rows) = stmt.query_map(params![board.key], |r| r.get::<_, String>(0)) {
+                authors = rows.flatten().collect();
+            }
+        }
+        for author in authors.iter().filter(|a| !participants.contains(*a)) {
+            if let Err(e) = conn.execute("DELETE FROM wb_strokes WHERE board = ?1 AND author = ?2", params![board.key, author]) {
+                warn!("Whiteboard strokes of a departed author not removed: {}", e);
+            }
+        }
     }
 
     fn wb_page_strokes(&self, board: &str, page: u8) -> Vec<(WbStroke, String)> {
@@ -668,8 +705,10 @@ impl P2PCore {
             erased,
             sigs,
         };
-        // Offline devices are included. The packet is then left on the store-and-forward server, one deposit per burst.
-        for fp in self.wb_targets(&board) {
+        // Connected devices only: the rest get the settling digest and pull the
+        // pages (one server deposit per session instead of one per burst).
+        let targets: Vec<String> = self.wb_targets(&board).into_iter().filter(|fp| self.is_connected_to_device(fp)).collect();
+        for fp in targets {
             if let Err(e) = self.send_message_content(fp, &content, None) {
                 warn!("Whiteboard ops not sent: {}", e);
             }
@@ -679,6 +718,7 @@ impl P2PCore {
     /// Reliable, but only the newest digest of a board stays queued per
     /// device (same idea as `sync_read_state`).
     fn wb_send_digest(&mut self, board: &Board, targets: Vec<String>) {
+        self.wb_prune_departed(board);
         let content = MessageContent::WbDigest {
             group_id: board.group_id.clone(),
             conversation_identity_id: board.conversation_identity_id.clone(),
@@ -696,6 +736,9 @@ impl P2PCore {
         for id in stale {
             self.awaiting_confirmation.remove(&id);
             self.remove_durable_retry(&id);
+            // Its server copy too: an offline device needs only the newest.
+            self.cancel_server_deposit(&id);
+            self.forget_server_deposit(&id);
         }
         for fp in targets {
             if let Err(e) = self.send_message_content(fp, &content, None) {
@@ -720,6 +763,18 @@ impl P2PCore {
                     self.wb_flush_ops(&key);
                 }
             } else if now >= outbox.digest_at {
+                // At most one digest per board per PULL_COST_MS: the
+                // receiver's digest budget refills at that rate, and drops
+                // (but acks) what comes faster. The last one is only delayed.
+                let sent_slot = (format!("{}#sent", key), String::new());
+                let last = self.wb_reply_at.get(&sent_slot).copied().unwrap_or(0);
+                if now.saturating_sub(last) < PULL_COST_MS {
+                    if let Some(o) = self.wb_outbox.get_mut(&key) {
+                        o.digest_at = last + PULL_COST_MS;
+                    }
+                    continue;
+                }
+                self.wb_reply_at.insert(sent_slot, now);
                 let Some(outbox) = self.wb_outbox.remove(&key) else { continue };
                 let board = Board { key, group_id: outbox.group_id, conversation_identity_id: outbox.conversation_identity_id };
                 let targets = self.wb_targets(&board);
@@ -803,7 +858,8 @@ impl P2PCore {
                 erased.push((page, id));
             }
         }
-        self.wb_trim_tombstones(&board.key);
+        let touched: BTreeSet<u8> = erased.iter().map(|(page, _)| *page).collect();
+        self.wb_trim_tombstones(&board.key, &touched);
         Self::wb_commit(tx);
         for (page, id) in erased {
             // The receiver drops a whole packet over this many erase records.
@@ -949,13 +1005,12 @@ impl P2PCore {
         if strokes.len() > MAX_OPS_STROKES || sigs.len() > MAX_PAGES as usize || erased.len() % 9 != 0 || erased.len() > MAX_TOMBSTONES * 9 {
             return noop();
         }
-        // Each erase record is three statements under the core lock: one
-        // budget unit per full 256 of them (clearing a full page is a few
-        // units). A small erase is free: one unit per packet cut off a device
-        // that kept erasing after 20 packets. Over the budget
-        // only the erase records are skipped; the signed strokes still count.
-        let erase_units = (erased.len() / 9) as u64 / 256;
-        let erased = if erase_units > 0 && !self.wb_pull_allowed("erase", &board.key, peer_fp, erase_units) {
+        // Each erase record is three statements under the core lock: 1/256 of
+        // a budget unit each (clearing a full page is a few units, one erased
+        // stroke ~60 ms of budget). Over the budget only the erase records
+        // are skipped; the signed strokes still count.
+        let erase_cost = (erased.len() / 9) as u64 * PULL_COST_MS / 256;
+        let erased = if !erased.is_empty() && !self.wb_cost_allowed("erase", &board.key, peer_fp, erase_cost) {
             Vec::new()
         } else {
             erased
@@ -976,13 +1031,16 @@ impl P2PCore {
                 pages.insert(stroke.page);
             }
         }
+        let mut touched = BTreeSet::new();
         for record in erased.chunks_exact(9) {
+            touched.insert(record[0]);
             if let Some(page) = self.wb_erase(&board.key, record[0], &record[1..]) {
                 pages.insert(page);
+                touched.insert(page);
             }
         }
-        if !erased.is_empty() {
-            self.wb_trim_tombstones(&board.key);
+        if !touched.is_empty() {
+            self.wb_trim_tombstones(&board.key, &touched);
         }
         Self::wb_commit(tx);
         self.wb_changed(&board, &pages, !from_self)
@@ -1000,8 +1058,9 @@ impl P2PCore {
         if self.wb_outbox.get(&board.key).map_or(false, |o| !o.strokes.is_empty() || !o.erased.is_empty()) {
             return noop();
         }
-        let theirs: HashMap<u8, (u32, u64)> = pages.iter().map(|d| (d.page, (d.count, d.hash))).collect();
-        let mine: HashMap<u8, (u32, u64)> = self.wb_digest(&board.key).iter().map(|d| (d.page, (d.count, d.hash))).collect();
+        self.wb_prune_departed(&board);
+        let theirs: HashMap<u8, (u32, [u8; 32])> = pages.iter().map(|d| (d.page, (d.count, d.hash))).collect();
+        let mine: HashMap<u8, (u32, [u8; 32])> = self.wb_digest(&board.key).iter().map(|d| (d.page, (d.count, d.hash))).collect();
         let differing: Vec<u8> = (0..MAX_PAGES).filter(|p| mine.get(p) != theirs.get(p)).collect();
         // Each pulled page costs a full unseal+verify under the core lock: bound
         // what one peer can make me pull (a board per burst, then a page per PULL_COST_MS).
@@ -1105,7 +1164,9 @@ impl P2PCore {
             }
         }
         if !tombstones.is_empty() {
-            self.wb_trim_tombstones(&board.key);
+            let mut touched = changed.clone();
+            touched.insert(page);
+            self.wb_trim_tombstones(&board.key, &touched);
         }
         // a page answer speaks for this page only.
         let sigs: Vec<WbPageSig> = sigs.into_iter().filter(|s| s.page == page).collect();
@@ -1329,7 +1390,7 @@ mod tests {
         assert!(b.wb_insert("g:x", &stroke(2, 0), "alice"));
         assert!(!b.wb_insert("g:x", &stroke(2, 0), "alice"), "duplicate");
         assert_eq!(a.wb_digest("g:x"), b.wb_digest("g:x"));
-        assert_eq!(a.wb_digest("g:x"), vec![WbPageDigest { page: 0, count: 1, hash: wb_digest_item(&stroke(2, 0), "alice") }]);
+        assert_eq!(a.wb_digest("g:x"), vec![WbPageDigest { page: 0, count: 1, hash: wb_page_hash(vec![wb_digest_item(&stroke(2, 0), "alice")]) }]);
         // Same id and count, different content: the digests must differ.
         let c = core();
         let mut other = stroke(2, 0);
@@ -1363,7 +1424,7 @@ mod tests {
         for n in 1000..(1000 + MAX_TOMBSTONES as u64 + 10) {
             core.wb_erase("g:x", 0, &n.to_le_bytes());
         }
-        core.wb_trim_tombstones("g:x");
+        core.wb_trim_tombstones("g:x", &BTreeSet::from([0u8]));
         assert_eq!(core.wb_page_tombstones("g:x", 0).len(), MAX_TOMBSTONES * 8);
         assert!(core.wb_is_tombstoned("g:x", &[1; 8]), "a real erase outlives made-up ids");
         assert!(!core.wb_is_tombstoned("g:x", &1000u64.to_le_bytes()), "oldest made-up id dropped");

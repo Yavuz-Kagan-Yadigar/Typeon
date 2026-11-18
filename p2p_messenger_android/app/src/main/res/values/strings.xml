@@ -72,6 +72,7 @@
     <string name="lbl_server_history_warn">Lets a new device load your old messages. Unlike live messages, this backup is not forward-secret: whoever gets the archive key can read everything uploaded so far.</string>
     <string name="msg_server_history_upload">Your recent messages will be uploaded to it, sealed so the server cannot read them.</string>
     <string name="action_remove_server">Remove</string>
+    <string name="confirm_remove_server">Remove the server %1$s? Rejoining needs its join code again.</string>
     <string name="state_server_connected">Connected</string>
     <string name="state_server_connecting">Connecting…</string>
     <string name="state_server_not_enrolled">Not enrolled</string>
@@ -143,6 +144,7 @@
     <string name="error_recovery_password_empty">Enter a password</string>
     <string name="msg_recovery_exporting">Exporting recovery file…</string>
     <string name="msg_recovery_export_success">Recovery file saved</string>
+    <string name="msg_recovery_export_trimmed">Recovery file saved. It was too large: only the newest %1$d messages are in it</string>
     <string name="error_recovery_export_failed">Couldn\'t export recovery file</string>
 
         <!-- The counterpart of export: restore from a recovery file (see MainActivity
@@ -515,6 +517,8 @@
     <string name="call_missed">Missed call</string>
     <string name="call_via_p2p">direct</string>
     <string name="call_via_server">via server</string>
+    <string name="call_audio_failing">no incoming audio</string>
+    <string name="call_mic_failing">microphone unavailable</string>
     <string name="call_waiting_media">waiting for media</string>
     <string name="call_needs_android10">Calls need Android 10 or newer</string>
     <string name="call_permission_needed">Microphone (and camera for video) permission is needed for calls</string>

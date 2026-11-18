@@ -106,6 +106,13 @@ impl P2PCore {
                 }
             }
             let connected = connected || really_connected;
+            if let Some(rt) = self.server_rt.get_mut(&rec.server_id) {
+                if connected && enrolled {
+                    rt.unready_since = 0;
+                } else if rt.unready_since == 0 {
+                    rt.unready_since = now;
+                }
+            }
 
             if !connected {
                 // Offline server: back off 15 s, doubling to 30 min. Without it, every sweep (every 15 s) was one more failed onion lookup, and the
@@ -207,8 +214,9 @@ impl P2PCore {
                 self.purge_retired_archive(&rec.server_id, peer_id);
                 self.server_flush_archive(&rec.server_id, peer_id);
             }
-            // One upload server per sweep: the first ready one that routes.
-            if rec.route_messages && !blobs_flushed {
+            // One upload server per sweep: the head upload's own server, or the first ready one that routes when the upload
+            // has none or its server is gone or has been down for `BLOB_SERVER_MOVE_MS`.
+            if rec.route_messages && !blobs_flushed && self.blob_server_free(&rec.server_id, now) {
                 blobs_flushed = true;
                 self.server_flush_blobs(&rec.server_id, peer_id);
             }
@@ -327,9 +335,13 @@ impl P2PCore {
                 // One per 5 s. Each `Notify` opens the radio window and forces a sweep, so a server sending them in a row
                 // kept the phone fetching without end. A second one within that time is covered by the fetch the first one started.
                 let now = mono_ms();
+                // Radio saver: after a fetch that found nothing, once per radio window. A server sending `Notify` every
+                // 5 s with nothing behind it kept the radio up all night.
+                let min_gap = if self.radio_saver() { self.radio_window_ms() } else { 5_000 };
                 let sid = sid.filter(|sid| {
                     self.server_rt.get_mut(sid).map_or(false, |rt| {
-                        let ok = now.saturating_sub(rt.notified_at) >= 5_000;
+                        let gap = if rt.last_fetch_empty { min_gap } else { 5_000 };
+                        let ok = now.saturating_sub(rt.notified_at) >= gap;
                         if ok { rt.notified_at = now; }
                         ok
                     })
@@ -359,6 +371,7 @@ impl P2PCore {
             rt.registered.clear();
             rt.held.clear();
             rt.passed.clear();
+            rt.hold_strikes.clear();
         }
         // Its mail is gone with the old enrollment: deposit again.
         self.server_deposited.retain(|(sid, _), _| sid != server_id);
@@ -410,9 +423,8 @@ impl P2PCore {
                     // fresh invite helps.
                     rt.last_error = (enrolled && rec.enrollment_id.is_none())
                         .then(|| "Enrollment id lost. Add the server again with a new invite code".to_string());
-                    if enrolled {
-                        rt.hello_attempts = 0;
-                    }
+                    // `hello_attempts` is not reset here: a server that says "enrolled" and then `NotEnrolled` to every
+                    // request would loop Hello at round-trip speed. A request that works resets it (`Batch`, `ArchivePut`).
                 }
                 // Shown in the UI and stored: no control characters, bounded length.
                 let server_name: String = server_name.chars().filter(|c| !c.is_control()).take(64).collect();
@@ -472,6 +484,7 @@ impl P2PCore {
             // --- Register ---
             (ServerInflight::Register { server_id, ids, dropped }, ServerResponse::Ok) => {
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                    rt.proof_rounds = 0;
                     for id in ids {
                         rt.registered.insert(id);
                     }
@@ -488,7 +501,22 @@ impl P2PCore {
             (ServerInflight::Register { server_id, ids, dropped }, ServerResponse::Registered { proof_needed, refused }) => {
                 let prove: Vec<String> = proof_needed.into_iter().filter(|id| ids.contains(id)).collect();
                 let peer_id = self.server_rt.get(&server_id).and_then(|r| r.peer_id);
+                let mut too_many_rounds = false;
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                    // Enough rounds for every id we register (64 proofs each), plus slack. Past that the server keeps
+                    // asking for proofs it was given: stop, and let the Register backoff decide the next try.
+                    if prove.is_empty() {
+                        rt.proof_rounds = 0;
+                    } else {
+                        rt.proof_rounds += 1;
+                        let limit = (Self::mailbox_cap(rt) / server_proto::MAX_REGISTER_PROOFS) as u32 + 2;
+                        if rt.proof_rounds > limit {
+                            warn!("Server keeps asking for mailbox proofs, paused ({})", crate::log_id(&server_id));
+                            rt.proof_rounds = 0;
+                            rt.register_backoff_until = mono_ms() + SERVER_DEPOSIT_BACKOFF_MS;
+                            too_many_rounds = true;
+                        }
+                    }
                     let refused: Vec<String> = refused.into_iter().filter(|id| ids.contains(id)).collect();
                     for id in ids.into_iter().filter(|id| !prove.contains(id) && !refused.contains(id)) {
                         rt.registered.insert(id);
@@ -503,7 +531,7 @@ impl P2PCore {
                         rt.refused_retry_at = mono_ms() + SERVER_REFUSED_RETRY_MS;
                     }
                 }
-                if let Some(peer_id) = peer_id.filter(|_| !prove.is_empty()) {
+                if let Some(peer_id) = peer_id.filter(|_| !prove.is_empty() && !too_many_rounds) {
                     let now: Vec<String> = prove.iter().take(server_proto::MAX_REGISTER_PROOFS).cloned().collect();
                     self.send_register(&server_id, peer_id, now.clone(), Vec::new(), &now);
                 }
@@ -553,6 +581,8 @@ impl P2PCore {
             (ServerInflight::Fetch { server_id }, ServerResponse::Batch { items, more }) => {
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.fetch_inflight = false;
+                    rt.hello_attempts = 0;
+                    rt.last_fetch_empty = items.is_empty();
                 }
                 let index: HashMap<String, MailboxKey> =
                     self.own_server_mailboxes().into_iter().map(|(id, (_, key))| (id, key)).collect();
@@ -564,6 +594,8 @@ impl P2PCore {
                 let mut seen: HashSet<String> = HashSet::new();
                 let mut blocked: HashSet<String> = HashSet::new();
                 let mut held_any = false;
+                // Mailboxes with an item that opened in this batch (see `ServerRuntime.refetch_now`).
+                let mut opened_in: HashSet<String> = HashSet::new();
                 let now = mono_ms();
 
                 for item in items {
@@ -606,9 +638,24 @@ impl P2PCore {
                             .and_then(|k| server_seal::open_first_contact(secret, &item.mailbox_id, &k.kem_sk_x25519, &k.kem_sk_mlkem, &item.sealed).ok()),
                     };
                     let Some(raw) = opened else {
+                        warn!("Could not open envelope from server (mailbox={})", mailbox_log_id(&item.mailbox_id));
+                        // A first-contact item is sealed to a fixed secret and our fixed KEM keys: one that does not open now
+                        // never will. Passed over at once, or junk deposits stalled the mailbox 5 minutes each.
+                        let fixed_key = matches!(key, MailboxKey::FirstContact(_))
+                            && self.own_mailbox_topic_fp.as_ref().map_or(false, |fp| self.own_device_keys.contains_key(fp));
+                        if fixed_key {
+                            if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                                if rt.held.get(&item.mailbox_id).map_or(false, |&(s, _)| s == item.seq) {
+                                    rt.held.remove(&item.mailbox_id);
+                                }
+                                rt.passed.insert((item.mailbox_id.clone(), item.seq));
+                            }
+                            let h = highest.entry(item.mailbox_id.clone()).or_insert(0);
+                            *h = (*h).max(item.seq);
+                            continue;
+                        }
                         // Not acked, and the cursor stays before it. An Ack is cumulative and the server deletes what it covers.
                         // Passed over only after `SERVER_HOLD_GRACE_MS`.
-                        warn!("Could not open envelope from server (mailbox={})", mailbox_log_id(&item.mailbox_id));
                         if self.hold_server_item(&server_id, &item.mailbox_id, item.seq, now) {
                             blocked.insert(item.mailbox_id.clone());
                             held_any = true;
@@ -620,6 +667,7 @@ impl P2PCore {
                     };
                     count += 1;
                     bytes += raw.len();
+                    opened_in.insert(item.mailbox_id.clone());
                     if let Some(rt) = self.server_rt.get_mut(&server_id) {
                         rt.taken.insert(Sha256::digest(&raw).into(), (item.mailbox_id.clone(), item.seq));
                     }
@@ -660,6 +708,11 @@ impl P2PCore {
                 } else if held_any && count > 0 {
                     // What opened may bring the key of what did not.
                     self.refetch_held(&server_id, now);
+                    if blocked.iter().any(|mb| opened_in.contains(mb)) {
+                        if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                            rt.refetch_now = true;
+                        }
+                    }
                 }
             }
 
@@ -668,6 +721,7 @@ impl P2PCore {
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.archive_failures = 0;
                     rt.archive_backoff_until = 0;
+                    rt.hello_attempts = 0;
                 }
                 self.drop_archive_records(&records);
                 // The next batch now, as for mail and chunks (see `server_sweep`). One batch per radio window took the
@@ -740,9 +794,10 @@ impl P2PCore {
                 }
                 if let (true, true, Some(bucket), Some(before)) = (more && moved, pages + 1 < ARCHIVE_FETCH_MAX_PAGES, bucket_more, oldest) {
                     self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, Some(before), rest, window, next, pages + 1);
-                } else if !rest.is_empty() {
+                } else if !rest.is_empty() && pages + 1 < ARCHIVE_FETCH_MAX_PAGES {
+                    // The page count runs on over the conversation's buckets.
                     let bucket = rest.remove(0);
-                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, rest, window, next, 0);
+                    self.send_archive_fetch(peer_id, server_id, conv_key, group, bucket, None, rest, window, next, pages + 1);
                 } else {
                     self.probe_next_conversation(peer_id, server_id, next);
                 }
@@ -753,6 +808,9 @@ impl P2PCore {
                 // The round trip is measured. It tells whether a transfer is limited by latency or by bandwidth. If latency limits it, a larger window gives speed directly.
                 // If bandwidth limits it, a larger window gives nothing, and the fix lies elsewhere (see the single Tor circuit ceiling).
                 let rtt = mono_ms().saturating_sub(sent_at);
+                if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                    rt.blob_failures = 0;
+                }
                 self.blob_rtt_sum += rtt;
                 self.blob_rtt_count += 1;
                 // Grow the window ONLY while queue delay is low. On a fast path it opens up. On a narrow path such as Tor it
@@ -779,7 +837,10 @@ impl P2PCore {
                 }
                 self.advance_blob_upload(&blob_id, chunk_index, total_chunks, &server_id);
             }
-            (ServerInflight::BlobFinish { blob_id, .. }, ServerResponse::Ok) => {
+            (ServerInflight::BlobFinish { server_id, blob_id }, ServerResponse::Ok) => {
+                if let Some(rt) = self.server_rt.get_mut(&server_id) {
+                    rt.blob_failures = 0;
+                }
                 self.forget_blob_upload(&blob_id);
             }
             (ServerInflight::BlobFinish { server_id, blob_id }, ServerResponse::Err(ServerErrorCode::BlobIncomplete)) => {
@@ -918,9 +979,9 @@ impl P2PCore {
                 let enrolling = matches!(inflight, ServerInflight::Hello { .. } | ServerInflight::Enroll { .. } | ServerInflight::Rebind { .. });
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.enrolled = false;
-                    if !enrolling {
-                        rt.hello_sent_at = 0;
-                    }
+                    // `hello_sent_at` is kept: the sweep sends a Hello once the Hello backoff since the last one has run
+                    // (at once when that was long ago). Zeroing it let a server answering "enrolled", then `NotEnrolled`,
+                    // loop Hello at round-trip speed.
                 }
                 if !enrolling {
                     self.server_sweep_at = 0;
@@ -980,21 +1041,33 @@ impl P2PCore {
                 // Any refused `Deposit` backs off too: its mark is gone (see above), so without this the retry would deposit
                 // again at once. Deposits (and the blob chunks behind the same gate) only. A refused `Register` or archive
                 // request must not stop all message deposits to the server for 5 minutes, again and again.
+                let blob = matches!(inflight, ServerInflight::BlobPut { .. } | ServerInflight::BlobFinish { .. });
                 let backs_off = matches!(inflight, ServerInflight::Deposit { .. })
-                    || (matches!(other, ServerErrorCode::RateLimited)
-                        && matches!(inflight, ServerInflight::BlobPut { .. } | ServerInflight::BlobFinish { .. }));
+                    || (matches!(other, ServerErrorCode::RateLimited) && blob);
+                let mut drop_blob = false;
                 let register_quota = matches!((&inflight, &other), (ServerInflight::Register { .. }, ServerErrorCode::QuotaExceeded));
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     // The `Register` arm above has a clearer message.
                     if !register_quota {
                         rt.last_error = Some(format!("{:?}", other));
                     }
-                    rt.fetch_inflight = false;
                     // See `SERVER_DEPOSIT_BACKOFF_MS`. "Quota or rate error" means "try again a little later", not "try every
                     // second". The backoff stops only deposits. `Fetch` and `Ack` keep running, and draining the mailbox is
                     // exactly what frees the quota.
                     if backs_off {
                         Self::back_off_deposits(rt);
+                    }
+                    // A server error on a chunk or a finish: 15 s doubling to 30 min, one step per round (the chunks in
+                    // flight together all get it). Without it the upload was resent every sweep for as long as the fault
+                    // lasted, and kept the phone and Tor awake (`blob_upload_can_run`).
+                    let now = mono_ms();
+                    if blob && matches!(other, ServerErrorCode::Internal) && now >= rt.blob_backoff_until {
+                        rt.blob_backoff_until = now + (SERVER_SWEEP_INTERVAL_MS << rt.blob_failures.min(7)).min(SERVER_DEPOSIT_BACKOFF_MAX_MS);
+                        rt.blob_failures += 1;
+                        if rt.blob_failures >= MAX_BLOB_INTERNAL_FAILURES {
+                            rt.blob_failures = 0;
+                            drop_blob = true;
+                        }
                     }
                     // A full archive quota (or a rate or server error) gets the same answer for a while. Without this, the same
                     // head batch went out again on every sweep. It has its own backoff, so message deposits keep going. A
@@ -1003,6 +1076,12 @@ impl P2PCore {
                         rt.archive_backoff_until = mono_ms()
                             + (SERVER_DEPOSIT_BACKOFF_MS << rt.archive_failures.min(3)).min(SERVER_DEPOSIT_BACKOFF_MAX_MS);
                         rt.archive_failures = rt.archive_failures.saturating_add(1);
+                    }
+                }
+                if drop_blob {
+                    if let ServerInflight::BlobPut { blob_id, .. } | ServerInflight::BlobFinish { blob_id, .. } = &inflight {
+                        warn!("Server kept failing blob requests, upload dropped: {}", blob_id);
+                        self.finish_blob_upload(blob_id);
                     }
                 }
                 // Quota, rate or size: the right behaviour is the same in all of them. Hand this envelope to gossip. Do not lose the message.

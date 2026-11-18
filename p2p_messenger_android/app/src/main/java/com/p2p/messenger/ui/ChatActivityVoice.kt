@@ -243,6 +243,7 @@ internal fun ChatActivity.finishVoiceRecording(send: Boolean) {
 
 /** A voice message is sent as a normal file attachment (MIME 'audio/mp4'). The only difference is that `durationMs` is carried (see Rust `FileOffer.duration_ms`). */
 internal fun ChatActivity.sendVoiceMessage(file: File, durationMs: Long, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) {
+    val targetPeer = peerDeviceFingerprint
     lifecycleScope.launch(Dispatchers.IO) {
         // The copy is deleted even if the screen closes while sending.
         // The recorder's MP4 carries the Android version (on many phones
@@ -256,13 +257,14 @@ internal fun ChatActivity.sendVoiceMessage(file: File, durationMs: Long, caption
         try {
             val result = if (prepared == null) "Error: INTERNAL: voice scrub" else try {
                 P2PLib.prepareAndSendFile(
-                    peerDeviceFingerprint, prepared.file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
+                    targetPeer, prepared.file.absolutePath, file.name, "audio/mp4", null, durationMs.toInt(),
                     caption, quote?.id ?: "", quote?.preview ?: ""
                 )
             } catch (e: Exception) {
                 "Error: ${e.message}"
             }
             withContext(Dispatchers.Main) {
+                if (peerDeviceFingerprint != targetPeer) return@withContext
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this@sendVoiceMessage, com.p2p.messenger.util.coreErrorText(this@sendVoiceMessage, result), Toast.LENGTH_SHORT).show()
                 } else {
@@ -367,6 +369,7 @@ internal fun ChatActivity.loadAndPlayVoiceMessage(
                 created = player
                 player.setDataSource(path)
                 player.setOnCompletionListener {
+                    com.p2p.messenger.util.VoiceAudio.end(this@loadAndPlayVoiceMessage)
                     voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
                     adapter.updateVoicePlayback(attachment.fileId, false, 0, voicePlaybackSpeed)
                 }
@@ -379,6 +382,7 @@ internal fun ChatActivity.loadAndPlayVoiceMessage(
                     player.playbackParams = PlaybackParams().setSpeed(voicePlaybackSpeed)
                 }
                 player.start()
+                com.p2p.messenger.util.VoiceAudio.begin(this@loadAndPlayVoiceMessage) { stopVoicePlayback() }
                 voicePlayer = player
                 voicePlayingFileId = attachment.fileId
                 voicePlaybackHandler.post(voicePlaybackTickRunnable)
@@ -421,11 +425,9 @@ internal fun ChatActivity.stopVoicePlayback() {
     voiceLoadRequest++
     val fileId = voicePlayingFileId
     voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
-    try {
-        voicePlayer?.stop()
-        voicePlayer?.release()
-    } catch (e: Exception) {
-    }
+    try { voicePlayer?.stop() } catch (e: Exception) { }
+    try { voicePlayer?.release() } catch (e: Exception) { }
+    com.p2p.messenger.util.VoiceAudio.end(this)
     voicePlayer = null
     voicePlayingFileId = null
     if (fileId != null) {

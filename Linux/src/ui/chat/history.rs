@@ -44,14 +44,10 @@ impl ChatView {
 
                 let mut entries = page.entries;
                 entries.sort_by_key(|entry| entry.order_key);
-                let mut previous_day = 0u64;
                 for entry in entries {
-                    if util::is_new_day(previous_day, entry.order_key) {
-                        view.messages.append(&day_separator(entry.order_key));
-                    }
-                    previous_day = entry.order_key;
                     view.insert_entry(entry, false);
                 }
+                view.refresh_day_separators();
                 if at_bottom {
                     view.scroll_to_bottom();
                 } else {
@@ -87,6 +83,39 @@ impl ChatView {
                 }
             },
         );
+    }
+
+    /// Shows a file I just sent: its archive row as a bubble, or a reload
+    /// when the row could not be found.
+    pub(super) fn show_sent_attachment(self: &Rc<Self>, entry: Option<Entry>) {
+        match entry {
+            Some(entry) => self.insert_entry(entry, true),
+            None => self.reload(),
+        }
+    }
+
+    /// Re-places the day separators from `order`: one above the first bubble
+    /// of each day. Cheap (bubbles stay, only the few labels change), so it
+    /// runs after every insert batch, older pages and live messages too.
+    pub(super) fn refresh_day_separators(&self) {
+        let mut child = self.messages.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if widget.has_css_class("day-separator") {
+                self.messages.remove(&widget);
+            }
+        }
+        let order = self.order.borrow();
+        let bubbles = self.bubbles.borrow();
+        let mut previous: Option<(u64, gtk::Widget)> = None;
+        for (key, id) in order.iter() {
+            let Some(bubble) = bubbles.get(id) else { continue };
+            if util::is_new_day(previous.as_ref().map_or(0, |(day, _)| *day), *key) {
+                let separator = day_separator(*key);
+                self.messages.insert_child_after(&separator, previous.as_ref().map(|(_, root)| root));
+            }
+            previous = Some((*key, bubble.root.clone()));
+        }
     }
 
     pub(super) fn reset_fetch_history(&self) {
@@ -147,7 +176,12 @@ impl ChatView {
                 // row is. Its offset to the viewport is restored after the
                 // next layout pass (positions are stale until then).
                 let adjustment = view.scroller.vadjustment();
-                let anchor = view.messages.first_child();
+                // A bubble, not a day separator: those are rebuilt below.
+                let anchor = view
+                    .order
+                    .borrow()
+                    .first()
+                    .and_then(|(_, id)| view.bubbles.borrow().get(id).map(|bubble| bubble.root.clone()));
                 let offset = anchor
                     .as_ref()
                     .and_then(|row| row.compute_bounds(&view.messages))
@@ -159,6 +193,7 @@ impl ChatView {
                 // reader), so the view settles at ~MAX_BUBBLES while the page
                 // just loaded stays.
                 view.trim_newest();
+                view.refresh_day_separators();
                 let messages = view.messages.clone();
                 glib::idle_add_local_once(move || {
                     if let (Some(row), Some(offset)) = (anchor, offset) {
@@ -341,6 +376,24 @@ pub(super) fn fetch_page(
     }
 }
 
+/// The file I just sent, as a timeline entry. `id` is the send result; the
+/// newest file I sent is the fallback when no row carries that id. Core
+/// reads: off the GTK thread.
+pub(super) fn sent_attachment_entry(conversation: &Conversation, id: &str) -> Option<Entry> {
+    let (rows, peer) = match conversation {
+        Conversation::Direct { fingerprint, .. } => {
+            (core::list_attachments_before(fingerprint, u64::MAX, 5), fingerprint.clone())
+        }
+        Conversation::Group { group_id, .. } => {
+            (core::list_group_attachments_before(group_id, u64::MAX, 5), String::new())
+        }
+    };
+    let row = rows.iter().find(|row| row.file_id == id).or_else(|| {
+        rows.iter().filter(|row| row.direction == "sent").max_by_key(|row| row.created_at)
+    })?;
+    Some(attachment_entry(row, &peer))
+}
+
 /// One archive attachment row as a timeline entry — the core keeps the files
 /// in their own table, but the user sees them inside the conversation.
 pub(super) fn attachment_entry(attachment: &core::AttachmentSummary, peer_fingerprint: &str) -> Entry {
@@ -357,7 +410,8 @@ pub(super) fn attachment_entry(attachment: &core::AttachmentSummary, peer_finger
         mine: attachment.direction == "sent",
         sender_identity,
         text: attachment.caption.clone(),
-        order_key: attachment.created_at,
+        // The sender's send time (the core falls back to `created_at`), the same clock as texts.
+        order_key: if attachment.sent_at_ms > 0 { attachment.sent_at_ms } else { attachment.created_at },
         status: None,
         reply_preview: attachment.reply_to_preview.clone().filter(|p| !p.is_empty()),
         reply_sender: attachment.reply_to_sender_identity_id.clone(),

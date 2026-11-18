@@ -49,6 +49,11 @@ impl ServerCore {
         // the whole gap on a volume without sparse files (an SD card), and would cost only 1 byte of quota.
         let path = self.blob_path(&blob_id);
         let file_len = std::fs::metadata(&path).map_or(0, |m| m.len());
+        // Only a pipeline's depth past the end. Further out, one tiny chunk would charge (and on a volume without sparse
+        // files, write) gigabytes of gap in one request.
+        if offset > file_len + BLOB_PUT_AHEAD_CHUNKS * (stride + 16) {
+            return ServerResponse::Err(ServerErrorCode::BadDirection);
+        }
         // At least one row's worth: a 0-byte chunk still costs a DB row (and, for a new blob, a file).
         let growth = (offset + data.len() as u64).saturating_sub(file_len).max(BLOB_CHUNK_MIN_CHARGE);
         if e.bytes_blob.max(0) as u64 + growth > limits.max_blob_bytes {
@@ -57,7 +62,7 @@ impl ServerCore {
         // Quotas used to be applied only per record. The budget is split by a fixed `EXPECTED_DEVICES = 8`, so with
         // 20 devices enrolled the real ceiling was 2.5 times the budget. Disk-full on a tablet is exactly what this
         // mechanism exists to prevent. The total is checked now too.
-        if self.total_budget_exceeded(growth as usize) {
+        if self.total_budget_exceeded(growth as usize, false) {
             warn!("Total disk budget full, blob chunk rejected");
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
@@ -254,11 +259,18 @@ impl ServerCore {
                 // Rate limit: its own budget (`CHUNKS_PER_MINUTE`, 10/s), separate from the RPC budget. Tor carries about one
                 // chunk a second, so only a request loop reaches it. An enrolled peer over budget gets `Busy` (back off, same
                 // source). An unenrolled one gets `NotFound`.
-        let enrolled = self.active(peer).is_some();
-        if !enrolled || !self.check_rate(peer, true, 1) {
-            warn!("File chunk request rejected (unregistered peer or rate limit)");
+        // The rate check first, for every peer: it is in memory, while the enrollment lookup is a query. Refusals log at
+        // debug only, or a request loop fills the journal.
+        let reply = if !self.check_rate(peer, true, 1) {
+            Some(FileChunkResponse::Busy)
+        } else if self.active(peer).is_none() {
+            Some(FileChunkResponse::NotFound)
+        } else {
+            None
+        };
+        if let Some(reply) = reply {
+            debug!("File chunk request rejected (rate limit or unregistered peer)");
             self.stats.rejected += 1;
-            let reply = if enrolled { FileChunkResponse::Busy } else { FileChunkResponse::NotFound };
             let _ = self.swarm.behaviour_mut().file_chunks.send_response(channel, reply);
             return;
         }
@@ -305,6 +317,11 @@ impl ServerCore {
 pub(super) fn hash_file_streaming(path: &std::path::Path) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
+    // The chunks were written without a sync. The blob is marked complete right after this hash, so its bytes must
+    // be on disk first, or a power loss leaves a "verified" blob of zeros.
+    if let Err(err) = file.sync_data() {
+        warn!("Blob could not be synced: {err}");
+    }
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {

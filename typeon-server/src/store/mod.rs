@@ -120,7 +120,7 @@ pub fn mail_row_bytes(mailbox_id: &str, sealed: &[u8]) -> usize {
 }
 
 /// Bump on every change to `init_schema`, or existing databases skip the migration.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// Bytes an archive record is charged against its quota and the server-wide budget.
 pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
@@ -486,7 +486,13 @@ impl Store {
                  CREATE INDEX IF NOT EXISTS idx_mail_expiry ON mail(expires_at_ms);
                  -- Covering: `recount_mail_bytes` and `total_stored_bytes` sum
                  -- from the index and never touch the `sealed` blobs.
-                 CREATE INDEX IF NOT EXISTS idx_mail_depositor ON mail(depositor, byte_len);",
+                 CREATE INDEX IF NOT EXISTS idx_mail_depositor ON mail(depositor, byte_len);
+                 -- Covering for `depositor_usage`: count and bytes without reading `sealed`.
+                 CREATE INDEX IF NOT EXISTS idx_mail_box_depositor ON mail(mailbox_id, depositor, seq, byte_len);
+                 -- `fetch` and `unacked_for` skip the reader's own rows in the index, not in the table.
+                 CREATE INDEX IF NOT EXISTS idx_mail_reader ON mail(mailbox_id, seq, depositor);
+                 -- `sweep_expired_archive` reads a range, not the whole table.
+                 CREATE INDEX IF NOT EXISTS idx_archive_expiry ON archive(updated_at, owner);",
             )
             .map_err(|e| format!("Schema could not be created: {e}"))?;
         self.conn
@@ -543,6 +549,10 @@ impl Store {
             params![shift, upto],
         );
         let _ = self.conn.execute(
+            "UPDATE blobs SET created_at = created_at + ?1 WHERE created_at <= ?2",
+            params![shift, upto],
+        );
+        let _ = self.conn.execute(
             "UPDATE enrollments SET last_seen_at = last_seen_at + ?1 WHERE last_seen_at <= ?2",
             params![shift, upto],
         );
@@ -564,6 +574,7 @@ impl Store {
             params![floor, now],
         );
         let _ = self.conn.execute("UPDATE blobs SET last_served_at = ?2 WHERE last_served_at < ?1", params![floor, now]);
+        let _ = self.conn.execute("UPDATE blobs SET created_at = ?2 WHERE created_at < ?1", params![floor, now]);
         let _ = self.conn.execute("UPDATE enrollments SET last_seen_at = ?2 WHERE last_seen_at < ?1", params![floor, now]);
         let _ = self.conn.execute("UPDATE archive SET updated_at = ?2 WHERE updated_at < ?1", params![floor, now]);
         let _ = tx.commit();

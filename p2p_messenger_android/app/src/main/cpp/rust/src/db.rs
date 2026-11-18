@@ -106,6 +106,7 @@ impl P2PCore {
             deferred_swarm_events: Vec::new(),
             message_rate_limiter: HashMap::new(),
             chunk_rate_limiter: HashMap::new(),
+            chunk_bytes_served: HashMap::new(),
             server_mail_rate: (0, 0),
             unknown_peer_rate: (0, 0),
             deferred_incoming: std::collections::VecDeque::new(),
@@ -177,6 +178,9 @@ impl P2PCore {
         let key_pragma = db_key_pragma(storage_key);
         if is_plain_sqlite(&path) {
             encrypt_plain_db(&path, &key_pragma)?;
+        } else {
+            // A migration interrupted after the swap left the old plain file behind.
+            wipe_file(&format!("{}.plain-old", path));
         }
         let conn = Connection::open(&path)?;
         // First statement on the connection. A wrong key fails on the read.
@@ -354,6 +358,15 @@ impl P2PCore {
              CREATE TABLE IF NOT EXISTS removed_contacts (
                 identity_id TEXT PRIMARY KEY
              );
+             -- See `journal_sibling_op`: non-additive sibling operations, sent
+             -- again to a sibling that was away (`replay_sibling_journal`).
+             CREATE TABLE IF NOT EXISTS sibling_journal (
+                seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+                at      INTEGER NOT NULL,
+                dkey    TEXT NOT NULL,
+                targets TEXT NOT NULL,
+                content BLOB NOT NULL
+             );
              -- bkz. `remove_group_locally`.
              CREATE TABLE IF NOT EXISTS removed_groups (
                 group_id TEXT PRIMARY KEY,
@@ -520,9 +533,19 @@ impl P2PCore {
         migrate("CREATE INDEX IF NOT EXISTS idx_files_sticker_origin ON files(sticker_origin)")?;
         // `FileOffer.chunk_hashes`: each received chunk is checked against it.
         migrate("ALTER TABLE files ADD COLUMN chunk_hashes BLOB")?;
+        // The sender's send time (order key of the bubble), the send status of my own offer, automatic restarts of a failed download.
+        migrate("ALTER TABLE files ADD COLUMN sent_at_ms INTEGER")?;
+        migrate("ALTER TABLE files ADD COLUMN send_status TEXT")?;
+        migrate("ALTER TABLE files ADD COLUMN auto_resumes INTEGER NOT NULL DEFAULT 0")?;
+        // The start-up pending sweep below, the storage-limit sum and the shared-copy lookup read these.
+        migrate("CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(status) WHERE status = 'pending'")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_files_sha ON files(sha256_hex)")?;
         // the group row id of a queued copy (its own ids are per member).
         migrate("ALTER TABLE pending_group_messages ADD COLUMN local_message_id TEXT")?;
         migrate("ALTER TABLE pending_durable_retries ADD COLUMN local_message_id TEXT")?;
+        // The sealed (envelope, chain stamp) last published for the row: a restart offers the same bytes again.
+        migrate("ALTER TABLE pending_durable_retries ADD COLUMN sent_cbor BLOB")?;
         // A 'pending' row left by the previous run with no retry behind it
         // would show the clock icon forever: mark it failed. Rows whose send
         // is restored by `load_pending_durable_retries_from_db` stay pending,
@@ -565,6 +588,7 @@ impl P2PCore {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(format!("{}/attachments/sticker_cache", app_files_dir), std::fs::Permissions::from_mode(0o700));
         }
+        self.sweep_orphan_enc_files();
         self.load_identity_from_db();
         // `contacts` / `groups` tables were created but never written or read, so contacts, groups and known remote device public keys existed only
         // in memory and were lost on every process restart (including app updates). Every mutation now writes to disk (see persist_contact /
@@ -920,6 +944,24 @@ pub(crate) fn db_key_pragma(storage_key: &[u8; 32]) -> zeroize::Zeroizing<String
     zeroize::Zeroizing::new(format!("\"x'{}'\"", hex_key.as_str()))
 }
 
+/// Overwrites a file with zeros, syncs it and removes it. Best effort: flash wear levelling may keep old copies.
+pub(crate) fn wipe_file(path: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
+        let zeros = [0u8; 64 * 1024];
+        let mut left = f.metadata().map_or(0, |m| m.len());
+        while left > 0 {
+            let n = left.min(zeros.len() as u64) as usize;
+            if f.write_all(&zeros[..n]).is_err() {
+                break;
+            }
+            left -= n as u64;
+        }
+        let _ = f.sync_all();
+    }
+    let _ = std::fs::remove_file(path);
+}
+
 pub(crate) fn is_plain_sqlite(path: &str) -> bool {
     use std::io::Read;
     let mut magic = [0u8; 16];
@@ -968,11 +1010,18 @@ pub(crate) fn encrypt_plain_db(path: &str, key_pragma: &str) -> Result<(), rusql
 
     std::fs::File::open(&tmp).and_then(|f| f.sync_all()).map_err(io)?;
     for suffix in ["-wal", "-shm", "-journal"] {
-        let _ = std::fs::remove_file(format!("{}{}", path, suffix));
+        wipe_file(&format!("{}{}", path, suffix));
     }
+    // A second name for the plain file, so its blocks can be zeroed after the swap (the rename alone only frees them).
+    let old = format!("{}.plain-old", path);
+    let _ = std::fs::remove_file(&old);
+    let linked = std::fs::hard_link(path, &old).is_ok();
     std::fs::rename(&tmp, path).map_err(io)?;
     if let Some(dir) = std::path::Path::new(path).parent() {
         let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+    }
+    if linked {
+        wipe_file(&old);
     }
     info!("database encrypted (one-time migration)");
     Ok(())
@@ -998,6 +1047,7 @@ mod db_encryption_tests {
         assert!(!is_plain_sqlite(&path));
         assert!(!std::fs::read(&path).unwrap().windows(10).any(|w| w == b"secret-row"));
         assert!(!std::path::Path::new(&format!("{}-wal", path)).exists());
+        assert!(!std::path::Path::new(&format!("{}.plain-old", path)).exists());
 
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(&format!("PRAGMA key = {};", key.as_str())).unwrap();

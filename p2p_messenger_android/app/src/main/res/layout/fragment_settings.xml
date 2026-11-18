@@ -410,17 +410,9 @@
 
             <LinearLayout android:id="@+id/section_network_body" style="@style/Settings.Body">
 
-                <com.google.android.material.switchmaterial.SwitchMaterial
-                    android:id="@+id/tor_switch"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textSize="15sp"
-                    android:text="@string/lbl_tor" />
-                <TextView style="@style/Settings.Desc" android:text="@string/lbl_tor_desc" />
                 <TextView
                     android:id="@+id/tor_status"
                     style="@style/Settings.Desc"
-                    android:layout_marginTop="6dp"
                     android:alpha="1"
                     android:text="@string/tor_status_disabled"
                     android:textStyle="bold" />

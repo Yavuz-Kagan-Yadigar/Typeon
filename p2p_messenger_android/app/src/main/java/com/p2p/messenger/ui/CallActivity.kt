@@ -11,12 +11,18 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.SurfaceTexture
+import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.RingtoneManager
 import android.media.ToneGenerator
 import android.os.Bundle
 import android.os.Handler
+import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.os.Looper
 import com.p2p.messenger.util.Log
 import android.util.Rational
@@ -176,6 +182,12 @@ class CallActivity : AppCompatActivity() {
     private var video = false
     private var state = "idle"
     private var ringtone: android.media.Ringtone? = null
+    private var vibrator: Vibrator? = null
+    private var focusRequest: AudioFocusRequest? = null
+    /** Keeps the screen off (and untouchable) while a voice call is held to the ear. */
+    private var proximityLock: PowerManager.WakeLock? = null
+    /** Camera permission was refused on a video call: the call runs audio-only. */
+    private var cameraDenied = false
     private var ringback: ToneGenerator? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
@@ -197,6 +209,7 @@ class CallActivity : AppCompatActivity() {
         var avatar: ImageView? = null
         var peer = ""
         var framed = false
+        var lockedShown = false
         var videoW = 0
         var videoH = 0
     }
@@ -218,13 +231,7 @@ class CallActivity : AppCompatActivity() {
         supportActionBar?.hide()
         setContentView(buildLayout())
         video = intent.getBooleanExtra(EXTRA_VIDEO, false)
-        val peer = intent.getStringExtra(EXTRA_PEER)
-        val group = intent.getStringExtra(EXTRA_GROUP)
-        if (savedInstanceState == null && (peer != null || group != null)) {
-            starting = true
-            txtStatus.setText(R.string.call_calling)
-            if (hasPermissions(video)) placeCall(peer, group) else requestPermissions(video)
-        }
+        if (savedInstanceState == null) beginFromIntent()
         // Keeps the service poll loop at its fast rate for signalling/link
         // upkeep. For the whole life of the screen, not onStart..onStop: a
         // call with the screen off or behind another app dropped into power
@@ -234,6 +241,29 @@ class CallActivity : AppCompatActivity() {
         )
         P2PService.addMessageListener(keepPollFast)
         poll()
+    }
+
+    /** Places the call the intent names (outgoing start); a ring intent has no extras. */
+    private fun beginFromIntent() {
+        val peer = intent.getStringExtra(EXTRA_PEER)
+        val group = intent.getStringExtra(EXTRA_GROUP)
+        if (peer == null && group == null) return
+        starting = true
+        cameraDenied = false
+        txtStatus.setText(R.string.call_calling)
+        if (hasPermissions(video)) placeCall(peer, group) else requestPermissions(video)
+    }
+
+    /** singleTask: a call placed while an old (ended) screen still exists lands here. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (state != "idle" || starting) return
+        if (intent.getStringExtra(EXTRA_PEER) == null && intent.getStringExtra(EXTRA_GROUP) == null) return
+        video = intent.getBooleanExtra(EXTRA_VIDEO, false)
+        callSeen = false
+        finishingAt = 0L
+        beginFromIntent()
     }
 
     override fun onDestroy() {
@@ -370,7 +400,7 @@ class CallActivity : AppCompatActivity() {
             return
         }
         // Camera may be denied on a video call: continue audio-only.
-        if (grantResults.size > 1 && grantResults[1] != PackageManager.PERMISSION_GRANTED) video = false
+        if (grantResults.size > 1 && grantResults[1] != PackageManager.PERMISSION_GRANTED) { video = false; cameraDenied = true }
         if (starting) placeCall(intent.getStringExtra(EXTRA_PEER), intent.getStringExtra(EXTRA_GROUP))
         else if (state == "incoming") accept()
         // Granted while the call was already active: media never started.
@@ -398,7 +428,7 @@ class CallActivity : AppCompatActivity() {
         val newState = s.optString("state", "idle")
         if (newState != "idle") {
             callSeen = true
-            if (!mediaRunning && !starting) video = s.optBoolean("video", video)
+            if (!mediaRunning && !starting) video = s.optBoolean("video", video) && !cameraDenied
         }
         if (newState != state) onStateChanged(state, newState, s)
         state = newState
@@ -409,8 +439,7 @@ class CallActivity : AppCompatActivity() {
         }
 
         // Over the lock screen the caller stays hidden, same as the ring notification.
-        val locked = (getSystemService(android.content.Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)?.isKeyguardLocked == true
-        txtName.text = if (locked) getString(R.string.app_name) else s.optString("name")
+        txtName.text = if (keyguardLocked()) getString(R.string.app_name) else s.optString("name")
         val participants = s.optJSONArray("participants")
         when (newState) {
             "outgoing" -> txtStatus.setText(R.string.call_calling)
@@ -424,7 +453,9 @@ class CallActivity : AppCompatActivity() {
                     media.optInt("relay_links") > 0 -> getString(R.string.call_via_server)
                     else -> getString(R.string.call_connecting)
                 }
-                txtStatus.text = String.format("%02d:%02d · %s", secs / 60, secs % 60, path)
+                val audio = (if (CallMedia.audioPlaybackFailing()) " · " + getString(R.string.call_audio_failing) else "") +
+                    (if (CallMedia.captureFailing) " · " + getString(R.string.call_mic_failing) else "")
+                txtStatus.text = String.format("%02d:%02d · %s", secs / 60, secs % 60, path) + audio
             }
         }
         btnAccept.visibility = if (newState == "incoming") View.VISIBLE else View.GONE
@@ -437,13 +468,35 @@ class CallActivity : AppCompatActivity() {
         if (inCall && participants != null) { syncTiles(participants); frameTiles() }
     }
 
+    private fun keyguardLocked(): Boolean =
+        (getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)?.isKeyguardLocked == true
+
     private fun onStateChanged(old: String, new: String, s: JSONObject) {
         stopTones()
         if (new != "idle") finishingAt = 0L
         when (new) {
             "incoming" -> {
                 try {
-                    ringtone = RingtoneManager.getRingtone(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))?.also { it.play() }
+                    ringtone = RingtoneManager.getRingtone(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))?.also {
+                        it.isLooping = true
+                        it.play()
+                    }
+                } catch (e: Exception) { }
+                // Vibrate too (the ringtone is silent in vibrate mode), unless the phone is on silent.
+                try {
+                    if (getSystemService(AudioManager::class.java).ringerMode != AudioManager.RINGER_MODE_SILENT) {
+                        val v = if (android.os.Build.VERSION.SDK_INT >= 31) getSystemService(VibratorManager::class.java).defaultVibrator
+                        else getSystemService(Vibrator::class.java)
+                        // A ringtone usage: without one the system drops it as UNKNOWN ("ignored_for_settings").
+                        val pattern = VibrationEffect.createWaveform(longArrayOf(0, 800, 800), 0)
+                        if (android.os.Build.VERSION.SDK_INT >= 33) {
+                            v.vibrate(pattern, android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_RINGTONE))
+                        } else {
+                            @Suppress("DEPRECATION")
+                            v.vibrate(pattern, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE).build())
+                        }
+                        vibrator = v
+                    }
                 } catch (e: Exception) { }
             }
             "outgoing" -> {
@@ -470,7 +523,7 @@ class CallActivity : AppCompatActivity() {
                     )
                     btnAccept.visibility = View.GONE
                     // Not if another call arrived on this screen meanwhile.
-                    ui.postDelayed({ if (state == "idle") finish() }, 1500)
+                    ui.postDelayed({ if (state == "idle" && !starting) finish() }, 1500)
                 }
             }
         }
@@ -480,6 +533,8 @@ class CallActivity : AppCompatActivity() {
     private fun stopTones() {
         try { ringtone?.stop() } catch (e: Exception) { }
         ringtone = null
+        try { vibrator?.cancel() } catch (e: Exception) { }
+        vibrator = null
         try { ringback?.stopTone(); ringback?.release() } catch (e: Exception) { }
         ringback = null
     }
@@ -492,6 +547,32 @@ class CallActivity : AppCompatActivity() {
         mediaRunning = true
         P2PService.setCallActive(this, true)
         val am = getSystemService(AudioManager::class.java)
+        // Other apps' music must pause for the call.
+        try {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener { }
+                .build()
+            am.requestAudioFocus(req)
+            focusRequest = req
+        } catch (e: Exception) { Log.w(TAG, "Audio focus request failed", e) }
+        // Voice call at the ear: the screen goes off while the phone is near the face.
+        if (!video) {
+            try {
+                val pm = getSystemService(PowerManager::class.java)
+                if (pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+                    proximityLock = pm.newWakeLock(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "Typeon:callProximity").apply {
+                        setReferenceCounted(false)
+                        acquire(4 * 60 * 60 * 1000L)
+                    }
+                }
+            } catch (e: Exception) { Log.w(TAG, "Proximity lock failed", e) }
+        }
         am.mode = AudioManager.MODE_IN_COMMUNICATION
         @Suppress("DEPRECATION")
         am.isSpeakerphoneOn = video
@@ -511,6 +592,10 @@ class CallActivity : AppCompatActivity() {
         tiles.clear()
         grid.removeAllViews()
         val am = getSystemService(AudioManager::class.java)
+        try { if (proximityLock?.isHeld == true) proximityLock?.release() } catch (e: Exception) { }
+        proximityLock = null
+        focusRequest?.let { try { am.abandonAudioFocusRequest(it) } catch (e: Exception) { } }
+        focusRequest = null
         @Suppress("DEPRECATION")
         am.isSpeakerphoneOn = false
         if (android.os.Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice()
@@ -568,16 +653,20 @@ class CallActivity : AppCompatActivity() {
         }
         for ((slot, p) in live) {
             val tile = tiles[slot] ?: newTile(slot).also { tiles[slot] = it; grid.addView(it.root) }
-            tile.label.text = p.optString("name")
+            // Over the lock screen the contact stays hidden, as in the header.
+            val locked = keyguardLocked()
+            val shownName = if (locked) getString(R.string.app_name) else p.optString("name")
+            tile.label.text = shownName
             // Camera off on their side: hide the last frame instead of freezing on it.
             val camOff = p.optBoolean("video_off")
             tile.texture?.visibility = if (camOff) View.INVISIBLE else View.VISIBLE
             // Camera off (or voice call): their profile picture instead of a black tile.
             tile.avatar?.visibility = if (camOff || tile.texture == null) View.VISIBLE else View.GONE
             val peerKey = p.optString("peer")
-            if (tile.peer != peerKey) {
+            if (tile.peer != peerKey || tile.lockedShown != locked) {
                 tile.peer = peerKey
-                loadAvatar(tile, peerKey, p.optString("name"))
+                tile.lockedShown = locked
+                loadAvatar(tile, peerKey, shownName)
             }
             // Muted participants get a mic-off icon before their name.
             val muted = p.optBoolean("muted")
@@ -645,6 +734,7 @@ class CallActivity : AppCompatActivity() {
     /** Placeholder now; the real picture once the contact list is read (off the UI thread). */
     private fun loadAvatar(tile: Tile, peer: String, name: String) {
         com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, null, name)
+        if (tile.lockedShown) return
         val cached = synchronized(peerAvatars) { peerAvatars[peer] }
         if (cached != null) {
             // One scan per distinct peer, not one Thread + listContacts() per
@@ -662,7 +752,7 @@ class CallActivity : AppCompatActivity() {
             } catch (e: Exception) { null }
             synchronized(peerAvatars) { peerAvatars[peer] = jpeg ?: ByteArray(0) }
             if (jpeg != null) ui.post {
-                if (!isDestroyed && tile.peer == peer) com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, jpeg, name)
+                if (!isDestroyed && tile.peer == peer && !tile.lockedShown) com.p2p.messenger.util.AvatarUtil.renderInto(tile.avatar!!, jpeg, name)
             }
         }
     }

@@ -106,8 +106,8 @@ impl P2PCore {
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                   sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, chunk_size,
-                  caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin, chunk_hashes)
-                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                  caption, reply_to_message_id, reply_to_preview, sticker, sticker_origin, chunk_hashes, sent_at_ms)
+                 VALUES (?1, ?2, 'sent', ?3, ?4, ?5, ?6, ?7, ?8, 'complete', ?5, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?9)",
                 params![
                     file_id, peer_device_fingerprint, file_name, mime_type, total_size as i64,
                     sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg, duration_ms,
@@ -149,7 +149,8 @@ impl P2PCore {
         // If a server is configured (see `server_client`), upload the encrypted file there too. Recipients already speak the filexfer protocol
         // that the server serves, so nothing changes on their side: the server is just an always-on source peer.
         self.queue_blob_upload(&file_id, &file_key, attachments::total_chunks_with(total_size, attachments::FILE_CHUNK_SIZE_V2));
-        let (_, status) = self.send_message_content(peer_device_fingerprint.clone(), &content, None)?;
+        // Under the file id, as a 1:1 text goes under its bubble id: status events, the Ack and "retry now" then name the bubble.
+        let (_, status) = self.send_message_content_inner(peer_device_fingerprint.clone(), &content, None, Some(file_id.clone()), None, None)?;
         // Same as `send_message`: the contact's other devices plus my own siblings.
         self.fanout_extra_copies(&peer_device_fingerprint, &content);
         self.echo_1to1_to_siblings(&peer_device_fingerprint, SiblingEchoBody::File { offer: Box::new(content) });
@@ -189,8 +190,8 @@ impl P2PCore {
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                   sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, group_id, sender_identity_id, chunk_size,
-                  caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes)
-                 VALUES (?1, '', 'sent', ?2, ?3, ?4, ?5, ?6, ?7, 'complete', ?4, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                  caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes, sent_at_ms)
+                 VALUES (?1, '', 'sent', ?2, ?3, ?4, ?5, ?6, ?7, 'complete', ?4, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?8)",
                 params![
                     file_id, file_name, mime_type, total_size as i64,
                     sha256_hex, encrypted_key, key_nonce, current_time_ms() as i64, preview_jpeg, duration_ms,
@@ -238,7 +239,9 @@ impl P2PCore {
     /// Handles an incoming `FileOffer`: adds a recipient row to the `files` table. If node mode is on, the download starts at once. If it is off,
     /// only the metadata stays visible and the user must tap "Download".
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, chunk_hashes: &[u8], caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>) -> serde_json::Value {
+    pub(crate) fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, chunk_hashes: &[u8], caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>, sent_at_ms: u64) -> serde_json::Value {
+        // The sender's clock, not later than ours (as for texts); 0 = unknown, now.
+        let sent_at_ms = match sent_at_ms { 0 => current_time_ms(), t => t.min(current_time_ms()) };
         // `MAX_ATTACHMENT_SIZE`
         // Before, this was enforced ONLY on the send side (`prepare_and_send_file`/`prepare_and_send_group_file`). The RECEIVER did not check the
         // `total_size` the other side sent. A malicious or broken peer could send a `total_size` near `u64::MAX` and trigger the `total_size as i64`
@@ -289,7 +292,7 @@ impl P2PCore {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             ).ok()
         });
-        let existing_direction = existing.as_ref().map(|e| e.0.clone());
+        let mut existing_direction = existing.as_ref().map(|e| e.0.clone());
         // Any existing row is final. A repeated offer (lost Ack) reset a
         // finished download to 'offered'; an offer from another chat with a
         // known file_id replaced the row's key and made the file unreadable.
@@ -301,6 +304,16 @@ impl P2PCore {
             if row_sender.as_deref().map_or(true, |s| s == sender_identity_id) && *row_group == group_id {
                 return serde_json::json!({"type": "noop"});
             }
+            // A group file id carries its author's tag (`group_msg_tag`), a 1:1 id does not: a 1:1 row under such an id was taken by
+            // someone who copied it. The real group offer replaces it.
+            let author_bound = group_id.as_deref().map_or(false, |gid| group_msg_id_bound(gid, sender_identity_id, file_id));
+            if author_bound && row_group.is_none() {
+                warn!("FileOffer: 1:1 row under a group file id replaced by the author's offer (id: {})", file_id);
+                self.delete_attachment_file(file_id);
+                existing_direction = None;
+            }
+        }
+        if existing_direction.is_some() && existing.as_ref().map_or(false, |e| e.0 == "received") {
             warn!("FileOffer REJECTED: file_id collides with another sender's file (sender: {}, id: {})", crate::log_id(&peer_fp), file_id);
             return serde_json::json!({
                 "type": "file_failed", "peer": peer_fp, "sender_identity_id": sender_identity_id,
@@ -355,7 +368,12 @@ impl P2PCore {
         let sticker_origin = sticker_origin.filter(|o| sticker && valid_sticker_origin(o) && o.strip_prefix("jxl:") == Some(sha256_hex));
         // Running downloads are charged at their declared size: each offer
         // alone fitting the limit let 8 of them overshoot it together.
-        let in_flight: u64 = self.active_downloads.values().map(|d| d.total_size).sum();
+        // Failed partials stay on disk for resume: counted too, or offers that are never served to the end filled the disk past the limit.
+        let failed_on_disk: u64 = self.db.as_ref().and_then(|c| c.query_row(
+            "SELECT COALESCE(SUM(bytes_transferred), 0) FROM files WHERE status = 'failed' AND direction = 'received'",
+            [], |r| r.get::<_, i64>(0),
+        ).ok()).unwrap_or(0).max(0) as u64;
+        let in_flight: u64 = self.active_downloads.values().map(|d| d.total_size).sum::<u64>().saturating_add(failed_on_disk);
         let auto_download_requested = (sticker
                 || self.node_mode_enabled && in_flight.saturating_add(total_size) <= self.history_storage_limit_bytes)
             && self.active_downloads.len() < 8
@@ -370,8 +388,8 @@ impl P2PCore {
                         "INSERT OR REPLACE INTO files
                          (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
                           sha256_hex, encrypted_file_key, key_nonce, status, bytes_transferred, created_at, preview_jpeg, duration_ms, group_id, sender_identity_id, chunk_size,
-                          caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes)
-                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                          caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes, sent_at_ms)
+                         VALUES (?1, ?2, 'received', ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                         params![
                             file_id, peer_fp, file_name, mime_type, total_size as i64,
                             sha256_hex, encrypted_key, key_nonce, status, current_time_ms() as i64, preview_jpeg, duration_ms,
@@ -380,6 +398,7 @@ impl P2PCore {
                             // legacy default of 256 KiB (see `FileOffer.chunk_size`).
                             chunk_size.map(|v| v as i64).unwrap_or(attachments::FILE_CHUNK_SIZE as i64),
                             caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes,
+                            sent_at_ms as i64,
                         ],
                     ).is_ok()
                 } else {
@@ -434,7 +453,7 @@ impl P2PCore {
             // `sender_identity_id` is included in group attachments so the notification can say who sent it (see the P2PService.maybeNotify
             // "file_offer" branch). In 1:1, `peer` is enough.
             "type": "file_offer", "peer": chat_peer, "sender_identity_id": sender_identity_id,
-            "group_id": group_id, "file_id": file_id,
+            "group_id": group_id, "file_id": file_id, "sent_at_ms": sent_at_ms,
             "file_name": file_name, "mime_type": mime_type, "total_size": total_size,
             "auto_downloading": auto_downloading, "complete": reused, "sticker": sticker,
             // Hex-encoded, since JSON cannot carry raw binary. For a small preview (typically a few tens of KB), hex is about 37% larger than base64,
@@ -460,9 +479,9 @@ impl P2PCore {
             let mut stmt = match conn.prepare(
                 "SELECT file_id, peer_device_fingerprint, total_size FROM files \
                  WHERE status IN ('downloading','failed') AND direction = 'received' \
-                 AND length(chunk_hashes) > 0"
+                 AND length(chunk_hashes) > 0 AND auto_resumes < ?1"
             ) { Ok(s) => s, Err(_) => return };
-            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64)))
+            stmt.query_map(params![MAX_AUTO_RESUMES], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64)))
                 .map(|it| it.flatten().collect())
                 .unwrap_or_default()
         };
@@ -480,6 +499,11 @@ impl P2PCore {
             // Once per process run, unless the download has made progress since (see `handle_chunk_response`). A file that fails every time would
             // otherwise restart on every reconnect of its owner. After that it waits for a tap.
             if !self.auto_resumed_downloads.insert(file_id.clone()) { continue; }
+            // Counted on disk too: a file whose source is gone for good (deleted, blob expired) was tried again, with a dial per member
+            // device, at every start and server enrol. After MAX_AUTO_RESUMES it waits for a tap; progress resets the count.
+            if let Some(conn) = &self.db {
+                let _ = conn.execute("UPDATE files SET auto_resumes = auto_resumes + 1 WHERE file_id = ?1", params![file_id]);
+            }
             info!("Partial download resumed, source reconnected: file_id={} source={}", file_id, crate::log_id(&owner_fp));
             if let Err(e) = self.download_file(file_id.clone(), owner_fp.clone()) {
                 warn!("Download could not resume on reconnect: file_id={} {}", file_id, e);
@@ -853,6 +877,10 @@ impl P2PCore {
                 let _ = std::fs::File::create(p);
             }
         }
+        // Chunks are written without a sync each (`write_verified_chunk_at_with`): one sync before the row says complete.
+        if let Ok(p) = self.enc_path_for(file_id) {
+            let _ = std::fs::OpenOptions::new().write(true).open(p).and_then(|f| f.sync_data());
+        }
         // the peer's `sticker` flag forced this download and
         // makes the chat decode it on sight. Only a real sticker keeps it:
         // its headers must say at most `STICKER_MAX_SIDE` a side.
@@ -1146,7 +1174,7 @@ impl P2PCore {
             emit_progress = !duplicate && (state.received_chunks.len() % 8 == 0 || all_done);
             if emit_progress {
                 if let Some(conn) = &self.db {
-                    let _ = conn.execute("UPDATE files SET bytes_transferred = ?1 WHERE file_id = ?2", params![state.bytes_done as i64, file_id]);
+                    let _ = conn.execute("UPDATE files SET bytes_transferred = ?1, auto_resumes = 0 WHERE file_id = ?2", params![state.bytes_done as i64, file_id]);
                 }
             }
         }
@@ -1215,6 +1243,40 @@ impl P2PCore {
     }
 
     /// The RESPONDER side of the `request_response` request: asks for one chunk of a file that this device sent, or fully downloaded and re-serves.
+    /// `serve_chunk_request` within a byte budget per (peer, file) and day: `CHUNK_SERVE_FILE_MULTIPLE` times the file plus 16 MiB. The rate
+    /// limit alone let an authorized peer make this device upload the same file in a loop. Past the budget: `Busy`.
+    pub(crate) fn serve_chunk_request_budgeted(&mut self, peer: PeerId, request: &FileChunkRequest) -> FileChunkResponse {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let now = mono_ms();
+        let total: u64 = self.db.as_ref().and_then(|c| c.query_row(
+            "SELECT total_size FROM files WHERE file_id = ?1", params![request.file_id], |r| r.get::<_, i64>(0),
+        ).ok()).unwrap_or(0).max(0) as u64;
+        let budget = total.saturating_mul(CHUNK_SERVE_FILE_MULTIPLE).saturating_add(16 * 1024 * 1024);
+        if self.chunk_bytes_served.len() > 4096 {
+            self.chunk_bytes_served.retain(|_, (start, _)| now.saturating_sub(*start) < DAY_MS);
+            if self.chunk_bytes_served.len() > 8192 {
+                self.chunk_bytes_served.clear();
+            }
+        }
+        let key = (peer, request.file_id.clone());
+        let used = match self.chunk_bytes_served.get(&key) {
+            Some((start, used)) if now.saturating_sub(*start) < DAY_MS => *used,
+            _ => 0,
+        };
+        if used >= budget {
+            return FileChunkResponse::Busy;
+        }
+        let response = self.serve_chunk_request(peer, request);
+        if let FileChunkResponse::Chunk { data } = &response {
+            let entry = self.chunk_bytes_served.entry(key).or_insert((now, 0));
+            if now.saturating_sub(entry.0) >= DAY_MS {
+                *entry = (now, 0);
+            }
+            entry.1 = entry.1.saturating_add(data.len() as u64);
+        }
+        response
+    }
+
     pub(crate) fn serve_chunk_request(&self, peer: PeerId, request: &FileChunkRequest) -> FileChunkResponse {
         debug!("serve_chunk_request: file_id={} chunk={} request received", request.file_id, request.chunk_index);
         let row = self.db.as_ref().and_then(|conn| {
@@ -1299,7 +1361,7 @@ impl P2PCore {
             placeholders, before_ms.map_or(i64::MAX, |b| b.min(i64::MAX as u64) as i64)
         );
         let sql = format!(
-            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker
+            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, COALESCE(NULLIF(sent_at_ms, 0), created_at), send_status
              FROM files WHERE {f} AND created_at >= COALESCE(
                  (SELECT created_at FROM files WHERE {f} ORDER BY created_at DESC LIMIT 1 OFFSET {o}), {min})
              ORDER BY created_at DESC",
@@ -1346,6 +1408,8 @@ impl P2PCore {
                 reply_to_preview: r.get(12)?,
                 reply_to_sender_identity_id: r.get(13)?,
                 sticker: r.get(14)?,
+                sent_at_ms: r.get::<_, i64>(15)?.max(0) as u64,
+                send_status: r.get(16)?,
             })
         });
         newest_first_rows(rows)
@@ -1370,7 +1434,7 @@ impl P2PCore {
             None => return Vec::new(),
         };
         let mut stmt = match conn.prepare(
-            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, peer_device_fingerprint, sender_identity_id, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker
+            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, peer_device_fingerprint, sender_identity_id, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, COALESCE(NULLIF(sent_at_ms, 0), created_at), send_status
              FROM files WHERE group_id = ?1 AND created_at < ?2 AND created_at >= COALESCE(
                  (SELECT created_at FROM files WHERE group_id = ?1 AND created_at < ?2 ORDER BY created_at DESC LIMIT 1 OFFSET ?3), ?4)
              ORDER BY created_at DESC"
@@ -1411,6 +1475,8 @@ impl P2PCore {
                 reply_to_preview: r.get(14)?,
                 reply_to_sender_identity_id: r.get(15)?,
                 sticker: r.get(16)?,
+                sent_at_ms: r.get::<_, i64>(17)?.max(0) as u64,
+                send_status: r.get(18)?,
             })
         });
         newest_first_rows(rows)

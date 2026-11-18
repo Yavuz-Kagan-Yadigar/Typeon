@@ -57,7 +57,8 @@ class ContactsFragment : Fragment() {
     /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk is 26). */
     @Volatile private var eventRefreshQueued = false
     private val eventRefreshRunnable = Runnable { eventRefreshQueued = false; refreshList() }
-    private val eventListener: (String) -> Unit = { _ ->
+    private val eventListener: (String) -> Unit = listener@{ msg ->
+        if (ChatsFragment.isQuietEvent(msg)) return@listener
         if (!eventRefreshQueued) {
             eventRefreshQueued = true
             refreshHandler.postDelayed(eventRefreshRunnable, EVENT_REFRESH_DEBOUNCE_MS)

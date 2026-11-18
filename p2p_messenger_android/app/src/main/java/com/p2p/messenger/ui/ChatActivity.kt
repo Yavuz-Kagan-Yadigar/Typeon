@@ -90,8 +90,6 @@ class ChatActivity : AppCompatActivity() {
         const val EXTRA_PEER_DEVICE_FINGERPRINT = "peer_device_fingerprint"
         const val EXTRA_PEER_DISPLAY_NAME = "peer_display_name"
 
-        private const val HISTORY_SYNC_LIMIT = 30
-        private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
         /** When the list is scrolled this close to the top, the next page is requested. */
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
 
@@ -132,15 +130,11 @@ class ChatActivity : AppCompatActivity() {
     internal lateinit var recycler: RecyclerView
     internal lateinit var connectingBanner: View
 
-    /** `requestHistorySync` was sent and the reply is awaited (see `applyHistorySync`; if no reply comes, nothing happens). */
-    internal var historySyncPending = false
     internal lateinit var fetchHistoryButton: FetchHistoryButton
     /** Only one older-page request at a time during infinite scroll. */
     internal var isLoadingOlderHistory = false
     /** If the other side also returned an empty page, stop asking. */
     internal var noMoreOlderHistory = false
-    private var olderHistoryRequest = 0
-    private var olderHistoryEmptyReply = false
     /** Set in onResume: the chat is really in front of the user, not just
      *  resumed for a moment underneath the app lock screen. */
     private var resumedUnlocked = false
@@ -423,7 +417,7 @@ class ChatActivity : AppCompatActivity() {
             // "history_backfilled" covers several chats and carries no peer.
             // Nor does "stickers_changed" (my sticker store, any chat).
             if ((isForThisPeer && !isGroupScoped) || obj.optString("type") == "history_backfilled"
-                || obj.optString("type") == "stickers_changed"
+                || obj.optString("type") == "stickers_changed" || obj.optString("type") == "file_evicted"
             ) {
                 runOnUiThread { handleIncomingEvent(obj) }
             }
@@ -616,7 +610,6 @@ class ChatActivity : AppCompatActivity() {
         P2PService.activeConversationId = peerDeviceFingerprint
         localMessages.clear()
         adapter.notifyDataSetChanged()
-        historySyncPending = false
         isLoadingOlderHistory = false
         noMoreOlderHistory = false
         searchMatches = emptyList()

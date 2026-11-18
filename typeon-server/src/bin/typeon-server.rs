@@ -32,7 +32,7 @@
 //! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use, same syntax as `--storage`; default
 //!   `DEFAULT_BUDGET_BYTES`, 16 GiB)
 //! - `TYPEON_SERVER_DB_KEY` (optional 64-hex SQLCipher key; a plain DB is migrated)
-//! - `TYPEON_SERVER_MAX_DEVICES` (maximum enrolled devices; default 64)
+//! - `TYPEON_SERVER_MAX_DEVICES` (maximum enrolled devices; default 16). The budget is split over this many devices.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -40,8 +40,8 @@ use std::sync::OnceLock;
 use typeon_server::store::Store;
 use typeon_server::{now_ms, ServerConfig, ServerCore};
 
-/// Total disk budget when `TYPEON_SERVER_BUDGET_BYTES` is not set. The library default (64 devices times the
-/// per-device quotas, 336 GiB) would let enrolled clients fill a small VPS disk.
+/// Total disk budget when `TYPEON_SERVER_BUDGET_BYTES` is not set. The library default (16 devices times the
+/// per-device quotas, 84 GiB) would let enrolled clients fill a small VPS disk.
 const DEFAULT_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 /// `--dir`, set once in `main` before anything reads the data directory.
@@ -165,6 +165,11 @@ fn build_config() -> ServerConfig {
             Ok(n) if n > 0 => cfg.max_enrollments = n,
             _ => eprintln!("TYPEON_SERVER_MAX_DEVICES ignored (a positive number is expected): {v}"),
         }
+    }
+    // Per-device quotas from the budget, as on Android. The library defaults (5.25 GiB a device) let 16 devices claim
+    // 84 GiB of a 16 GiB budget.
+    if let Some(budget) = cfg.total_storage_budget_bytes {
+        cfg.apply_storage_budget(budget);
     }
     cfg
 }

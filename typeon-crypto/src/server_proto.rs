@@ -216,7 +216,7 @@ pub enum ServerRequest {
     /// `Ack` cannot do this, because it requires `depositor != acker`. A sender
     /// that could make the server delete a message before the recipient saw it
     /// could abuse that. The reverse gap was real, though: a message sent by
-    /// mistake stayed on the server for 30 days if the recipient was offline, and
+    /// mistake stayed on the server until its TTL if the recipient was offline, and
     /// the sender had no way to remove it.
     ///
     /// This request closes that gap without enabling abuse. The server deletes
@@ -816,7 +816,7 @@ pub fn is_onion_server_addr(addr: &str) -> bool {
     let mut parts = addr.split('/').skip(1);
     match (parts.next(), parts.next()) {
         (Some("dns" | "dns4" | "dns6"), Some(host)) => host.len() > ".onion".len() && host.ends_with(".onion"),
-        (Some("onion3"), Some(_)) => true,
+        // `/onion3/` is refused: the dial transport takes only `/dns*/<host>.onion/tcp/<port>`.
         _ => false,
     }
 }
@@ -855,13 +855,6 @@ pub const BLOB_UPLOAD_SECRET_LEN: usize = 24;
 /// Length of the author tag at the start of an upload secret.
 pub const BLOB_TAG_LEN: usize = 8;
 
-/// The blob (file) id an upload secret stands for: 48 lowercase hex characters, the
-/// author tag in the clear, then `blob_id_hash_hex` of the rest of the secret. The
-/// sender picks the secret, names only this id in its `FileOffer`, and proves ownership
-/// to the server with the secret itself. The tag lets a group member check that a file
-/// id belongs to the member who offers it (core `group_msg_tag`, derived from the hash
-/// part, so it differs per file). The server does not read it. `None` if the secret has
-/// the wrong length.
 /// The archive bucket id a purge secret deletes (`ar_` + 32 hex chars), or `None` for a
 /// malformed secret. `server_seal::server_archive_bucket` builds ids the same way.
 pub fn archive_bucket_for_purge_secret(secret_hex: &str) -> Option<String> {
@@ -871,6 +864,13 @@ pub fn archive_bucket_for_purge_secret(secret_hex: &str) -> Option<String> {
     Some(format!("ar_{}", hex::encode(&hash[..16])))
 }
 
+/// The blob (file) id an upload secret stands for: 48 lowercase hex characters, the
+/// author tag in the clear, then `blob_id_hash_hex` of the rest of the secret. The
+/// sender picks the secret, names only this id in its `FileOffer`, and proves ownership
+/// to the server with the secret itself. The tag lets a group member check that a file
+/// id belongs to the member who offers it (core `group_msg_tag`, derived from the hash
+/// part, so it differs per file). The server does not read it. `None` if the secret has
+/// the wrong length.
 pub fn blob_id_for_upload_secret(upload_secret: &[u8]) -> Option<String> {
     if upload_secret.len() != BLOB_UPLOAD_SECRET_LEN {
         return None;
@@ -893,7 +893,7 @@ mod onion_addr_tests {
 
     #[test]
     fn a_server_address_is_onion_or_refused() {
-        for onion in ["/dns/abcdef.onion/tcp/42612/p2p/12D3KooW", "/dns4/abcdef.onion/tcp/1", "/onion3/abcdef:42612/p2p/12D3KooW"] {
+        for onion in ["/dns/abcdef.onion/tcp/42612/p2p/12D3KooW", "/dns4/abcdef.onion/tcp/1"] {
             assert!(is_onion_server_addr(onion), "{onion}");
         }
         for other in [
@@ -902,6 +902,7 @@ mod onion_addr_tests {
             "/ip6/2001:db8::1/tcp/1",
             "/dns4/example.org/tcp/1",
             "/dns4/localhost/tcp/1",
+            "/onion3/abcdef:42612/p2p/12D3KooW",
             "/dns/.onion/tcp/1",
             "/dns/abcdef.onion./tcp/1",
             "/ip4/10.0.0.1/tcp/1/dns/abcdef.onion",

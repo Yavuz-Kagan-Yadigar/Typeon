@@ -40,7 +40,7 @@ impl ChatView {
                     },
                     true,
                 );
-                self.mark_read();
+                self.mark_read_if_watched();
             }
             (Conversation::Group { group_id, .. }, "group_message")
                 if event.string("group_id") == *group_id =>
@@ -68,7 +68,15 @@ impl ChatView {
                     },
                     true,
                 );
-                self.mark_read();
+                self.mark_read_if_watched();
+            }
+
+            // The core logged a "Missed call" row for this chat: it counts
+            // as read while the chat is open, like any incoming message.
+            (Conversation::Direct { fingerprint, .. }, "call")
+                if event.flag("missed") && event.string("peer") == *fingerprint =>
+            {
+                self.mark_read_if_watched();
             }
 
             // --- my own message, echoed from another of my devices ---
@@ -231,7 +239,8 @@ impl ChatView {
                         mine: event.kind == "sibling_file",
                         sender_identity: event.string("sender_identity_id"),
                         text: event.string("caption"),
-                        order_key: util::now_ms(),
+                        // The sender's send time, as texts use it.
+                        order_key: nonzero_or(event.number("sent_at_ms"), util::now_ms()),
                         status: None,
                         reply_preview: event.optional("reply_to_preview"),
                         reply_sender: event.optional("reply_to_sender_identity_id"),
@@ -315,7 +324,13 @@ impl ChatView {
     }
 
     pub(super) fn apply_edit(&self, id: &str, new_text: &str) {
+        self.main.refresh_chats();
         if let Some(bubble) = self.bubbles.borrow().get(id) {
+            {
+                let mut entry = bubble.entry.borrow_mut();
+                entry.text = new_text.to_string();
+                entry.edited = true;
+            }
             bubble.text.set_markup(&crate::util::quote_markup(crate::util::split_leading_quote(new_text).1));
             self.search_lower.borrow_mut().clear();
             bubble.edited.set(true);
@@ -329,7 +344,19 @@ impl ChatView {
     }
 
     pub(super) fn apply_delete(&self, id: &str) {
+        self.main.refresh_chats();
         if let Some(bubble) = self.bubbles.borrow().get(id) {
+            // The "Forwarded" label and the inline quote sit beside the text in the same column; a reload builds a deleted bubble without them.
+            if let Some(column) = bubble.text.parent() {
+                let mut child = column.first_child();
+                while let Some(widget) = child {
+                    child = widget.next_sibling();
+                    if widget.has_css_class("forwarded-label") || widget.has_css_class("quote-block") {
+                        widget.set_visible(false);
+                    }
+                }
+            }
+            bubble.entry.borrow_mut().deleted = true;
             bubble.text.set_markup("Message deleted");
             self.search_lower.borrow_mut().clear();
             bubble.text.add_css_class("dim-label");
@@ -358,6 +385,7 @@ impl ChatView {
             return;
         }
         *bubble.status.borrow_mut() = Some(status.to_string());
+        bubble.entry.borrow_mut().status = Some(status.to_string());
         bubble
             .meta
             .set_markup(&format_meta(bubble.order_key, Some(status), false, bubble.edited.get()));
@@ -371,6 +399,7 @@ impl ChatView {
         }
         // Remembered, but not shown: there is no "seen" tick.
         bubble.seen.set(true);
+        bubble.entry.borrow_mut().seen = true;
     }
 
     /// Shows/hides the typing bubble and (re)arms its auto-hide timeout — see

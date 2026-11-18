@@ -41,7 +41,7 @@ mod device_link_code_tests {
             nonce: vec![nonce; 16],
         }.to_cbor().unwrap();
         let code = device_link_code(&request(1, "a"));
-        assert_eq!(code.len(), 7);
+        assert_eq!(code.len(), 11);
         assert_eq!(code, device_link_code(&request(1, "b")));
         assert_ne!(code, device_link_code(&request(2, "a")));
         assert_eq!(device_link_code(b"not a link request"), "");
@@ -216,6 +216,28 @@ pub(crate) fn jbytearray_to_vec<'local>(env: &mut JNIEnv<'local>, data: &JByteAr
     }
 }
 
+/// A Java `byte[]` of exactly `expect` bytes, copied into a fallible
+/// allocation: the frame paths copy up to 96 MB, and a failed allocation
+/// aborts the process (no unwind for `catch_panic`). `None`: wrong length,
+/// no memory, or a JNI error.
+pub(crate) fn jbytearray_exact<'local>(env: &mut JNIEnv<'local>, data: &JByteArray<'local>, expect: u64) -> Option<Vec<u8>> {
+    let len = env.get_array_length(data).ok()?.max(0) as u64;
+    if len != expect {
+        return None;
+    }
+    let len = usize::try_from(len).ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(len).ok()?;
+    buf.resize(len, 0);
+    // SAFETY: `jbyte` is `i8`, same size and alignment as `u8`; the slice covers `buf` exactly.
+    let dst = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut jni::sys::jbyte, len) };
+    if env.get_byte_array_region(data, 0, dst).is_err() {
+        let _ = env.exception_clear();
+        return None;
+    }
+    Some(buf)
+}
+
 /// Converts a `JString` that Kotlin passed as `null` into an `Option<String>`. Added for the WhatsApp-style optional `replyToMessageId` /
 /// `replyToPreview` parameters. Same pattern as the `JByteArray.is_null()` check in `prepareAndSendFile`, but for `JString`.
 pub(crate) fn optional_jstring<'local>(env: &mut JNIEnv<'local>, s: &JString<'local>) -> Option<String> {
@@ -275,19 +297,20 @@ pub(crate) fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &
         }
     };
     for (i, text) in texts.iter().enumerate() {
-        // One bad element keeps its "" default: returning null here threw
-        // away every event of the poll turn, which are already drained.
+        // One bad element fails the whole array: `pollNetwork` then keeps the
+        // turn for the next one. An element left "" lost its event for good.
         let jstr = match env.new_string(text) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("JNI new_string failed (index {i}): {e}");
                 let _ = env.exception_clear();
-                continue;
+                return std::ptr::null_mut();
             }
         };
         if let Err(e) = env.set_object_array_element(&arr, i as i32, &jstr) {
             log::error!("JNI set_object_array_element failed (index {i}): {e}");
             let _ = env.exception_clear();
+            return std::ptr::null_mut();
         }
         // A burst of events must not fill the local reference table.
         let _ = env.delete_local_ref(jstr);

@@ -23,7 +23,9 @@ finish-args:
   - --socket=fallback-x11
     # GPU (VA-API video encode/decode) and camera for video calls. Flatpak has no
     # camera-only device type (1.18.3 rejects `v4l2`: "valid types are dri, all, kvm,
-    # shm, input, usb"), so the camera needs `--device=all` (owner decision).
+    # shm, input, usb"), so the camera needs `--device=all` (owner decision). Narrows
+    # to `--device=dri` only once calls open the camera through the camera portal
+    # (`pipewiresrc`) instead of `v4l2src`.
   - --device=all
     # Voice message recording and playback, and call audio.
   - --socket=pulseaudio
@@ -64,7 +66,9 @@ modules:
       build-args:
         - --share=network
     build-commands:
-      - cargo build --release --manifest-path Linux/Cargo.toml
+        # --locked: a manifest edit not mirrored in Cargo.lock fails the build
+        # instead of pulling the newest matching crates into a release.
+      - cargo build --release --locked --manifest-path Linux/Cargo.toml
       - install -Dm755 Linux/target/release/typeon /app/bin/typeon
       - install -Dm644 Linux/data/com.p2p.messenger.Typeon.desktop /app/share/applications/com.p2p.messenger.Typeon.desktop
       - install -Dm644 Linux/data/com.p2p.messenger.Typeon.metainfo.xml /app/share/metainfo/com.p2p.messenger.Typeon.metainfo.xml

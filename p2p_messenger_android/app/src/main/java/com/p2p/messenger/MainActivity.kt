@@ -228,19 +228,22 @@ class MainActivity : AppCompatActivity() {
         intent.data = null
 
         val code = data.toString().take(300)
-        if (!P2PLib.hasStoredIdentity()) {
-            // No account, no server. The link is not copied to the clipboard: any web page could
-            // overwrite what the user copied.
-            Toast.makeText(this, R.string.msg_join_link_needs_identity, Toast.LENGTH_LONG).show()
-            return
-        }
 
         // Whether THIS server would become the history server is a JNI and SQLite read. It runs off the
         // main thread (see SettingsFragment `refreshServers`). The history warning is added only for the
         // server that would become the history server.
         lifecycleScope.launch {
-            val historyServer = withContext(Dispatchers.IO) { P2PLib.nextServerStoresHistory(code) }
+            // null = no account. Both calls take the core mutex: off the main thread.
+            val historyServer = withContext(Dispatchers.IO) {
+                if (P2PLib.hasStoredIdentity()) P2PLib.nextServerStoresHistory(code) else null
+            }
             if (isFinishing || isDestroyed) return@launch
+            if (historyServer == null) {
+                // No account, no server. The link is not copied to the clipboard: any web page could
+                // overwrite what the user copied.
+                Toast.makeText(this@MainActivity, R.string.msg_join_link_needs_identity, Toast.LENGTH_LONG).show()
+                return@launch
+            }
             AlertDialog.Builder(this@MainActivity)
                 .setTitle(R.string.dlg_add_server_title)
                 .setMessage(addServerQuestion(code, historyServer))

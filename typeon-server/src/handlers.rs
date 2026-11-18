@@ -156,6 +156,15 @@ impl ServerCore {
                 self.stats.rejected += 1;
                 return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
             }
+            // One holder of an unlimited code cannot take every place: the code gets three quarters of them.
+            let allowance = (self.config.max_enrollments as i64 * 3 / 4).max(1);
+            if !prev.as_ref().map_or(false, |p| p.state == EnrollmentState::Active)
+                && self.store.count_active_enrollments_by_invite(hash.as_slice(), now - ENROLLMENT_IDLE_MS) >= allowance
+            {
+                warn!("Public enrollment code used up its share of device places, registration rejected");
+                self.stats.rejected += 1;
+                return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+            }
         }
         // A PeerId that enrolls again takes no new place.
         if !prev.as_ref().map_or(false, |p| p.state == EnrollmentState::Active)
@@ -378,17 +387,38 @@ impl ServerCore {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 // See `total_budget_exceeded`. The per-record quota alone does not protect the device's disk.
-                if self.total_budget_exceeded(store::mail_row_bytes(&mailbox, &sealed)) {
+                let row_bytes = store::mail_row_bytes(&mailbox, &sealed);
+                if self.total_budget_exceeded(row_bytes, true) {
                     warn!("Total disk budget full, delivery rejected");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
-                // Per depositor (see `depositor_item_count`). A box full of someone else's deposits must not refuse ours.
-                if self.store.depositor_item_count(&mailbox, &e.enrollment_id) >= limits.max_items_per_mailbox as i64 {
+                // Per depositor (see `depositor_usage`). A box full of someone else's deposits must not refuse ours. The
+                // byte share keeps one unreachable reader from taking the depositor's whole quota, which would stop its
+                // mail to every other box too.
+                let (rows, bytes) = self.store.depositor_usage(&mailbox, &e.enrollment_id);
+                if rows >= limits.max_items_per_mailbox as i64
+                    || bytes.max(0) as u64 + row_bytes as u64 > limits.max_mail_bytes / MAIL_BOX_SHARE
+                {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
-                match self.store.deposit(&mailbox, &sealed, &e.enrollment_id, now, limits.mailbox_ttl_ms as i64) {
-                    Ok(seq) => {
-                        self.note_total_written(store::mail_row_bytes(&mailbox, &sealed));
+                // What one depositor pushes into one box per window, acknowledged or not. Acks free the quota within
+                // seconds, so without this a sender could make a reader download junk without end.
+                let mono = mono_ms();
+                let win = self.deposit_window.entry((peer, mailbox.clone())).or_insert((mono, 0));
+                if mono.saturating_sub(win.0) > DEPOSIT_WINDOW_MS {
+                    *win = (mono, 0);
+                }
+                if win.1 + row_bytes as u64 > DEPOSIT_BYTES_PER_BOX_WINDOW {
+                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+                }
+                match self.store.deposit_written(&mailbox, &sealed, &e.enrollment_id, now, limits.mailbox_ttl_ms as i64) {
+                    // A repeat wrote nothing: no charge, no push.
+                    Ok((seq, false)) => ServerResponse::Deposited { seq },
+                    Ok((seq, true)) => {
+                        if let Some(win) = self.deposit_window.get_mut(&(peer, mailbox.clone())) {
+                            win.1 += row_bytes as u64;
+                        }
+                        self.note_total_written(row_bytes);
                         self.stats.deposits += 1;
                         let item = MailItem { mailbox_id: mailbox.clone(), seq, deposited_at_ms: now as u64, sealed };
                         self.notify_owner_of(&mailbox, peer, item);
@@ -415,15 +445,20 @@ impl ServerCore {
             }
 
             ServerRequest::Ack { acks } => {
-                let mut deleted = 0;
-                for (mailbox, seq) in acks {
-                    deleted += self.store.ack(&mailbox, seq, &e.enrollment_id).unwrap_or(0);
+                match self.store.ack_many(&acks, &e.enrollment_id) {
+                    Ok(deleted) => {
+                        if deleted > 0 {
+                            // Quota must not only grow. Delivered bytes are charged back to the depositor's account.
+                            self.mail_recount_due = true;
+                        }
+                        ServerResponse::Ok
+                    }
+                    // `Ok` would make the client keep its cursor and never ack these items again.
+                    Err(msg) => {
+                        error!("Ack could not be written: {msg}");
+                        ServerResponse::Err(ServerErrorCode::Internal)
+                    }
                 }
-                if deleted > 0 {
-                    // Quota must not only grow. Delivered bytes are charged back to the depositor's account.
-                    self.mail_recount_due = true;
-                }
-                ServerResponse::Ok
             }
 
             // See `ServerRequest::Cancel`. The sender withdraws its own undelivered packet. The ownership check is in
@@ -447,7 +482,7 @@ impl ServerCore {
                 // See `total_budget_exceeded`. Unlike mail, the archive has no TTL: once written it stays until an
                 // `ArchivePurge` arrives. It is the largest contributor to the total ceiling.
                 let incoming: usize = records.iter().map(store::archive_row_bytes).sum();
-                if self.total_budget_exceeded(incoming) {
+                if self.total_budget_exceeded(incoming, false) {
                     warn!("Total disk budget full, archive write rejected");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
@@ -548,7 +583,7 @@ impl ServerCore {
                 if self.notified.contains_key(&peer) {
                     continue;  // `resend_notifies` repeats it
                 }
-                self.notified.insert(peer, mono_ms());
+                self.notified.insert(peer, (mono_ms(), 0));
             }
             let req = if inline { ServerRequest::Push { item: item.clone() } } else { ServerRequest::Notify };
             self.swarm.behaviour_mut().server_rpc.send_request(&peer, req);
@@ -556,19 +591,19 @@ impl ServerCore {
     }
 
     /// Repeats the `Notify` of every connected reader that has not fetched since its last one (see
-    /// `NOTIFY_RESEND_MS`). Called every tick (5 s).
+    /// `NOTIFY_RESEND_MS`, doubling after each unanswered one up to 16 times that). Called every tick (5 s).
     pub(super) fn resend_notifies(&mut self) {
         let now = mono_ms();
-        let due: Vec<PeerId> = self.notified.iter()
-            .filter(|(_, sent)| now.saturating_sub(**sent) >= NOTIFY_RESEND_MS)
-            .map(|(peer, _)| *peer)
+        let due: Vec<(PeerId, u32)> = self.notified.iter()
+            .filter(|(_, (sent, tries))| now.saturating_sub(*sent) >= NOTIFY_RESEND_MS << (*tries).min(4))
+            .map(|(peer, (_, tries))| (*peer, *tries))
             .collect();
-        for peer in due {
+        for (peer, tries) in due {
             if self.active(peer).is_none() || !self.swarm.is_connected(&peer) {
                 self.notified.remove(&peer);
                 continue;
             }
-            self.notified.insert(peer, now);
+            self.notified.insert(peer, (now, tries.saturating_add(1)));
             debug!("Notify yinelendi (Fetch gelmedi): {peer}");
             self.swarm.behaviour_mut().server_rpc.send_request(&peer, ServerRequest::Notify);
         }

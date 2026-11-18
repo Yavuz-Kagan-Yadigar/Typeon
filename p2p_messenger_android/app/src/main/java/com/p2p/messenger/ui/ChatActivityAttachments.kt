@@ -212,6 +212,7 @@ internal fun ChatActivity.onAttachmentLongClicked(item: SimpleChatAdapter.Item) 
         if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
         if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
         if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
+        if (item.isMine && item.status != SimpleChatAdapter.Status.SENT) add(getString(R.string.action_resend_message))
         if (item.isMine) add(getString(R.string.action_delete_message))
         add(getString(R.string.action_select))
     }
@@ -220,6 +221,7 @@ internal fun ChatActivity.onAttachmentLongClicked(item: SimpleChatAdapter.Item) 
             when (options[which]) {
                 getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                 getString(R.string.action_select) -> selection.start(item)
+                getString(R.string.action_resend_message) -> resendNow(item)
                 getString(R.string.action_open_with) -> openAttachmentWithChooser(attachment)
                 getString(R.string.action_save_to_downloads) -> saveAttachmentToDownloads(attachment)
                 getString(R.string.action_save_as_jxl) -> saveAttachmentToDownloads(attachment, original = true)
@@ -381,6 +383,7 @@ internal fun ChatActivity.openAttachmentFile(path: String) {
  */
 internal fun ChatActivity.onPhotoCaptured(jpeg: ByteArray, caption: String = "", hiRes: Boolean = false, quote: com.p2p.messenger.util.Quote.Ref? = null) {
     val fileName = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
+    val targetPeer = peerDeviceFingerprint
     lifecycleScope.launch(Dispatchers.IO) {
         val tempFile = File(File(cacheDir, "outgoing").apply { mkdirs() }, UUID.randomUUID().toString())
         var sent = tempFile
@@ -394,10 +397,11 @@ internal fun ChatActivity.onPhotoCaptured(jpeg: ByteArray, caption: String = "",
             val prepared = OutgoingMedia.prepare(tempFile, fileName, "image/jpeg", hiRes) { OutgoingMedia.askSendUnscrubbed(this@onPhotoCaptured) }
             sent = prepared.file
             val result = P2PLib.prepareAndSendFile(
-                peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
+                targetPeer, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                 caption, quote?.id ?: "", quote?.preview ?: ""
             )
             withContext(Dispatchers.Main) {
+                if (peerDeviceFingerprint != targetPeer) return@withContext
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this@onPhotoCaptured, com.p2p.messenger.util.coreErrorText(this@onPhotoCaptured, result), Toast.LENGTH_SHORT).show()
                 } else {
@@ -449,6 +453,7 @@ internal fun ChatActivity.sendPickedFiles(files: List<Pair<Uri, Boolean>>, capti
  * Then it is encrypted and offered with `prepareAndSendFile`.
  */
 internal fun ChatActivity.onFilePicked(uri: Uri, caption: String = "", hiRes: Boolean = false, name: String? = null, mime: String? = null, quote: com.p2p.messenger.util.Quote.Ref? = null): kotlinx.coroutines.Job {
+    val targetPeer = peerDeviceFingerprint
     return lifecycleScope.launch(Dispatchers.IO) {
         // Provider queries are IPC to another app: not on the main thread.
         val fileName = name ?: queryDisplayName(uri) ?: "file"
@@ -494,10 +499,11 @@ internal fun ChatActivity.onFilePicked(uri: Uri, caption: String = "", hiRes: Bo
             val prepared = OutgoingMedia.prepare(tempFile, fileName, mimeType, hiRes) { OutgoingMedia.askSendUnscrubbed(this@onFilePicked) }
             sent = prepared.file
             val result = P2PLib.prepareAndSendFile(
-                peerDeviceFingerprint, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
+                targetPeer, prepared.file.absolutePath, prepared.fileName, prepared.mimeType, previewJpeg, -1,
                 caption, quote?.id ?: "", quote?.preview ?: ""
             )
             withContext(Dispatchers.Main) {
+                if (peerDeviceFingerprint != targetPeer) return@withContext
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this@onFilePicked, com.p2p.messenger.util.coreErrorText(this@onFilePicked, result), Toast.LENGTH_SHORT).show()
                 } else {

@@ -25,6 +25,11 @@ pub fn active() -> bool {
     CURRENT.with(|c| c.borrow().is_some())
 }
 
+/// Whether `window` is the call window (kept visible over the idle lock).
+pub fn is_call_window(window: &gtk::Window) -> bool {
+    CURRENT.with(|c| c.borrow().as_ref().is_some_and(|ui| ui.window.upcast_ref::<gtk::Window>() == window))
+}
+
 struct Tile {
     root: gtk::Overlay,
     picture: gtk::Picture,
@@ -80,7 +85,14 @@ pub fn place(app: &Rc<App>, conversation: &Conversation, video: bool) {
         })
         .await
         .unwrap_or_else(|_| Err("call failed".into()));
-        let Some(ui) = weak.upgrade() else { return };
+        // Hung up while the call was being created: the hang-up's `end_call`
+        // may have run first and ended nothing, so end what was just made.
+        let Some(ui) = weak.upgrade().filter(|ui| !ui.closing.get()) else {
+            if result.is_ok() {
+                let _ = gio::spawn_blocking(core::end_call).await;
+            }
+            return;
+        };
         ui.starting.set(false);
         if let Err(e) = result {
             ui.app.toast(&e);
@@ -101,10 +113,10 @@ pub fn on_event(app: &Rc<App>, event: &Event) {
     ui.state.replace("incoming".into());
     ui.seen.set(true);
     let name = event.string("name");
-    ui.title.set_text(&name);
+    ui.title.set_text(if app.locked.get() { "Typeon is locked" } else { name.as_str() });
     ui.status.set_text(if video { "Incoming video call" } else { "Incoming voice call" });
     // Same setting as message notifications: no caller name on a lock screen.
-    let hide = app.prefs.borrow().hide_notification_content;
+    let hide = app.prefs.borrow().hide_notification_content || app.locked.get();
     crate::app::post_notification(
         &app.application,
         "call",
@@ -292,14 +304,23 @@ impl CallUi {
         });
 
         let weak = Rc::downgrade(&ui);
+        // One query at a time: a poll round holding the core lock must not
+        // stack queries that then render out of order.
+        let in_flight = Rc::new(Cell::new(false));
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let Some(ui) = weak.upgrade() else { return glib::ControlFlow::Break };
             if ui.closing.get() {
                 return glib::ControlFlow::Break;
             }
+            if in_flight.replace(true) {
+                return glib::ControlFlow::Continue;
+            }
             let weak = Rc::downgrade(&ui);
+            let in_flight = in_flight.clone();
             glib::spawn_future_local(async move {
-                let Ok(state) = gio::spawn_blocking(core::call_state).await else { return };
+                let state = gio::spawn_blocking(core::call_state).await;
+                in_flight.set(false);
+                let Ok(state) = state else { return };
                 if let Some(ui) = weak.upgrade() {
                     ui.render(&state);
                 }
@@ -328,7 +349,12 @@ impl CallUi {
         if new == "idle" {
             return;
         }
-        if !s.name.is_empty() {
+        // Behind the idle lock: no caller name, and answering needs the
+        // passphrase first (declining does not).
+        let locked = self.app.locked.get();
+        if locked {
+            self.title.set_text("Typeon is locked");
+        } else if !s.name.is_empty() {
             self.title.set_text(&s.name);
         }
         match new {
@@ -356,7 +382,10 @@ impl CallUi {
         }
         let incoming = new == "incoming";
         let active = new == "active";
-        self.accept.set_visible(incoming);
+        if incoming && locked {
+            self.status.set_text("Incoming call · unlock Typeon to answer");
+        }
+        self.accept.set_visible(incoming && !locked);
         self.hangup.set_tooltip_text(Some(if incoming { "Decline" } else { "Hang up" }));
         self.audio.set_visible(active);
         self.camera.set_visible(active && self.video.get());

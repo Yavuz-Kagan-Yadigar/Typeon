@@ -10,7 +10,8 @@ import com.p2p.messenger.R
  * load remote content), so ask once before handing it over.
  */
 fun confirmExternalOpen(context: Context, mime: String?, go: () -> Unit) {
-    if (mime != null && (mime.startsWith("image/") || mime.startsWith("video/"))) {
+    // SVG is an image type but can load remote URLs ("Open with" sends it to a browser).
+    if (mime != null && ((mime.startsWith("image/") && !mime.contains("svg")) || mime.startsWith("video/"))) {
         go()
         return
     }

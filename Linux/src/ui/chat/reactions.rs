@@ -8,6 +8,7 @@ impl ChatView {
         let Some(bubble) = bubbles.get(id) else { return };
         bubble.reactions.set_label(summary);
         bubble.reactions.set_visible(!summary.is_empty());
+        bubble.entry.borrow_mut().reactions = summary.to_string();
     }
 
     pub(super) fn pick_reaction(self: &Rc<Self>, anchor: &gtk::Box, entry: &Entry) {
@@ -47,7 +48,16 @@ impl ChatView {
 
     /// Who reacted with what; "Remove my reaction" when one is mine.
     pub(super) fn show_reactions(self: &Rc<Self>, entry: &Entry) {
-        let rows = core::list_reactions(&entry.id);
+        // Takes the core lock: read off the GTK thread.
+        let (view, id) = (self.clone(), entry.id.clone());
+        let message_id = id.clone();
+        crate::app::run_in_background(
+            move || core::list_reactions(&message_id),
+            move |rows| view.show_reaction_rows(&id, rows),
+        );
+    }
+
+    fn show_reaction_rows(self: &Rc<Self>, id: &str, rows: Vec<core::ReactionEntry>) {
         let body = rows
             .iter()
             .map(|r| {
@@ -65,7 +75,7 @@ impl ChatView {
             dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         }
         dialog.set_close_response("close");
-        let (view, id) = (self.clone(), entry.id.clone());
+        let (view, id) = (self.clone(), id.to_string());
         dialog.connect_response(Some("remove"), move |_, _| view.send_reaction(&id, ""));
         dialog.present();
     }

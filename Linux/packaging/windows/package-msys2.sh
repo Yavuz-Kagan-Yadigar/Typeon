@@ -1,7 +1,8 @@
 #!/bin/sh
 # Portable Windows package built NATIVELY under MSYS2 CLANG64 (the Linux
 # cross-build uses package.sh). Run from an "MSYS2 CLANG64" shell after
-#   cargo build --release      (and optionally  cargo build  for typeon-debug.exe)
+#   cargo build --release      (and optionally  cargo build --release --features console
+#   --target-dir target/console  for typeon-debug.exe)
 # Output: Linux/target/windows-package/Typeon and Linux/target/typeon-windows-<ver>.zip
 # Layout follows the MSYS2 prefix (bin/, lib/, share/) so GLib, GTK and
 # GStreamer find their data relative to their DLLs with no env variables.
@@ -17,11 +18,10 @@ OUT="$ROOT/target/windows-package/Typeon"
 rm -rf "$OUT"
 mkdir -p "$OUT/bin" "$OUT/lib/gstreamer-1.0" "$OUT/share/glib-2.0/schemas" "$OUT/share/icons"
 cp "$ROOT/target/release/typeon.exe" "$OUT/bin/"
-# Debug build with a console window, for RUST_LOG=info diagnostics on Windows.
-if [ -f "$ROOT/target/debug/typeon.exe" ]; then
-    cp "$ROOT/target/debug/typeon.exe" "$OUT/bin/typeon-debug.exe"
-    # Debug assertions + console stay; the 800 MB of DWARF does not.
-    llvm-strip --strip-debug "$OUT/bin/typeon-debug.exe"
+# Release build with a console window (feature `console`), for RUST_LOG=info
+# diagnostics on Windows. Never a debug build: releases ship release code only.
+if [ -f "$ROOT/target/console/release/typeon.exe" ]; then
+    cp "$ROOT/target/console/release/typeon.exe" "$OUT/bin/typeon-debug.exe"
 fi
 cp "$SYS/bin/ffmpeg.exe" "$OUT/bin/"   # video metadata strip (util.rs)
 
@@ -60,6 +60,9 @@ while [ -n "$todo" ]; do
 done
 # gspawn helpers are started by name, never imported.
 cp "$SYS"/bin/gspawn-win64-*.exe "$OUT/bin/" 2>/dev/null || true
+# GLib autolaunches gdbus.exe for the session bus; without it GApplication
+# silently loses single-instance mode.
+cp "$SYS/bin/gdbus.exe" "$OUT/bin/"
 
 cp "$SYS"/share/glib-2.0/schemas/*.xml "$OUT/share/glib-2.0/schemas/"
 glib-compile-schemas "$OUT/share/glib-2.0/schemas"

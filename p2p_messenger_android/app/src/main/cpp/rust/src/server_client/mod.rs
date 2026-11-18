@@ -13,9 +13,9 @@
 //!
 //! ## Black-hole rule
 //!
-//! A server saying "stored" does not stop gossip for good. A faulty or hostile server
-//! that acknowledges deposits and delivers nothing would otherwise swallow messages
-//! indefinitely. See `should_shadow_on_gossipsub`.
+//! A server saying "stored" is not delivery. Only the peer's `Ack` ends the retries, so a
+//! faulty or hostile server that acknowledges deposits and delivers nothing cannot
+//! swallow messages: the direct path keeps trying.
 
 use std::collections::{HashMap, HashSet};
 
@@ -84,9 +84,10 @@ pub(crate) const SERVER_UNKNOWN_MAILBOX_MAX_TTL_MS: u64 = 60 * 60 * 1000;
 pub(crate) const SERVER_DEPOSIT_BACKOFF_MS: u64 = 5 * 60 * 1000;
 /// Each further refused or unanswered deposit doubles the backoff, up to this.
 pub(crate) const SERVER_DEPOSIT_BACKOFF_MAX_MS: u64 = 30 * 60 * 1000;
-/// Pages requested from one archive bucket at most (64 records each, see
-/// `ServerInflight::ArchiveFetch`). A server that never ends a bucket stops here.
-const ARCHIVE_FETCH_MAX_PAGES: u32 = 1024;
+/// Pages requested for one conversation at most, over all its buckets (64 records each, see
+/// `ServerInflight::ArchiveFetch`). A server that never ends a bucket, or ends each bucket just
+/// before the cap, stops here.
+const ARCHIVE_FETCH_MAX_PAGES: u32 = 4096;
 
 /// IDs the server refused (`Registered.refused`) are offered again after this. A reader
 /// cap or a full mailbox can clear.
@@ -102,12 +103,23 @@ pub(crate) const SERVER_HOLD_GRACE_MS: u64 = 5 * 60 * 1000;
 /// Fetch that retries a held item. A failed packet is remembered for 30 s by
 /// `process_incoming_envelope`, and a retry inside that window would count as done.
 pub(crate) const SERVER_HOLD_REFETCH_MS: u64 = 45_000;
+/// Items passed over in a row in one mailbox before its later failing items are passed at once (see
+/// `ServerRuntime.hold_strikes`). Junk deposits then cost one grace period each only twice.
+pub(crate) const SERVER_HOLD_MAX_STRIKES: u32 = 2;
 
 /// Maximum records in one archive upload batch.
 pub(crate) const SERVER_ARCHIVE_BATCH: usize = 50;
 /// Upload queue cap (RAM and table). When exceeded, the oldest entries are dropped. The
 /// local archive keeps them; only their server copy is lost.
 pub(crate) const MAX_SERVER_ARCHIVE_QUEUE: usize = 10_000;
+
+/// A server that answers `Internal` to this many blob backoff rounds in a row (about 3 h) loses the head upload. The
+/// direct peer path still serves the file.
+pub(crate) const MAX_BLOB_INTERNAL_FAILURES: u32 = 12;
+
+/// An upload stays on its server while that server routes and is ready again within this time. Moving it restarts it
+/// from chunk 0, so a short Tor drop must not move it.
+pub(crate) const BLOB_SERVER_MOVE_MS: u64 = 30 * 60 * 1000;
 
 /// Start of the `last_error` text shown when the server's mailbox cap is reached.
 const TOO_MANY_MAILBOXES: &str = "Too many mailboxes for this server";
@@ -168,10 +180,8 @@ pub(crate) const BLOB_RTT_FLOOR_MS: u64 = 750;
 pub(crate) struct ServerRecord {
     /// The server's `PeerId`. Primary key.
     pub server_id: String,
-    /// All known addresses of the server, comma separated: onion, plus LAN or public IP if any.
-    /// All are dialed at once and libp2p uses the first to connect. When only one address was
-    /// stored and it was an onion one, two devices on the same local network still sent all traffic
-    /// over Tor (measured: a 10 MB upload at about 12 KB/s).
+    /// All known addresses of the server, comma separated. Onion only (`server_proto::public_server_addrs`);
+    /// all are dialed at once and libp2p uses the first to connect.
     pub address: String,
     pub name: String,
     /// A fresh Ed25519 secret key (32 bytes), only for this server.
@@ -251,6 +261,24 @@ pub(crate) struct ServerRuntime {
     /// Start of the current `Push` window (ms), and the pushes counted in it.
     pub push_window_at: u64,
     pub push_count: u32,
+    /// After a blob request answered `Internal`: no chunk or finish before this time (ms). Kept apart from the deposit
+    /// backoff, so a broken blob store does not stop message deposits.
+    pub blob_backoff_until: u64,
+    /// `Internal` answers to blob requests in a row. At `MAX_BLOB_INTERNAL_FAILURES` the head upload is dropped.
+    pub blob_failures: u32,
+    /// Since when this server is not connected and enrolled (ms, 0 = ready). See `BLOB_SERVER_MOVE_MS`.
+    pub unready_since: u64,
+    /// Mailbox -> items passed over in a row after a hold. At `SERVER_HOLD_MAX_STRIKES` a failing item there is passed
+    /// at once. A hold that clears (the item opened and was processed) resets it.
+    pub hold_strikes: HashMap<String, u32>,
+    /// A batch held an item that did not open while it delivered other items of the same mailbox (a rotation notice
+    /// may bring its key): fetch again once this turn's items are processed (`commit_server_fetches`).
+    pub refetch_now: bool,
+    /// `Registered.proof_needed` rounds in a row. Bounded (see the `Registered` arm), so a server that keeps naming
+    /// ids cannot make us sign proofs at round-trip speed.
+    pub proof_rounds: u32,
+    /// The last `Fetch` answer held no item. In radio saver mode a `Notify` then counts once per radio window.
+    pub last_fetch_empty: bool,
 }
 
 /// What opens the envelopes of one of this device's mailboxes.
@@ -312,7 +340,7 @@ pub(crate) enum ServerInflight {
         rest: Vec<String>,
         window: Option<(u64, u64)>,
         next: Vec<(String, bool)>,
-        /// The cursor this page was requested from, and the pages of this bucket so far. The next page is
+        /// The cursor this page was requested from, and the pages of this conversation so far. The next page is
         /// requested only if the server moved strictly past it, and never past `ARCHIVE_FETCH_MAX_PAGES`.
         cursor: Option<(u64, String)>,
         pages: u32,

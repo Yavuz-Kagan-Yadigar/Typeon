@@ -440,12 +440,13 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             val now = byId[old.messageId] ?: continue
             val sameAttachment = old.attachment?.status == now.attachment?.status
             if (old.text == now.text && old.isEdited == now.isEdited && old.isDeleted == now.isDeleted &&
-                old.reactions == now.reactions && sameAttachment && (!old.isMine || old.status == now.status)) continue
+                old.reactions == now.reactions && sameAttachment && (!old.isMine || now.attachment != null || old.status == now.status)) continue
             old.text = now.text
             old.isEdited = now.isEdited
             old.isDeleted = now.isDeleted
             old.reactions = now.reactions
-            if (old.isMine) old.status = now.status
+            // Attachment reload rows carry no message status: keep the live one (an ERROR mark).
+            if (old.isMine && now.attachment == null) old.status = now.status
             if (!sameAttachment) {
                 // The reload may skip the preview of a row that is on screen.
                 now.attachment?.let { if (it.previewJpeg == null) it.previewJpeg = old.attachment?.previewJpeg }

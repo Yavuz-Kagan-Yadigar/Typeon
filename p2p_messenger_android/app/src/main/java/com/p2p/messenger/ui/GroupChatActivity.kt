@@ -94,7 +94,6 @@ class GroupChatActivity : AppCompatActivity() {
         /** See the `resolveContactByIdentity` docs. */
         internal const val CONTACT_CACHE_TTL_MS = 5000L
         /** Same constants as ChatActivity (infinite scroll). */
-        private const val OLDER_HISTORY_REPLY_WAIT_MS = 15_000L
         private const val LOAD_OLDER_HISTORY_THRESHOLD = 3
         /** Same constants as ChatActivity (group attachments). */
         internal const val MAX_ATTACHMENT_SIZE = 4L * 1024 * 1024 * 1024
@@ -167,8 +166,6 @@ class GroupChatActivity : AppCompatActivity() {
     internal var isLoadingOlderHistory = false
     internal var noMoreOlderHistory = false
     internal lateinit var fetchHistoryButton: FetchHistoryButton
-    private var olderHistoryRequest = 0
-    private var olderHistoryEmptyReply = false
     /** Set in onResume: the chat is really in front of the user, not just
      *  resumed for a moment underneath the app lock screen. */
     private var resumedUnlocked = false
@@ -648,6 +645,7 @@ class GroupChatActivity : AppCompatActivity() {
         q.copy(sender = target?.senderIdentityId ?: if (target?.isMine == true) ownIdentityId else null)
     }
 
+    internal val avatarBytesCache = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
     internal data class ContactLookup(val displayName: String, val avatarHex: String?)
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {

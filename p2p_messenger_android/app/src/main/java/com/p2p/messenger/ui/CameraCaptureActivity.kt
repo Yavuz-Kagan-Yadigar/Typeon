@@ -134,6 +134,10 @@ class CameraCaptureActivity : AppCompatActivity() {
         val shutter = findViewById<ImageButton>(R.id.btnShutter)
         if (!shutter.isEnabled) return
         shutter.isEnabled = false
+        // Flip would unbind the use case mid-capture and change the mirror flag.
+        val flip = findViewById<ImageButton>(R.id.btnFlipCamera)
+        flip.isEnabled = false
+        val lens = lensFacing
         capture.takePicture(
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageCapturedCallback() {
@@ -144,7 +148,7 @@ class CameraCaptureActivity : AppCompatActivity() {
                         val bitmap = try {
                             withContext(Dispatchers.Default) {
                                 try {
-                                    decodeRotated(image)
+                                    decodeRotated(image, lens)
                                 } catch (e: Exception) {
                                     null
                                 } catch (e: OutOfMemoryError) {
@@ -157,6 +161,7 @@ class CameraCaptureActivity : AppCompatActivity() {
                         }
                         if (bitmap == null) {
                             shutter.isEnabled = true
+                            flip.isEnabled = true
                             Toast.makeText(
                                 this@CameraCaptureActivity,
                                 getString(R.string.error_camera_start_failed, ""),
@@ -170,6 +175,7 @@ class CameraCaptureActivity : AppCompatActivity() {
 
                 override fun onError(exception: ImageCaptureException) {
                     shutter.isEnabled = true
+                    flip.isEnabled = true
                     Toast.makeText(
                         this@CameraCaptureActivity,
                         getString(R.string.error_camera_start_failed, exception.message ?: ""),
@@ -184,16 +190,15 @@ class CameraCaptureActivity : AppCompatActivity() {
      * The `ImageProxy` JPEG bytes are in the physical sensor orientation. If `imageInfo.rotationDegrees` is not applied, the photo comes out sideways.
      * At the same time, the full sensor resolution is not loaded into memory. It is decoded with `inSampleSize` sampling (the same pattern as ImagePreview).
      */
-    private fun decodeRotated(image: ImageProxy): Bitmap? {
+    private fun decodeRotated(image: ImageProxy, lens: Int): Bitmap? {
         val buffer = image.planes[0].buffer
         val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
 
         val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOptions)
         var sampleSize = 1
-        while (boundsOptions.outWidth / (sampleSize * 2) >= CAPTURE_MAX_DIMENSION &&
-            boundsOptions.outHeight / (sampleSize * 2) >= CAPTURE_MAX_DIMENSION
-        ) {
+        // Halve while the LONG edge stays at the target: a full-sensor decode plus its rotated copy is ~96 MB.
+        while (maxOf(boundsOptions.outWidth, boundsOptions.outHeight) / (sampleSize * 2) >= CAPTURE_MAX_DIMENSION) {
             sampleSize *= 2
         }
         val decoded = BitmapFactory.decodeByteArray(
@@ -202,7 +207,7 @@ class CameraCaptureActivity : AppCompatActivity() {
 
         val degrees = image.imageInfo.rotationDegrees
         // A front camera image comes mirrored. It is flipped horizontally here, so the frame the user sees in the preview matches the captured one.
-        val mirrored = lensFacing == CameraSelector.LENS_FACING_FRONT
+        val mirrored = lens == CameraSelector.LENS_FACING_FRONT
         if (degrees == 0 && !mirrored) return decoded
         // Upright first, then mirror: mirrored first, a 90/270 degree sensor
         // (every phone held upright) gave the selfie upside down.

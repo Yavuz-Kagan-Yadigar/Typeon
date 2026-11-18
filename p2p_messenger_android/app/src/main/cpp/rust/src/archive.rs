@@ -56,15 +56,24 @@ impl P2PCore {
         let content = MessageContent::HistorySyncRequest {
             limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: Some(group_id.to_string()), after_timestamp: Some(after),
         };
-        let mut sent_to_any = false;
-        for member_identity_id in group.other_members(&own_identity_id) {
+        // Not every member: each answers up to 512 KiB and pages on its own, and all but the first answer bring almost nothing new.
+        // The founder and the longest-standing members hold the oldest rows; unreachable ones are passed over.
+        const ASKED_PER_PRESS: usize = 3;
+        let mut members: Vec<&crate::group::GroupMember> = group.members.iter().filter(|m| m.identity_id != own_identity_id).collect();
+        members.sort_by_key(|m| (m.identity_id != group.founder_identity_id, m.added_at));
+        let members: Vec<String> = members.into_iter().map(|m| m.identity_id.clone()).collect();
+        let mut asked = 0usize;
+        for member_identity_id in members {
+            if asked >= ASKED_PER_PRESS {
+                break;
+            }
             if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
                 if self.send_message_content(peer_fp, &content, None).is_ok() {
-                    sent_to_any = true;
+                    asked += 1;
                 }
             }
         }
-        if sent_to_any {
+        if asked > 0 {
             Ok(())
         } else {
             Err("No reachable group member".to_string())
@@ -421,7 +430,7 @@ impl P2PCore {
         let revoked_at = self.contacts.values()
             .filter(|c| c.trusted_identity_id == author_identity_id)
             .find_map(|c| c.revoked_at(device_fp))
-            .or_else(|| self.non_contact_revoke(device_fp).filter(|(id, _)| id == author_identity_id).and_then(|(_, t)| t));
+            .or_else(|| self.non_contact_revoke(author_identity_id, device_fp).flatten());
         if revoked_at.map_or(false, |r| sent_at_ms == 0 || sent_at_ms >= r) {
             return false;
         }
@@ -777,11 +786,16 @@ impl P2PCore {
                 }
             }
             MessageContent::Delete { target_message_id, group_id, author_proof } => {
-                self.send_ack(peer_fp, packet_message_id);
                 // Same ownership rule as Edit (see `message_owned_by_sender`)
                 // — otherwise any paired contact could delete an unrelated
                 // message/attachment just by guessing/knowing its id.
                 let owns_message = self.message_owned_by_sender(group_id.as_deref(), &chat_key, sender_identity_id, &target_message_id);
+                // Acked once applied, as an Edit is: without the history key the text cannot be wiped here nor the
+                // server copy tombstoned (`requeue_archive_row`), and an early Ack left both for good.
+                if owns_message && self.history_key.is_none() {
+                    self.ask_resend(peer_fp, packet_message_id);
+                    return serde_json::json!({"type": "noop"});
+                }
                 // `direction = 'received'`/`sender_identity_id` match: this
                 // sender must be the one who originally SENT us the file —
                 // otherwise they could delete a file WE sent THEM (which
@@ -813,6 +827,7 @@ impl P2PCore {
                         self.adopt_group_author_proof(gid, &target_message_id, author_proof.as_deref());
                     }
                 }
+                self.send_ack(peer_fp, packet_message_id);
                 match (&group_id, owns_message || owns_file) {
                     (Some(gid), true) => serde_json::json!({"type": "group_delete", "group_id": gid, "message_id": target_message_id}),
                     (None, true) => serde_json::json!({"type": "delete", "peer": chat_key, "message_id": target_message_id}),
@@ -1024,6 +1039,37 @@ impl P2PCore {
     /// When a history-sync row is archived FRESH (this device had no copy of it; see the same pattern at the `apply_delete_to_archive` call sites), the responder's
     /// `is_edited` flag is also set here if it is set on the responder side. Unlike `apply_edit_to_archive`, it does NOT re-encrypt the text. The fresh archive write
     /// already stored `SyncedMessage.text` (the responder's CURRENT, edited content). The flag is only set here, so that it does not go missing.
+    /// The stored text, deleted and edited marks of a group row (decrypted). None: no row, no key, or it does not open.
+    pub(crate) fn group_row_text(&self, group_id: &str, message_id: &str) -> Option<(String, bool, bool)> {
+        let key = self.history_key?;
+        let (blob, nonce, deleted, edited): (Vec<u8>, Vec<u8>, bool, bool) = self.db.as_ref()?.query_row(
+            "SELECT encrypted_blob, nonce, is_deleted, is_edited FROM messages WHERE message_id = ?1 AND group_id = ?2",
+            params![message_id, group_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).ok()?;
+        if nonce.len() != 12 {
+            return None;
+        }
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+        let cipher = ChaCha20Poly1305::new_from_slice(&key).ok()?;
+        let plain = cipher.decrypt(Nonce::from_slice(&nonce), blob.as_slice()).ok()?;
+        Some((String::from_utf8(plain).ok()?, deleted, edited))
+    }
+
+    /// A row just restored from the server archive takes the record's deleted/edited marks. The text is already the record's (empty for a
+    /// tombstone), so nothing is re-encrypted or uploaded again.
+    pub(crate) fn mark_restored_flags(&self, group_id: Option<&str>, chat_key: &str, message_id: &str, deleted: bool, edited: bool) {
+        if !deleted && !edited {
+            return;
+        }
+        let Some(conn) = &self.db else { return };
+        let _ = conn.execute(
+            "UPDATE messages SET is_deleted = MAX(is_deleted, ?1), is_edited = MAX(is_edited, ?2)
+             WHERE message_id = ?3 AND group_id IS ?4 AND (?4 IS NOT NULL OR peer_device_fingerprint = ?5)",
+            params![deleted as i64, edited as i64, message_id, group_id, chat_key],
+        );
+    }
+
     pub(crate) fn mark_synced_message_edited(&mut self, group_id: Option<&str>, peer_device_fingerprint: &str, target_message_id: &str) {
         let conn = match &self.db {
             Some(c) => c,
@@ -1095,9 +1141,9 @@ impl P2PCore {
         let t = if sent_clock { "COALESCE(NULLIF(sent_at_ms,0), timestamp)" } else { "timestamp" };
         let mut stmt = match conn.prepare(&format!(
             "SELECT direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), via_sync FROM messages
-             WHERE peer_device_fingerprint = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
+             WHERE peer_device_fingerprint = ?1 AND {t} < ?3 AND {t} > ?4
                AND {t} >= COALESCE((SELECT {t} FROM messages
-                    WHERE peer_device_fingerprint = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
+                    WHERE peer_device_fingerprint = ?1 AND {t} < ?3 AND {t} > ?4
                     ORDER BY {t} DESC, id DESC LIMIT 1 OFFSET ?2 - 1), 0)
              ORDER BY {t} DESC, id DESC"
         )) {
@@ -1105,7 +1151,7 @@ impl P2PCore {
             Err(_) => return Vec::new(),
         };
 
-        let rows = stmt.query_map(params![peer_device_fingerprint, limit, before_timestamp, after_timestamp], |row| {
+        let rows = stmt.query_map(params![peer_device_fingerprint, limit, before_timestamp.unwrap_or(i64::MAX), after_timestamp.unwrap_or(i64::MIN)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
@@ -1299,9 +1345,9 @@ impl P2PCore {
         let t = if sent_clock { "COALESCE(NULLIF(sent_at_ms,0), timestamp)" } else { "timestamp" };
         let mut stmt = match conn.prepare(&format!(
             "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), mentions_me, status FROM messages
-             WHERE group_id = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
+             WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4
                AND {t} >= COALESCE((SELECT {t} FROM messages
-                    WHERE group_id = ?1 AND (?3 IS NULL OR {t} < ?3) AND (?4 IS NULL OR {t} > ?4)
+                    WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4
                     ORDER BY {t} DESC, id DESC LIMIT 1 OFFSET ?2 - 1), 0)
              ORDER BY {t} DESC, id DESC"
         )) {
@@ -1309,7 +1355,7 @@ impl P2PCore {
             Err(_) => return Vec::new(),
         };
 
-        let rows = stmt.query_map(params![group_id, limit, before_timestamp, after_timestamp], |row| {
+        let rows = stmt.query_map(params![group_id, limit, before_timestamp.unwrap_or(i64::MAX), after_timestamp.unwrap_or(i64::MIN)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Vec<u8>>(1)?,
@@ -1390,6 +1436,11 @@ impl P2PCore {
                 // Only our own rows carry a send status. The ids are the sender's choice, and a received row may share one.
                 // See 'delivered' is final. A late copy's publish or failure must not turn it back into sent or error.
                 "UPDATE messages SET status = ?1 WHERE message_id = ?2 AND direction = 'sent' AND status != 'delivered'",
+                params![status.as_str(), message_id],
+            );
+            // My 1:1 file offer goes out under its file id (`finish_outgoing_file`): its bubble keeps the status across a reload.
+            let _ = conn.execute(
+                "UPDATE files SET send_status = ?1 WHERE file_id = ?2 AND direction = 'sent' AND COALESCE(send_status, '') != 'delivered'",
                 params![status.as_str(), message_id],
             );
         }

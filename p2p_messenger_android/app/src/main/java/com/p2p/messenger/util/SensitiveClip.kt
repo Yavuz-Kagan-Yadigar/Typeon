@@ -9,8 +9,12 @@ import android.os.PersistableBundle
 
 /** Copies [text] marked sensitive: no clipboard preview, and keyboards that
  *  honour the flag keep it out of their history and cloud sync. */
-fun copySensitive(context: Context, label: String, text: String) {
-    val clip = ClipData.newPlainText(label, text)
+fun copySensitive(context: Context, label: String, text: String) =
+    copySensitiveClip(context, ClipData.newPlainText(label, text))
+
+/** Same for any clip (an image URI): marked sensitive, cleared after 60 s while still ours. Main thread. */
+fun copySensitiveClip(context: Context, clip: ClipData) {
+    val label = clip.description.label?.toString() ?: ""
     clip.description.extras = PersistableBundle().apply {
         putBoolean("android.content.extra.IS_SENSITIVE", true)
     }

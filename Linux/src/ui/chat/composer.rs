@@ -155,6 +155,8 @@ impl ChatView {
         }
 
         let reply = self.reply_to.borrow().clone();
+        // Put back with the text if the send fails.
+        let reply_restore = reply.clone();
         let (reply_id, reply_preview, reply_sender) = match reply {
             Some((id, preview, sender)) => (Some(id), Some(preview), sender),
             None => (None, None, None),
@@ -196,6 +198,11 @@ impl ChatView {
                 let (start, end) = buffer.bounds();
                 if buffer.text(&start, &end, false).is_empty() {
                     buffer.set_text(&text);
+                    if view.reply_to.borrow().is_none() {
+                        if let Some((id, preview, sender)) = reply_restore.clone() {
+                            view.set_reply(id, preview, sender);
+                        }
+                    }
                 }
             }
         };
@@ -203,7 +210,9 @@ impl ChatView {
             Conversation::Direct { fingerprint, .. } => {
                 let fingerprint = fingerprint.clone();
                 let sent_text = text.clone();
-                crate::app::run_in_background(
+                // One worker for every send, so quick messages reach the core
+                // (and the peer) in the order they were typed.
+                serial_in_background(
                     move || core::send_message(&fingerprint, &sent_text, reply_id, preview_for_core).map(|r| (r.message_id, r.status)),
                     move |result| {
                         let result = result.map(|(id, status)| make_entry(id, status));
@@ -231,7 +240,7 @@ impl ChatView {
                 let mentions = mentioned_ids(&text, &candidates);
                 let group_id = group_id.clone();
                 let sent_text = text.clone();
-                crate::app::run_in_background(
+                serial_in_background(
                     move || {
                         core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core, mentions)
                     },
@@ -333,8 +342,12 @@ impl ChatView {
             return;
         }
 
-                // See the `prompt_attachment_caption` note at the top of the file. A voice message goes through the same flow as photos
-                // and files: an optional caption, plus the active reply if there is one.
+        // The microphone stops now, not when the caption is answered:
+        // nothing said while the dialog is up may end up in the message.
+        // `finish` waits for ffmpeg to write the trailer, so it runs off the
+        // GTK thread; the caption is asked once the file is final.
+        // A voice message goes through the same flow as photos and files: an
+        // optional caption, plus the active reply if there is one.
         let reply = self.reply_to.borrow().clone();
         let (reply_id, reply_preview, reply_sender) = match reply {
             Some((id, preview, sender)) => (Some(id), Some(preview), sender),
@@ -342,61 +355,74 @@ impl ChatView {
         };
 
         let view = self.clone();
-        let app = self.app().clone();
-        let conversation = self.conversation.clone();
-        self.prompt_attachment_caption(false, move |caption, _| {
-            let view = view.clone();
-            let app = app.clone();
-            let conversation = conversation.clone();
-            let reply_id = reply_id.clone();
-            let reply_preview = reply_preview.clone();
-            let reply_sender = reply_sender.clone();
-            app.toast("Sending voice message…");
-            app::run_in_background(
-                move || {
-                    let (path, duration_ms) = recording.finish()?;
-                    let source = path.to_string_lossy().to_string();
-                    let name = format!("voice-{}.ogg", crate::util::now_ms());
-                    let outcome = match &conversation {
-                        Conversation::Direct { fingerprint, .. } => core::prepare_and_send_file(
-                            fingerprint,
-                            &source,
-                            &name,
-                            "audio/ogg",
-                            None,
-                            Some(duration_ms),
-                            caption,
-                            reply_id,
-                            reply_preview,
-                        )
-                        .map(|receipt| receipt.message_id),
-                        Conversation::Group { group_id, .. } => core::prepare_and_send_group_file(
-                            group_id,
-                            &source,
-                            &name,
-                            "audio/ogg",
-                            None,
-                            Some(duration_ms),
-                            caption,
-                            reply_id,
-                            reply_preview,
-                            reply_sender,
-                        ),
-                    };
-                    // The core copies and encrypts the file, so the raw capture is
-                    // no longer needed either way.
-                    let _ = std::fs::remove_file(&path);
-                    outcome
-                },
-                move |result| match result {
-                    Ok(_) => {
-                        view.clear_reply();
-                        view.reload();
+        app::run_in_background(
+            move || recording.finish(),
+            move |finished| {
+                let (path, duration_ms) = match finished {
+                    Ok(done) => done,
+                    Err(error) => {
+                        view.app().toast(&format!("Voice message failed: {}", error));
+                        return;
                     }
-                    Err(error) => app.toast(&format!("Voice message failed: {}", error)),
-                },
-            );
-        });
+                };
+                let app = view.app().clone();
+                let conversation = view.conversation.clone();
+                let send_view = view.clone();
+                view.prompt_attachment_caption(false, move |caption, _| {
+                    let view = send_view.clone();
+                    let app = app.clone();
+                    let conversation = conversation.clone();
+                    let reply_id = reply_id.clone();
+                    let reply_preview = reply_preview.clone();
+                    let reply_sender = reply_sender.clone();
+                    let path = path.clone();
+                    app.toast("Sending voice message…");
+                    app::run_in_background(
+                        move || {
+                            let source = path.to_string_lossy().to_string();
+                            let name = format!("voice-{}.ogg", crate::util::now_ms());
+                            let outcome = match &conversation {
+                                Conversation::Direct { fingerprint, .. } => core::prepare_and_send_file(
+                                    fingerprint,
+                                    &source,
+                                    &name,
+                                    "audio/ogg",
+                                    None,
+                                    Some(duration_ms),
+                                    caption,
+                                    reply_id,
+                                    reply_preview,
+                                )
+                                .map(|receipt| receipt.message_id),
+                                Conversation::Group { group_id, .. } => core::prepare_and_send_group_file(
+                                    group_id,
+                                    &source,
+                                    &name,
+                                    "audio/ogg",
+                                    None,
+                                    Some(duration_ms),
+                                    caption,
+                                    reply_id,
+                                    reply_preview,
+                                    reply_sender,
+                                ),
+                            };
+                            // The core copies and encrypts the file, so the raw capture is
+                            // no longer needed either way.
+                            let _ = std::fs::remove_file(&path);
+                            outcome.map(|id| super::history::sent_attachment_entry(&conversation, &id))
+                        },
+                        move |result| match result {
+                            Ok(entry) => {
+                                view.clear_reply();
+                                view.show_sent_attachment(entry);
+                            }
+                            Err(error) => app.toast(&format!("Voice message failed: {}", error)),
+                        },
+                    );
+                });
+            },
+        );
     }
 
         /// Asks for an optional caption right before a file or voice message is sent (same design as Android
@@ -448,7 +474,7 @@ impl ChatView {
 
     pub(super) fn pick_attachment(self: &Rc<Self>) {
         let Some(window) = self.app().window() else { return };
-        let dialog = gtk::FileDialog::builder().title("Send a file").build();
+        let dialog = gtk::FileDialog::builder().modal(false).title("Send a file").build();
         let view = self.clone();
         dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
             let Ok(file) = result else { return };
@@ -526,14 +552,14 @@ impl ChatView {
                             if sent != source {
                                 let _ = std::fs::remove_file(&sent);
                             }
-                            outcome
+                            outcome.map(|id| super::history::sent_attachment_entry(&conversation, &id))
                         },
                         move |result| match result {
-                            // The attachment row comes from the archive, so a reload is the
-                            // simplest way to show it exactly as a restart would.
-                            Ok(_) => {
+                            // The bubble is built from the archive row, as a
+                            // restart would show it; no full reload.
+                            Ok(entry) => {
                                 view.clear_reply();
-                                view.reload();
+                                view.show_sent_attachment(entry);
                             }
                             Err(error) => app_for_send.toast(&format!("Could not send the file: {}", error)),
                         },
@@ -595,10 +621,11 @@ impl ChatView {
             let (app, popover) = (self.app().clone(), popover.clone());
             fetch.connect_clicked(move |_| {
                 popover.popdown();
-                match core::request_stickers_from_phone() {
+                let app = app.clone();
+                app::run_in_background(core::request_stickers_from_phone, move |result| match result {
                     Ok(()) => app.toast("Asked your phone: stickers arrive in the background"),
                     Err(error) => app.toast(&format!("Could not ask your phone: {}", error)),
-                }
+                });
             });
         }
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -610,18 +637,19 @@ impl ChatView {
         column.append(&buttons);
         popover.set_child(Some(&column));
 
-        let stickers = core::list_stickers();
-        if stickers.is_empty() {
-            grid.append(&gtk::Label::new(Some("No stickers yet")));
-        }
-        // Decoded here too, not on the GTK thread: a big GIF froze the window.
+        // Listed and decoded off the GTK thread: the list takes the core
+        // lock, and a big GIF froze the window. `None` = no stickers at all.
         // ponytail: the grid shows an animated sticker's first frame.
-        let (tx, rx) = async_channel::unbounded::<(String, bool, Option<gtk::gdk::Texture>)>();
+        let (tx, rx) = async_channel::unbounded::<Option<(String, bool, Option<gtk::gdk::Texture>)>>();
         std::thread::spawn(move || {
+            let stickers = core::list_stickers();
+            if stickers.is_empty() {
+                let _ = tx.send_blocking(None);
+            }
             for sticker in stickers {
                 let path = if sticker.animated { core::sticker_first_frame(&sticker.id) } else { core::sticker_plain_path(&sticker.id) };
                 let texture = path.ok().and_then(|p| gtk::gdk::Texture::from_filename(p).ok());
-                if tx.send_blocking((sticker.id, sticker.favorite, texture)).is_err() {
+                if tx.send_blocking(Some((sticker.id, sticker.favorite, texture))).is_err() {
                     break; // popover closed
                 }
             }
@@ -629,10 +657,14 @@ impl ChatView {
         let view = self.clone();
         let (grid_for_load, popover_for_load) = (grid.clone(), popover.clone());
         glib::spawn_future_local(async move {
-            while let Ok((id, favorite, texture)) = rx.recv().await {
+            while let Ok(item) = rx.recv().await {
                 if popover_for_load.parent().is_none() {
                     break;
                 }
+                let Some((id, favorite, texture)) = item else {
+                    grid_for_load.append(&gtk::Label::new(Some("No stickers yet")));
+                    continue;
+                };
                 let Some(texture) = texture else { continue };
                 let picture = gtk::Picture::for_paintable(&texture);
                 picture.set_size_request(64, 64);
@@ -664,11 +696,15 @@ impl ChatView {
                             fav.connect_clicked(move |_| {
                                 menu.popdown();
                                 let want = !favorite.get();
-                                match core::set_sticker_favorite(&id, want) {
-                                    // Shown first from the next opening on.
-                                    Ok(()) => favorite.set(want),
-                                    Err(error) => app.toast(&format!("Could not change the sticker: {}", error)),
-                                }
+                                let (id, favorite, app) = (id.clone(), favorite.clone(), app.clone());
+                                app::run_in_background(
+                                    move || core::set_sticker_favorite(&id, want),
+                                    move |result| match result {
+                                        // Shown first from the next opening on.
+                                        Ok(()) => favorite.set(want),
+                                        Err(error) => app.toast(&format!("Could not change the sticker: {}", error)),
+                                    },
+                                );
                             });
                         }
                         let delete = crate::ui::widgets::menu_item("edit-delete-symbolic", "Delete");
@@ -709,12 +745,16 @@ impl ChatView {
         let reply = self.reply_to.borrow().clone();
         let id = sticker_id.to_string();
         let view = self.clone();
+        let conversation = self.conversation.clone();
         app::run_in_background(
-            move || core::send_sticker(&target, group, &id, reply),
+            move || {
+                core::send_sticker(&target, group, &id, reply)
+                    .map(|id| super::history::sent_attachment_entry(&conversation, &id))
+            },
             move |result| match result {
-                Ok(_) => {
+                Ok(entry) => {
                     view.clear_reply();
-                    view.reload();
+                    view.show_sent_attachment(entry);
                 }
                 Err(error) => view.app().toast(&format!("Could not send the sticker: {}", error)),
             },
@@ -728,7 +768,7 @@ impl ChatView {
         filter.add_pixbuf_formats();
         let filters = gio::ListStore::new::<gtk::FileFilter>();
         filters.append(&filter);
-        let dialog = gtk::FileDialog::builder().title("Add a sticker").filters(&filters).build();
+        let dialog = gtk::FileDialog::builder().modal(false).title("Add a sticker").filters(&filters).build();
         let app = self.app().clone();
         dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
             let Ok(file) = result else { return };
@@ -789,6 +829,23 @@ pub(super) fn bg_serial(job: impl FnOnce() + Send + 'static) {
         tx
     });
     let _ = tx.send(Box::new(job));
+}
+
+/// `run_in_background` on the `bg_serial` worker: jobs reach the core in
+/// the order they were started, and `then` gets each result on the GTK thread.
+pub(super) fn serial_in_background<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+    then: impl FnOnce(T) + 'static,
+) {
+    let (sender, receiver) = async_channel::bounded::<T>(1);
+    bg_serial(move || {
+        let _ = sender.send_blocking(work());
+    });
+    glib::spawn_future_local(async move {
+        if let Ok(result) = receiver.recv().await {
+            then(result);
+        }
+    });
 }
 
 /// Ids of the members whose "@Name" is in `text`. The name must end at a

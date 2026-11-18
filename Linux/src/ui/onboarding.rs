@@ -1,23 +1,16 @@
 //! Launch sequence and device linking.
 //!
-//! This client can be a full account in its own right or a secondary device on
-//! an existing one — the same three choices the Android app offers on first
-//! launch:
-//!
-//! * **New account** — generates an identity that belongs to this computer.
-//!   Other devices can later be linked *to* it.
-//! * **Link to an existing device** (spec §1.5) — generates its own keypair,
-//!   shows a device-link QR, and waits to be adopted. The other device signs a
-//!   `DeviceAdd`, ships a full sync and announces us to every contact; its
-//!   secret key never moves. Afterwards the two are independent — contacts fan
-//!   messages out to both.
-//! * **Restore from a recovery file** — rebuilds a previous identity from its
-//!   encrypted backup.
+//! This client is a secondary device only: it links to the phone by QR and
+//! cannot create or restore an account. It generates its own keypair, shows a
+//! device-link QR, and waits to be adopted (spec §1.5). The other device signs a
+//! `DeviceAdd`, ships a full sync and announces us to every contact; its
+//! secret key never moves. Afterwards the two are independent — contacts fan
+//! messages out to both.
 //!
 //! Routing on launch:
-//!   no vault                     -> welcome (three choices)
-//!   vault, awaiting_link, unlinked -> unlock -> link QR (resumes a pairing)
-//!   otherwise                    -> unlock -> main window
+//!   no vault                     -> welcome
+//!   vault, not adopted (core)    -> unlock -> link QR (resumes a pairing)
+//!   vault, adopted secondary     -> unlock -> main window
 
 use std::path::Path;
 use std::rc::Rc;
@@ -68,28 +61,40 @@ pub fn start(app: &Rc<App>, host: &adw::ToastOverlay) {
     let app_after = app.clone();
     let host_after = host.clone();
     unlock(app, host, move |vault| {
-        if !core::init_database(&app_after.data_dir.to_string_lossy(), &vault.skipped_key) {
-            fatal(
-                &app_after,
-                &host_after,
-                "Could not open the database",
-                "The vault opened but the database did not. Check that the data directory is \
-                 writable and has free space. If the database was made with another vault it \
-                 cannot be read any more.",
-            );
-            return;
-        }
-        if !core::load_secret_bundle(&vault.identity_bundle) {
-            fatal(
-                &app_after,
-                &host_after,
-                "Could not load this device's keys",
-                "The vault opened but the core rejected the key bundle. The file is probably \
-                 damaged — remove the data directory and link this device again.",
-            );
-            return;
-        }
-        finish_boot(&app_after, &host_after, vault);
+        // Database open (schema work included) and key load take the core
+        // lock and touch the disk: off the GTK thread.
+        let data_dir = app_after.data_dir.to_string_lossy().to_string();
+        app::run_in_background(
+            move || {
+                if !core::init_database(&data_dir, &vault.skipped_key) {
+                    return Err(false);
+                }
+                if !core::load_secret_bundle(&vault.identity_bundle) {
+                    return Err(true);
+                }
+                Ok(vault)
+            },
+            move |result| match result {
+                Ok(vault) => finish_boot(&app_after, &host_after, vault),
+                Err(false) => fatal(
+                    &app_after,
+                    &host_after,
+                    "Could not open the database",
+                    "The vault opened but the database did not. Check that the data directory is \
+                     writable and has free space. If the database was made with another vault it \
+                     cannot be read any more.",
+                    false,
+                ),
+                Err(true) => fatal(
+                    &app_after,
+                    &host_after,
+                    "Could not load this device's keys",
+                    "The vault opened but the core rejected the key bundle. The file is probably \
+                     damaged — remove the data directory and link this device again.",
+                    false,
+                ),
+            },
+        );
     });
 }
 
@@ -188,7 +193,7 @@ fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
 /// First run: the database is made before the vault exists, under the key the
 /// vault then carries as `skipped_key`. One key per process, so a retry after
 /// a failed attempt still matches the database that is already open.
-fn open_fresh_database(app: &Rc<App>) -> Option<[u8; 32]> {
+fn open_fresh_database(data_dir: &Path) -> Option<[u8; 32]> {
     use rand::RngCore;
     static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
     let first = KEY.get().is_none();
@@ -197,18 +202,18 @@ fn open_fresh_database(app: &Rc<App>) -> Option<[u8; 32]> {
         rand::rngs::OsRng.fill_bytes(&mut key);
         key
     });
-    let dir = app.data_dir.to_string_lossy();
+    let dir = data_dir.to_string_lossy();
     if core::init_database(&dir, &key) {
         return Some(key);
     }
     // A database from a first run that ended before its vault was written:
     // its key lived in that process only, so nothing can open it again, and
     // it blocked every later setup. Only before this process made one.
-    if !first || secrets::exists(&app.data_dir) {
+    if !first || secrets::exists(data_dir) {
         return None;
     }
     for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(app.data_dir.join(format!("p2p_messenger.db{suffix}")));
+        let _ = std::fs::remove_file(data_dir.join(format!("p2p_messenger.db{suffix}")));
     }
     core::init_database(&dir, &key).then_some(key)
 }
@@ -231,59 +236,65 @@ fn start_fresh_identity(
     device_name: &str,
     passphrase: &str,
 ) {
-    // Quick, but the button must not be clickable twice — a second identity
-    // would orphan the first.
+    // The button must not be clickable twice — a second identity would
+    // orphan the first.
     set_actions_sensitive(&button, false);
 
-    let Some(storage_key) = open_fresh_database(app) else {
-        set_actions_sensitive(&button, true);
-        app.toast("Could not open the database.");
-        return;
-    };
-
-    if let Err(error) = core::create_identity(device_name) {
-        set_actions_sensitive(&button, true);
-        app.toast(&format!("Could not create device keys: {}", error));
-        return;
-    }
-
-    let bundle = core::take_pending_secret_bundle();
-    if bundle.is_empty() {
-        set_actions_sensitive(&button, true);
-        app.toast("The core returned no key bundle — nothing was saved.");
-        return;
-    }
-
-    let mut vault = Vault::new(bundle);
-    vault.skipped_key = storage_key;
-    // Sealing the vault runs Argon2id: off the main thread.
-    // The flag goes to disk BEFORE the vault: a kill in between would otherwise
-    // leave a vault with `awaiting_link` false, i.e. a pending link silently
-    // turned into a standalone account. Without a vault the flag is unused.
-    {
-        let mut prefs = app.prefs.borrow_mut();
-        prefs.device_name = device_name.to_string();
-        prefs.awaiting_link = true;
-        prefs.save();
-    }
-    let (app, host, button) = (app.clone(), host.clone(), button.clone());
+    // Database, keys and bundle: core lock and disk, off the GTK thread.
     let data_dir = app.data_dir.clone();
-    // Wiped when the worker closure ends, not left on the heap after it.
+    let name = device_name.to_string();
+    // Wiped when the last worker closure ends, not left on the heap after it.
     let passphrase = WipeOnDrop(passphrase.to_string());
+    let (app, host, button) = (app.clone(), host.clone(), button.clone());
+    let core_name = name.clone();
     app::run_in_background(
-        move || secrets::save(&data_dir, &vault, &passphrase).map(|()| vault),
+        move || -> Result<([u8; 32], Vec<u8>), String> {
+            let storage_key = open_fresh_database(&data_dir).ok_or("Could not open the database.")?;
+            core::create_identity(&core_name).map_err(|error| format!("Could not create device keys: {}", error))?;
+            let bundle = core::take_pending_secret_bundle();
+            if bundle.is_empty() {
+                return Err("The core returned no key bundle — nothing was saved.".to_string());
+            }
+            Ok((storage_key, bundle))
+        },
         move |result| {
-            let vault = match result {
-                Ok(vault) => vault,
+            let (storage_key, bundle) = match result {
+                Ok(done) => done,
                 Err(error) => {
-                    // Without a persisted vault the identity would be lost on exit, so this
-                    // is fatal rather than a warning.
                     set_actions_sensitive(&button, true);
-                    app.toast(&format!("Could not write the vault: {}", error));
+                    app.toast(&error);
                     return;
                 }
             };
-            finish_boot(&app, &host, vault);
+            let mut vault = Vault::new(bundle);
+            vault.skipped_key = storage_key;
+            {
+                let mut prefs = app.prefs.borrow_mut();
+                prefs.device_name = name;
+                prefs.awaiting_link = true;
+                prefs.save();
+            }
+            let data_dir = app.data_dir.clone();
+            // Sealing the vault runs Argon2id: off the main thread.
+            app::run_in_background(
+                move || secrets::save(&data_dir, &vault, &passphrase).map(|()| vault),
+                move |result| {
+                    let vault = match result {
+                        Ok(vault) => {
+                            core::clear_pending_secret_bundle();
+                            vault
+                        }
+                        Err(error) => {
+                            // Without a persisted vault the identity would be lost on exit, so this
+                            // is fatal rather than a warning.
+                            set_actions_sensitive(&button, true);
+                            app.toast(&format!("Could not write the vault: {}", error));
+                            return;
+                        }
+                    };
+                    finish_boot(&app, &host, vault);
+                },
+            );
         },
     );
 }
@@ -299,7 +310,18 @@ fn unlock(app: &Rc<App>, host: &adw::ToastOverlay, on_open: impl FnOnce(Vault) +
             move || secrets::load(&data_dir, ""),
             move |result| match result {
                 Ok(vault) => on_open(vault),
-                Err(error) => fatal(&app, &host, "Could not read the vault", &error),
+                // Often temporary (the keyring is not running or not
+                // unlocked yet at login), so the page offers a retry first.
+                Err(error) => fatal(
+                    &app,
+                    &host,
+                    "Could not read the vault",
+                    &format!(
+                        "{error}\n\nThis is often temporary: the system keyring may not be running \
+                         or unlocked yet. Unlock it, then try again."
+                    ),
+                    true,
+                ),
             },
         );
         return;
@@ -421,15 +443,14 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
             app::start_poll_loop(&app);
             // Anything queued from a previous run should go out as soon as the
             // swarm is up, rather than waiting for the first backoff tick.
-            // The link QR is only for a device that asked to be adopted and
-            // has not been yet. A standalone or restored account goes straight
-            // in, and so does an already-adopted secondary.
             // Both core calls take the lock the poll thread now holds: off main.
-            let awaiting = app.prefs.borrow().awaiting_link;
+            // Desktops are link-only (owner rule): whatever `settings.json`
+            // says, only a device the core holds as adopted gets the main
+            // window. Anything else is still waiting to be linked.
             app::run_in_background(
                 move || {
                     core::retry_all_pending_now();
-                    awaiting && !core::is_secondary_device()
+                    !core::is_secondary_device()
                 },
                 move |show_link| {
                     if show_link {
@@ -444,6 +465,9 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
 }
 
 // --- route 3: show the link QR and wait to be adopted ---
+
+/// How often a shown link QR is rebuilt (the core's link window is one hour).
+const QR_REFRESH_MS: u64 = 10 * 60 * 1000;
 
 fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     let qr_slot = gtk::Box::builder()
@@ -487,7 +511,10 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
 
     // The QR cannot be built until the swarm reports a listen address, so this
     // retries rather than failing outright (same pattern as the Android
-    // LinkDeviceActivity and the contact QR).
+    // LinkDeviceActivity and the contact QR). Once shown it is rebuilt every
+    // `QR_REFRESH_MS`: each build moves the core's one-hour link window on
+    // (same nonce, so a code already scanned stays valid), so a page left
+    // open never shows a code the core would refuse.
     // Core calls below run off the GTK thread (shared core lock); one in
     // flight at a time.
     {
@@ -495,18 +522,47 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
         let status = status.clone();
         let attempts = Rc::new(std::cell::Cell::new(0u32));
         let in_flight = Rc::new(std::cell::Cell::new(false));
+        // When the QR on screen was built; 0 = none on screen.
+        let built_at = Rc::new(std::cell::Cell::new(0u64));
+        let shown: Rc<std::cell::RefCell<Vec<u8>>> = Rc::default();
+
+        // Off screen (page replaced, window hidden to the tray): close the
+        // link window, as Android does when its link screen is left, and drop
+        // the code. Mapped again, a fresh one is drawn.
+        {
+            let (qr_slot, built_at, shown) = (qr_slot.clone(), built_at.clone(), shown.clone());
+            page.connect_unmap(move |_| {
+                built_at.set(0);
+                shown.borrow_mut().clear();
+                while let Some(child) = qr_slot.first_child() {
+                    qr_slot.remove(&child);
+                }
+                app::run_in_background(core::close_device_link_window, |()| {});
+            });
+        }
+
         let page = page.downgrade();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-            if qr_slot.first_child().is_some() || page.upgrade().map_or(true, |p| p.root().is_none()) {
+            let Some(page) = page.upgrade().filter(|p| p.root().is_some()) else {
+                return glib::ControlFlow::Break;
+            };
+            // Never got a code: the message below says to restart.
+            if attempts.get() >= 60 && shown.borrow().is_empty() {
                 return glib::ControlFlow::Break;
             }
-            if in_flight.replace(true) {
+            let due = built_at.get() == 0 || crate::util::now_ms().saturating_sub(built_at.get()) >= QR_REFRESH_MS;
+            if !page.is_mapped() || !due || in_flight.replace(true) {
                 return glib::ControlFlow::Continue;
             }
-            // Past the cap the timer stops (checked before `attempts` moves below).
-            let give_up = attempts.get() >= 60;
-            let (qr_slot, status, attempts, in_flight) =
-                (qr_slot.clone(), status.clone(), attempts.clone(), in_flight.clone());
+            let (qr_slot, status, attempts, in_flight, built_at, shown) = (
+                qr_slot.clone(),
+                status.clone(),
+                attempts.clone(),
+                in_flight.clone(),
+                built_at.clone(),
+                shown.clone(),
+            );
+            let page = page.downgrade();
             app::run_in_background(
                 || {
                     let payload = core::build_device_link_request();
@@ -521,23 +577,36 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                 },
                 move |(payload, code)| {
                     in_flight.set(false);
-                    if qr_slot.first_child().is_some() {
+                    // Went off screen meanwhile: the build reopened the window.
+                    if !page.upgrade().is_some_and(|p| p.is_mapped()) {
+                        app::run_in_background(core::close_device_link_window, |()| {});
                         return;
                     }
                     if payload.is_empty() {
-                        attempts.set(attempts.get() + 1);
-                        if attempts.get() >= 60 {
-                            status.set_label(
-                                "The network is not reachable yet — no listening address was \
-                                 established. Check your connection, then restart Typeon.",
-                            );
-                            // Stops the timer: `attempts` past the cap never retries.
+                        // A failed refresh keeps the code on screen; the next tick retries.
+                        if shown.borrow().is_empty() {
+                            attempts.set(attempts.get() + 1);
+                            if attempts.get() >= 60 {
+                                status.set_label(
+                                    "The network is not reachable yet — no listening address was \
+                                     established. Check your connection, then restart Typeon.",
+                                );
+                            }
                         }
                         return;
+                    }
+                    attempts.set(0);
+                    built_at.set(crate::util::now_ms());
+                    if *shown.borrow() == payload {
+                        return;
+                    }
+                    while let Some(child) = qr_slot.first_child() {
+                        qr_slot.remove(&child);
                     }
                     match qr::qr_widget(&payload) {
                         Some(widget) => {
                             qr_slot.append(&widget);
+                            *shown.borrow_mut() = payload;
                             // The phone shows the same code in its confirm dialog.
                             status.set_label(&format!(
                                 "Waiting for your phone to scan this…\n\nCompare code: {}\nYour phone shows the same code before you approve.",
@@ -548,11 +617,7 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                     }
                 },
             );
-            if give_up {
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
-            }
+            glib::ControlFlow::Continue
         });
     }
 
@@ -626,7 +691,9 @@ fn spinner_page(message: &str) -> gtk::Widget {
         .upcast()
 }
 
-fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str) {
+/// `retry`: the error may be temporary, so "Try again" runs the launch
+/// sequence again and is the first action offered.
+fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str, retry: bool) {
     let quit = gtk::Button::builder().label("Quit").build();
     quit.add_css_class("pill");
     {
@@ -641,6 +708,14 @@ fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str) {
         .spacing(10)
         .halign(gtk::Align::Center)
         .build();
+    if retry {
+        let again = gtk::Button::builder().label("Try again").build();
+        again.add_css_class("pill");
+        again.add_css_class("suggested-action");
+        let (app, host) = (app.clone(), host.clone());
+        again.connect_clicked(move |_| start(&app, &host));
+        actions.append(&again);
+    }
     actions.append(&quit);
     actions.append(&logout);
 

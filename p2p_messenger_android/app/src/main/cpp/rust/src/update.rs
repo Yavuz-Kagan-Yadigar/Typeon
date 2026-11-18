@@ -27,6 +27,12 @@ const REPO: &str = "Yavuz-Kagan-Yadigar/Typeon";
 const CHECK_EVERY: Duration = Duration::from_secs(20 * 3600);
 const MAX_ASSET_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_SMALL_BYTES: u64 = 1024 * 1024;
+/// A tag that is not signed or built yet is looked at again after this long, not on every scheduler tick.
+const WAIT_RETRY: Duration = Duration::from_secs(3 * 3600);
+/// Longest HTTP header or chunk-size line accepted.
+const MAX_LINE: u64 = 16 * 1024;
+/// File with the highest stable version this install ran or saw a valid signature for.
+const FLOOR: &str = "stable-floor";
 
 /// Public half of the owner's offline release key (private half in `~/.config/typeon-signing`, never in the repo).
 const UPDATE_KEY: [u8; 32] = hex_literal(b"f1678c65025d25526c1abb556fc163e01f0041d58a354f2b2f1e947a7a07dffc");
@@ -168,6 +174,38 @@ fn pick_tags(atom: &str, beta: bool) -> Vec<String> {
     tags
 }
 
+fn read_floor(dir: &Path) -> Option<String> {
+    let v = std::fs::read_to_string(dir.join(FLOOR)).ok()?;
+    let v = v.trim();
+    (!v.contains('-') && parse_version(v).is_some()).then(|| v.to_string())
+}
+
+fn raise_floor(dir: &Path, version: &str) {
+    let v = version.trim().trim_start_matches('v');
+    if v.contains('-') || parse_version(v).is_none() || read_floor(dir).is_some_and(|f| !is_newer(v, &f)) {
+        return;
+    }
+    let _ = std::fs::write(dir.join(FLOOR), v);
+}
+
+/// Whether `tag` may be installed over `current`. A rollback (beta build, beta switch off) goes to a stable
+/// release that is not older than `floor`: whoever controls the feed can hide the newer releases, and
+/// without the floor a beta install would take any old signed release it is shown.
+/// ponytail: an install that never ran a stable and never verified one has no floor; a signed rollback
+/// statement from the release tool closes that.
+fn wanted(tag: &str, current: &str, rollback: bool, floor: Option<&str>) -> bool {
+    is_newer(tag, current) || (rollback && !tag.contains('-') && floor.map_or(true, |f| !is_newer(f, tag)))
+}
+
+/// `read_line` with a length cap: a peer that never sends a newline must not grow the buffer without end.
+async fn read_line_capped<R: futures::io::AsyncBufRead + Unpin>(reader: &mut R, line: &mut String) -> Result<usize, String> {
+    let n = idle("read", reader.take(MAX_LINE).read_line(line)).await?;
+    if n as u64 >= MAX_LINE && !line.ends_with('\n') {
+        return Err("HTTP line too long".into());
+    }
+    Ok(n)
+}
+
 /// Any single network step (connect, handshake, one read) that stalls this long fails the check; the next
 /// tick retries on a fresh circuit. Without it a dead circuit held the check for the whole hour.
 const IDLE: Duration = Duration::from_secs(120);
@@ -242,7 +280,7 @@ async fn get(tor: &Tor, url: &str, max: u64, from: u64, sink: &mut (dyn FnMut(&[
         let mut line = String::new();
         for i in 0..100 {
             line.clear();
-            if idle("read", reader.read_line(&mut line)).await? == 0 {
+            if read_line_capped(&mut reader, &mut line).await? == 0 {
                 return Err("connection closed in headers".into());
             }
             let l = line.trim_end();
@@ -289,7 +327,7 @@ async fn get(tor: &Tor, url: &str, max: u64, from: u64, sink: &mut (dyn FnMut(&[
         if chunked {
             loop {
                 line.clear();
-                idle("read", reader.read_line(&mut line)).await?;
+                read_line_capped(&mut reader, &mut line).await?;
                 let size = u64::from_str_radix(line.trim().split(';').next().unwrap_or(""), 16).map_err(|_| "bad chunk size")?;
                 if size == 0 {
                     break;
@@ -302,7 +340,7 @@ async fn get(tor: &Tor, url: &str, max: u64, from: u64, sink: &mut (dyn FnMut(&[
                     left -= want as u64;
                 }
                 line.clear();
-                idle("read", reader.read_line(&mut line)).await?;
+                read_line_capped(&mut reader, &mut line).await?;
             }
         } else {
             loop {
@@ -370,6 +408,7 @@ async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: b
     static RUNNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one = RUNNING.lock().await;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    raise_floor(dir, current);
     // The download of the version now running is installed: drop it. Android cannot do this itself, the
     // install kills the process that would.
     let running = current.trim_start_matches('v');
@@ -388,15 +427,15 @@ async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: b
     let beta = beta_enabled(dir);
     let atom = get_text(tor, &format!("https://github.com/{REPO}/releases.atom")).await?;
     // The newest release that has our asset. A tag without one (release not published yet, or a build that
-    // left this platform out) is skipped, and the stamp is not written so the next tick looks again.
-    // ponytail: a bare tag that never gets a release keeps the check hourly; fine at two small requests.
+    // left this platform out) is skipped, and is looked at again after `WAIT_RETRY`.
     let rollback = downgrade && !beta && current.contains('-');
+    let floor = read_floor(dir);
     let tags = pick_tags(&atom, beta);
     let github = tags.first().map(|t| t.trim_start_matches('v').to_string());
     let github = github.as_deref();
     let mut found = None;
     let mut skipped = false;
-    for tag in tags.into_iter().filter(|t| rollback || is_newer(t, current)) {
+    for tag in tags.into_iter().filter(|t| wanted(t, current, rollback, floor.as_deref())) {
         let version = tag.trim_start_matches('v').to_string();
         let name = asset.replace("{v}", &version);
         let base = format!("https://github.com/{REPO}/releases/download/{tag}");
@@ -427,11 +466,17 @@ async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: b
             let _ = std::fs::write(&stamp, b"");
             return Err(format!("{tag}: {e}"));
         }
+        raise_floor(dir, &version);
         found = Some((tag, version, name, base, want, msg, sig));
         break;
     }
     let Some((tag, version, name, base, want, msg, sig)) = found else {
-        if !skipped {
+        if skipped {
+            // Stamp dated back so the check runs again after `WAIT_RETRY`, not on every tick.
+            if let Ok(f) = std::fs::File::create(&stamp) {
+                let _ = f.set_modified(std::time::SystemTime::now() - (CHECK_EVERY - WAIT_RETRY));
+            }
+        } else {
             let _ = std::fs::write(&stamp, b"");
         }
         set_status(dir, github, if skipped { "waiting" } else { "latest" });
@@ -445,7 +490,7 @@ async fn check_inner(tor: &Tor, dir: &Path, current: &str, asset: &str, force: b
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 let n = e.file_name();
-                if n != "beta" && n != "last-check" && n != "status" && e.path() != part {
+                if n != "beta" && n != "last-check" && n != "status" && n != FLOOR && e.path() != part {
                     let _ = std::fs::remove_file(e.path());
                 }
             }
@@ -553,6 +598,25 @@ mod tests {
             <link href="https://github.com/x/y/releases/tag/v7.3.1"/><link href="https://github.com/x/y/releases/tag/v7.3.0"/>"#;
         assert_eq!(pick_tags(atom, false), ["v7.3.1", "v7.3.0"]);
         assert_eq!(pick_tags(atom, true), ["v7.4.0-beta.1", "v7.3.1", "v7.3.0"]);
+    }
+
+    #[test]
+    fn rollback_floor() {
+        assert!(wanted("7.4.1", "7.4.0", false, None));
+        assert!(!wanted("7.3.0", "7.4.0-beta.1", false, Some("7.3.0")));
+        assert!(wanted("7.3.2", "7.4.0-beta.1", true, Some("7.3.2")));
+        assert!(!wanted("7.3.1", "7.4.0-beta.1", true, Some("7.3.2")));
+        assert!(!wanted("7.3.9-beta.1", "7.4.0-beta.1", true, None));
+        let dir = std::env::temp_dir().join(format!("typeon-floor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        raise_floor(&dir, "7.3.2");
+        raise_floor(&dir, "v7.3.1");
+        raise_floor(&dir, "7.5.0-beta.1");
+        assert_eq!(read_floor(&dir).as_deref(), Some("7.3.2"));
+        raise_floor(&dir, "v7.4.0");
+        assert_eq!(read_floor(&dir).as_deref(), Some("7.4.0"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Real GitHub over real Tor: `TYPEON_UPDATE_LIVE=<dir> cargo test --lib update::tests::live -- --ignored`.

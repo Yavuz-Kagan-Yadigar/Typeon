@@ -323,12 +323,43 @@ pub(super) fn jxl_decode_allowed(src: &Path) -> Result<(), String> {
     if std::fs::metadata(src).map_err(|e| e.to_string())?.len() > MAX_JXL_DECODE_BYTES {
         return Err("Image too large".to_string());
     }
-    if let Some((w, h, _)) = jxl_head_of(src) {
-        if w as u64 * h as u64 > MAX_IMAGE_PIXELS {
-            return Err("Image too large".to_string());
-        }
+    // Headers that do not parse from the first 64 KiB: refused, not read whole first.
+    let (w, h, _) = jxl_head_of(src).ok_or("JPEG XL: header not readable")?;
+    if w as u64 * h as u64 > MAX_IMAGE_PIXELS {
+        return Err("Image too large".to_string());
     }
     Ok(())
+}
+
+/// Decoder allocation cap for a peer's JPEG XL; lower on a phone.
+#[cfg(target_os = "android")]
+const JXL_ALLOC_LIMIT: usize = 256 << 20;
+#[cfg(not(target_os = "android"))]
+const JXL_ALLOC_LIMIT: usize = 512 << 20;
+
+/// A conversion that renders frames stops after this long.
+const JXL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Opens a peer's JPEG XL for rendering in sRGB, after the size checks. Every loaded frame counts, not only
+/// keyframes: zero-duration layers blended into one keyframe cost a full render each.
+fn open_peer_jxl(src: &Path) -> Result<jxl_oxide::JxlImage, String> {
+    use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
+    jxl_decode_allowed(src)?;
+    let mut image = JxlImage::builder()
+        .alloc_tracker(AllocTracker::with_limit(JXL_ALLOC_LIMIT))
+        .open(src)
+        .map_err(|e| format!("JPEG XL: {e}"))?;
+    image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+    let all = image.num_loaded_frames().max(1) as u64;
+    if all > 4 * MAX_ANIMATION_FRAMES as u64 || image.width() as u64 * image.height() as u64 * all > 4 * MAX_IMAGE_PIXELS {
+        return Err("Image too large".to_string());
+    }
+    Ok(image)
+}
+
+/// A decoder panic on a bad picture is an error of that picture, not a core panic.
+fn no_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| Err("JPEG XL: decoder failed".to_string()))
 }
 
 /// GIF LZW image data of palette indices (8-bit minimum code size), as
@@ -417,13 +448,12 @@ pub(super) fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8
 /// At most `GIF_MAX_FRAMES` frames are written (evenly picked, each kept frame
 /// lasting the frames it stands for): the per-frame palette work is the cost.
 pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
-    use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
-    jxl_decode_allowed(src)?;
-    let mut image = JxlImage::builder()
-        .alloc_tracker(AllocTracker::with_limit(512 << 20))
-        .open(src)
-        .map_err(|e| format!("JPEG XL: {e}"))?;
-    image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+    no_panic(|| jxl_to_gif_inner(src, out))
+}
+
+fn jxl_to_gif_inner(src: &Path, out: &Path) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let image = open_peer_jxl(src)?;
     let (width, height) = (image.width(), image.height());
     let frames = image.num_loaded_keyframes();
     if width > u16::MAX as u32 || height > u16::MAX as u32 || frames > MAX_ANIMATION_FRAMES
@@ -449,6 +479,9 @@ pub fn jxl_to_gif(src: &Path, out: &Path) -> Result<(), String> {
     let mut opaque: Vec<bool> = Vec::with_capacity(width as usize * height as usize);
     let out_frames = frames.min(GIF_MAX_FRAMES);
     for j in 0..out_frames {
+        if started.elapsed() > JXL_DEADLINE {
+            return Err("JPEG XL: conversion took too long".to_string());
+        }
         let k = j * frames / out_frames;
         let span = ((j + 1) * frames / out_frames - k) as u64;
         let render = image.render_frame(k).map_err(|e| format!("JPEG XL: {e}"))?;
@@ -535,13 +568,12 @@ pub fn convert_cached(src: &Path, out: &Path, conv: fn(&Path, &Path) -> Result<(
 /// duration in ms, at most `GIF_MAX_FRAMES` (evenly picked, like `jxl_to_gif`).
 /// For a player that stops after a few loops (the desktop sticker bubble).
 pub fn jxl_frames_rgba(src: &Path) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), String> {
-    use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
-    jxl_decode_allowed(src)?;
-    let mut image = JxlImage::builder()
-        .alloc_tracker(AllocTracker::with_limit(512 << 20))
-        .open(src)
-        .map_err(|e| format!("JPEG XL: {e}"))?;
-    image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+    no_panic(|| jxl_frames_rgba_inner(src))
+}
+
+fn jxl_frames_rgba_inner(src: &Path) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), String> {
+    let started = std::time::Instant::now();
+    let image = open_peer_jxl(src)?;
     let (width, height) = (image.width(), image.height());
     let frames = image.num_loaded_keyframes();
     if frames == 0 || frames > MAX_ANIMATION_FRAMES || width as u64 * height as u64 * frames as u64 > MAX_IMAGE_PIXELS {
@@ -553,6 +585,9 @@ pub fn jxl_frames_rgba(src: &Path) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), St
     let mut out = Vec::with_capacity(out_frames);
     let mut row = Vec::new();
     for j in 0..out_frames {
+        if started.elapsed() > JXL_DEADLINE {
+            return Err("JPEG XL: conversion took too long".to_string());
+        }
         let k = j * frames / out_frames;
         let span = ((j + 1) * frames / out_frames - k) as u64;
         let render = image.render_frame(k).map_err(|e| format!("JPEG XL: {e}"))?;
@@ -586,14 +621,13 @@ pub fn jxl_frames_rgba(src: &Path) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), St
 }
 
 pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
-    use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, PixelFormat, RenderingIntent};
-    jxl_decode_allowed(src)?;
-    let mut image = JxlImage::builder()
-        .alloc_tracker(AllocTracker::with_limit(512 << 20))
-        .open(src)
-        .map_err(|e| format!("JPEG XL: {e}"))?;
-    // The PNG carries no colour profile: render in sRGB.
-    image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+    no_panic(|| jxl_to_png_inner(src, out))
+}
+
+fn jxl_to_png_inner(src: &Path, out: &Path) -> Result<(), String> {
+    use jxl_oxide::PixelFormat;
+    // The PNG carries no colour profile: rendered in sRGB (`open_peer_jxl`).
+    let image = open_peer_jxl(src)?;
     if image.width() as u64 * image.height() as u64 > MAX_IMAGE_PIXELS {
         return Err("Image too large".to_string());
     }

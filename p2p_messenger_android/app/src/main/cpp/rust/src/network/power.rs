@@ -20,8 +20,9 @@ impl P2PCore {
         self.metered = metered;
     }
 
-    /// Battery saver. The Kotlin / GTK side turns this on when the app goes to the background and the screen turns off. It does not change network
-    /// behaviour; it only lowers the probe rate of healthy, quiet connections (see the `power_save` field note).
+    /// Battery saver. The Kotlin / GTK side turns this on when the app goes to the background and the screen turns off. It is the radio saver
+    /// (`radio_saver`): it gates dials, sweeps and retries to radio windows, puts Tor to sleep between them, and lowers the probe rate of
+    /// healthy, quiet connections (see the `power_save` field note).
     pub(crate) fn set_power_save(&mut self, enabled: bool) {
         if self.power_save == enabled {
             return;

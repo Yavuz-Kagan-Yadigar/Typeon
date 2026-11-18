@@ -35,6 +35,9 @@ struct Control {
     net_changed: tokio::sync::mpsc::UnboundedSender<CoreSignal>,
     /// For `checkUpdate`. Weak: a stopped server must drop its Tor client (arti state lock) for the next start.
     tor: std::sync::Weak<p2p_messenger::update::TorClientRt>,
+    /// A running `checkUpdate` holds the Tor client strongly. `stopServer` sends on this (and dropping it does the
+    /// same), so the check ends and the next start can take the arti state lock.
+    update_cancel: tokio::sync::watch::Sender<()>,
 }
 
 lazy_static::lazy_static! {
@@ -164,17 +167,11 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
                         // `handle_authenticated`, but was NEVER SET anywhere. `ServerConfig::new` leaves it `None`, and neither this file
                         // nor the headless daemon filled it in. So the total ceiling was dead code, and only the per-record quotas applied.
                         // With 20 enrolled devices instead of 8, the real ceiling was 2.5 times the budget.
-            config.total_storage_budget_bytes = Some(budget);
             // The budget is divided by the expected enrollment count, so no single device takes everyone else's share. The
-            // split is roughly by usage: blobs are the largest, mail the smallest.
-            // The quota share and the enrollment cap are one number: more devices than shares would put the sum of the quotas
+            // quota share and the enrollment cap are one number: more devices than shares would put the sum of the quotas
             // over the budget.
-            const EXPECTED_DEVICES: u64 = 16;
-            config.max_enrollments = EXPECTED_DEVICES as u32;
-            let per_device = (budget / EXPECTED_DEVICES).max(8 * 1024 * 1024);
-            config.limits.max_blob_bytes = per_device * 6 / 10;
-            config.limits.max_archive_bytes = per_device * 3 / 10;
-            config.limits.max_mail_bytes = per_device / 10;
+            config.max_enrollments = crate::DEFAULT_MAX_ENROLLMENTS;
+            config.apply_storage_budget(budget);
             info!(
                 "Disk budget {} MB — per-device quota: blob {} MB, archive {} MB, mail {} MB",
                 budget / (1024 * 1024),
@@ -237,6 +234,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
             shutdown: Some(stop_tx),
             net_changed: net_tx,
             tor,
+            update_cancel: tokio::sync::watch::channel(()).0,
         });
         out(&mut env, peer_id)
     })
@@ -267,9 +265,12 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
 ) -> jstring {
     guarded(&mut env, |mut env| {
         let _serial = START_STOP.lock().unwrap_or_else(|p| p.into_inner());
-        let taken = CONTROL.lock().unwrap_or_else(|p| p.into_inner()).take();
-        if let Some(tx) = taken.and_then(|mut control| control.shutdown.take()) {
-            let _ = tx.send(());
+        let mut taken = CONTROL.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(control) = taken.as_mut() {
+            let _ = control.update_cancel.send(());
+            if let Some(tx) = control.shutdown.take() {
+                let _ = tx.send(());
+            }
         }
         // Wait until the loop has really ended. The caller may move or delete the blob files next. On a timeout the handle
         // stays for `startServer`. `LAST_RUN` is not held across the wait, because `serverStatus` locks it too.
@@ -278,6 +279,8 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_stopServer<'local
             if RUNTIME.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(20), &mut handle).await }).is_err() {
                 log::warn!("Server loop did not stop within 20 s");
                 *LAST_RUN.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+                // Still running: `serverStatus` must not report it stopped. It clears this once the loop has ended.
+                *CONTROL.lock().unwrap_or_else(|p| p.into_inner()) = taken;
                 return out(&mut env, "Error: server loop did not stop within 20 s".to_string());
             }
         }
@@ -547,15 +550,21 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_checkUpdate<'loca
     guarded(&mut env, |mut env| {
         let dir = jstr(&mut env, &dir);
         let current = jstr(&mut env, &current);
-        let tor = CONTROL.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|c| c.tor.upgrade());
-        let Some(tor) = tor else { return out(&mut env, "Error: server not running".to_string()) };
+        let found = CONTROL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|c| (c.tor.upgrade(), c.update_cancel.subscribe()));
+        let Some((Some(tor), mut cancel)) = found else { return out(&mut env, "Error: server not running".to_string()) };
         let result = RUNTIME.block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3600),
-                p2p_messenger::update::check(&tor, std::path::Path::new(&dir), &current, "typeon-server-{v}.apk", force != 0, false),
-            )
-            .await
-            .unwrap_or_else(|_| Err("update check timed out".to_string()))
+            tokio::select! {
+                r = tokio::time::timeout(
+                    std::time::Duration::from_secs(3600),
+                    p2p_messenger::update::check(&tor, std::path::Path::new(&dir), &current, "typeon-server-{v}.apk", force != 0, false),
+                ) => r.unwrap_or_else(|_| Err("update check timed out".to_string())),
+                // `stopServer` sent, or `Control` was dropped: either way the server is going away.
+                _ = cancel.changed() => Err("server stopped".to_string()),
+            }
         });
         drop(tor);
         out(&mut env, match result {

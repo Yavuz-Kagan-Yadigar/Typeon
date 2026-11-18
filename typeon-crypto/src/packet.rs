@@ -2,6 +2,45 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Element-count limits for collections a peer fills. Decoding stops at the limit, so one byte per element (a
+/// `null` in `groups`, an empty string in `mentions`) cannot become tens of MB inside one 1 MiB packet.
+mod bounded {
+    use serde::de::{Deserialize, Deserializer, Error, SeqAccess, Visitor};
+    use std::marker::PhantomData;
+
+    struct Bounded<T, const N: usize>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>, const N: usize> Visitor<'de> for Bounded<T, N> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a sequence of at most {} items", N)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(N).min(256));
+            while let Some(item) = seq.next_element()? {
+                if out.len() >= N {
+                    return Err(A::Error::custom(format!("more than {} items", N)));
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+
+    fn seq<'de, D: Deserializer<'de>, T: Deserialize<'de>, const N: usize>(d: D) -> Result<Vec<T>, D::Error> {
+        d.deserialize_seq(Bounded::<T, N>(PhantomData))
+    }
+    pub fn seq_256<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+        seq::<D, T, 256>(d)
+    }
+    pub fn seq_4096<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+        seq::<D, T, 4096>(d)
+    }
+    pub fn seq_16384<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+        seq::<D, T, 16384>(d)
+    }
+}
+
 /// A QR code holds under 3 KB, so a longer pairing code is rejected. This also
 /// bounds every field in it (`known_relays`, `rendezvous_node`).
 const MAX_PAIRING_CODE_BYTES: usize = 4096;
@@ -477,9 +516,9 @@ pub struct SyncedContact {
     /// device.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_proofs: Vec<DeviceAddProof>,
-    /// When the user last paired with this contact (ms; 0 = never, e.g. added
-    /// through a group). A sibling that removed the contact before this time
-    /// drops its removed marker and takes the contact again.
+    /// The generation of the user's last pairing with this contact (0 = never,
+    /// e.g. added through a group). A sibling whose removal generation is not
+    /// newer drops its removed marker and takes the contact again.
     #[serde(default)]
     pub added_at_ms: u64,
 }
@@ -493,6 +532,7 @@ pub struct SyncPayload {
     pub contacts: Vec<SyncedContact>,
     /// Serialized `group::Group` records. The receiver adopts them as they are. The
     /// founder's authority is already signed inside the group.
+    #[serde(deserialize_with = "bounded::seq_4096")]
     pub groups: Vec<serde_json::Value>,
         /// Other devices of the SAME identity, so that with three or more devices they
         /// learn about each other. The receiver adds them to `known_remote_devices` with
@@ -527,6 +567,16 @@ pub struct SyncPayload {
     /// `DeviceAdd`. Left out when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_revokes: Vec<DeviceRevoke>,
+    /// Identities the user blocked on one of this identity's devices. The
+    /// receiver blocks them too (only adds: an unblock travels as
+    /// `SiblingEchoBody::Blocked`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
+    pub blocked: Vec<String>,
+    /// Groups left, deleted or removed from on the sending device (its
+    /// `removed_groups`). The receiver marks those it does not hold, so an old
+    /// founder-signed update cannot re-create them there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
+    pub removed_groups: Vec<String>,
 }
 
 /// Top-level packet envelope on the network. The `MessagePacket` header carries the
@@ -675,7 +725,7 @@ pub struct SyncedMessage {
     #[serde(default)]
     pub author_proof: Option<String>,
     /// Reactions on this row: (reactor identity, emoji, reacted_at_ms).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "bounded::seq_4096")]
     pub reactions: Vec<(String, String, u64)>,
 }
 
@@ -742,7 +792,7 @@ pub enum MessageContent {
         /// Group messages only: identity ids of the members this message @mentions. The
         /// receiver keeps only current members and marks the row when its own identity id
         /// is listed. The text itself is not parsed.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_256")]
         mentions: Vec<String>,
     },
     /// For group messages, `target_message_id` in Edit and Delete is actually the
@@ -1086,6 +1136,11 @@ pub enum MessageContent {
         /// `[after_timestamp, before_timestamp)`.
         #[serde(default)]
         after_timestamp: Option<i64>,
+        /// Unscoped backfill: the responder's journal position (`ops_seq` of its last answer)
+        /// after which it sends its non-additive sibling operations again. `None`: send none,
+        /// only report the current position.
+        #[serde(default)]
+        ops_since: Option<u64>,
     },
     /// See `SiblingHistoryRequest`. Recent messages from the sibling's archive.
     SiblingHistoryResponse {
@@ -1097,6 +1152,15 @@ pub enum MessageContent {
         /// Same as `HistorySyncResponse.more`.
         #[serde(default)]
         more: bool,
+        /// Unscoped backfill with `since_timestamp`: every row the responder archived in
+        /// `[since_timestamp, covered_to)` (its clock) is in this answer. The next request
+        /// starts here.
+        #[serde(default)]
+        covered_to: Option<i64>,
+        /// The responder's journal position after the operations it sent again for this
+        /// request (see `ops_since`).
+        #[serde(default)]
+        ops_seq: Option<u64>,
     },
     /// The sender deleted its ACCOUNT (from its last device). Contacts mark the chat as
     /// "account deleted" and stop sending to it. I remove the member from groups I founded.
@@ -1127,7 +1191,7 @@ pub enum MessageContent {
         sent_at_ms: u64,
         /// Group `Invite` only: the device fingerprints the caller rang. Callees then also
         /// exchange keys with members they think are stale.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "bounded::seq_256")]
         participants: Vec<String>,
     },
     /// Shared whiteboard, one board per 1:1 chat or group. `group_id` or
@@ -1151,7 +1215,7 @@ pub enum MessageContent {
         sigs: Vec<WbPageSig>,
     },
     /// "This is what my board looks like": pages that hold strokes, each with a stroke count and
-    /// the XOR of its stroke ids. The one reliable whiteboard packet. The receiver pulls the
+    /// a SHA-256 over the page's sorted stroke content hashes. The one reliable whiteboard packet. The receiver pulls the
     /// pages that differ.
     WbDigest {
         #[serde(default)]
@@ -1185,6 +1249,10 @@ pub enum MessageContent {
         #[serde(default)]
         sigs: Vec<WbPageSig>,
     },
+    /// Asks the sender for a freshly encrypted copy of its pending packet `target_message_id`. Sent when that packet was decrypted
+    /// but could not be taken yet (no Ack), or when a copy of it no longer decrypts (its message key is spent). A byte-identical
+    /// retry can never decrypt a second time. Not acknowledged, like `Ack`.
+    ResendRequest { target_message_id: String },
 }
 
 // No derived `Debug` on these three. It printed file, media and archive keys and message
@@ -1214,6 +1282,9 @@ impl std::fmt::Debug for SiblingEchoBody {
             SiblingEchoBody::StickerRemoved { .. } => "StickerRemoved",
             SiblingEchoBody::ContactRemoved { .. } => "ContactRemoved",
             SiblingEchoBody::StickersRequest { .. } => "StickersRequest",
+            SiblingEchoBody::Blocked { .. } => "Blocked",
+            SiblingEchoBody::ContactDeviceRevoked { .. } => "ContactDeviceRevoked",
+            SiblingEchoBody::DeviceLeaving => "DeviceLeaving",
         })
     }
 }
@@ -1252,6 +1323,7 @@ impl MessageContent {
             Self::WbDigest { .. } => "WbDigest",
             Self::WbPageRequest { .. } => "WbPageRequest",
             Self::WbPage { .. } => "WbPage",
+            Self::ResendRequest { .. } => "ResendRequest",
         }
     }
 
@@ -1321,7 +1393,7 @@ pub struct WbPageSig {
 pub struct WbPageDigest {
     pub page: u8,
     pub count: u32,
-    pub hash: u64,
+    pub hash: [u8; 32],
 }
 
 /// See `MessageContent::Call`.
@@ -1424,14 +1496,14 @@ pub struct IdentityExchange {
     pub pairing_proof: Vec<u8>,
     /// A device that shows its link code, to the first device that proved it
     /// read the code: this device's half of the `DeviceAdd` (`consent`,
-    /// `consent_pq`). Checks against this device's keys, so it is not part of
-    /// the packet signature.
+    /// `consent_pq`). Checks against this device's keys; also covered by the
+    /// packet signature (`identity_exchange_extras_digest`).
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
     pub link_consent: Vec<u8>,
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
     pub link_consent_pq: Vec<u8>,
     /// This device's current prekey (see `SignedPrekey`). Carries its own
-    /// signature; not part of `identity_exchange_signing_input`.
+    /// signature; also covered by `identity_exchange_extras_digest`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prekey: Option<SignedPrekey>,
     /// Sender's clock (ms) when made. Signed with the recipient's device
@@ -1487,6 +1559,7 @@ pub fn prekey_signing_input(device_fingerprint: &str, id: u64, kem_pubkey_x25519
 /// the `revokes` list is covered too (`revokes_digest`): each
 /// revoke proves itself, but the list could be stripped on the way, and a
 /// new contact then took a revoked device back from its old DeviceAdd.
+/// `extras`: `identity_exchange_extras_digest` of the packet, for the same reason.
 pub fn identity_exchange_signing_input(
     identity_id: &str,
     device_fingerprint: &str,
@@ -1495,15 +1568,31 @@ pub fn identity_exchange_signing_input(
     recipient_fp: &str,
     timestamp: u64,
     revokes: &[DeviceRevoke],
+    extras: &[u8; 32],
 ) -> Vec<u8> {
-    let mut out = b"p2pmsg-v0.6-identity-exchange".to_vec();
+    let mut out = b"p2pmsg-v0.7-identity-exchange".to_vec();
     let digest = revokes_digest(revokes);
-    for field in [identity_id.as_bytes(), device_fingerprint.as_bytes(), device_name.as_bytes(), pairing_proof, recipient_fp.as_bytes(), &digest[..]] {
+    for field in [identity_id.as_bytes(), device_fingerprint.as_bytes(), device_name.as_bytes(), pairing_proof, recipient_fp.as_bytes(), &digest[..], &extras[..]] {
         out.extend_from_slice(&(field.len() as u32).to_be_bytes());
         out.extend_from_slice(field);
     }
     out.extend_from_slice(&timestamp.to_be_bytes());
     out
+}
+
+/// SHA-256 over the CBOR of the fields that prove themselves (`device_add`,
+/// `device_add_signer`, `link_consent`, `link_consent_pq`, `prekey`), for
+/// `identity_exchange_signing_input`: unsigned, a relay could strip them or
+/// put an older self-signed prekey in.
+pub fn identity_exchange_extras_digest(ix: &IdentityExchange) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut buf = Vec::new();
+    // Serializing plain values into a Vec does not fail.
+    let _ = ciborium::into_writer(&(&ix.device_add, &ix.device_add_signer, &ix.link_consent, &ix.link_consent_pq, &ix.prekey), &mut buf);
+    let mut h = Sha256::new();
+    h.update(b"p2pmsg-ix-extras-v1");
+    h.update(&buf);
+    h.finalize().into()
 }
 
 /// SHA-256 over every field of each revoke, length-prefixed, in list order.
@@ -1566,14 +1655,21 @@ pub enum SiblingEchoBody {
         #[serde(default)]
         parts: u8,
     },
-    /// A sticker removed from my sticker store.
-    StickerRemoved { id: String },
-    /// The user deleted this contact (by identity) on one of my devices, at
-    /// `removed_at_ms`. A sibling that paired with it again later keeps it.
+    /// Stickers removed from my sticker store (one echo for a multi-select delete).
+    StickerRemoved { #[serde(deserialize_with = "bounded::seq_4096")] ids: Vec<String> },
+    /// The user deleted this contact (by identity) on one of my devices, with
+    /// removal generation `removed_at_ms`. A sibling whose pairing generation is not older keeps it.
     ContactRemoved { identity_id: String, removed_at_ms: u64 },
     /// "Send me your whole sticker store". A linked desktop asks. Only the root device answers, with one
     /// `Sticker` per id that is not in `have`.
-    StickersRequest { #[serde(default)] have: Vec<String> },
+    StickersRequest { #[serde(default, deserialize_with = "bounded::seq_16384")] have: Vec<String> },
+    /// The user blocked (`blocked`) or unblocked this identity on one of my devices.
+    Blocked { identity_id: String, blocked: bool },
+    /// The user revoked this contact device, or rejected its "new device" alert, on one of my devices.
+    ContactDeviceRevoked { identity_id: String, device_fingerprint: String },
+    /// The sending linked device is logging out and erasing itself. The root
+    /// revokes exactly that device (the authenticated sender); others ignore it.
+    DeviceLeaving,
 }
 
 /// Multi-device (history backfill from a sibling): while a device was offline it may have
@@ -1611,7 +1707,7 @@ pub struct SiblingHistoryEntry {
     pub file: Option<Box<MessageContent>>,
     /// Reactions on the message: (reactor identity, emoji, reacted_at_ms). An empty emoji is a removal,
     /// kept for its timestamp.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
     pub reactions: Vec<(String, String, u64)>,
 }
 
@@ -1788,6 +1884,8 @@ mod parse_limit_tests {
                 archive_root_key: Some(vec![0; 32]),
                 name_changed_at_ms: 0,
                 own_revokes: Vec::new(),
+                blocked: Vec::new(),
+                removed_groups: Vec::new(),
             },
         };
         assert!(MessageContent::from_cbor(&bytes(&grant)).is_ok());
@@ -1804,5 +1902,68 @@ mod parse_limit_tests {
         assert!(MessageContent::from_cbor(&data).is_ok());
         data.push(0);
         assert!(MessageContent::from_cbor(&data).is_err());
+    }
+}
+
+#[cfg(test)]
+mod signing_input_tests {
+    use super::*;
+
+    /// Changing any one field changes the signed bytes, and moving bytes across a field boundary does too.
+    fn all_distinct(inputs: Vec<Vec<u8>>) {
+        for (i, a) in inputs.iter().enumerate() {
+            for b in &inputs[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    fn revoke(sig: &[u8]) -> DeviceRevoke {
+        DeviceRevoke { identity_id: "id".into(), revoked_device_fingerprint: "fp".into(), revoked_by: "by".into(), signature: sig.to_vec(), signature_pq: vec![1] }
+    }
+
+    #[test]
+    fn signing_inputs_bind_every_field() {
+        all_distinct(vec![
+            pairing_nonce_proof(b"ab", "c"), pairing_nonce_proof(b"a", "bc"),
+            pairing_nonce_proof(b"ab", "d"), pairing_nonce_proof(b"ax", "c"),
+        ]);
+        all_distinct(vec![
+            founder_transfer_signing_input("g", 1, "a", "b"), founder_transfer_signing_input("g", 2, "a", "b"),
+            founder_transfer_signing_input("h", 1, "a", "b"), founder_transfer_signing_input("g", 1, "x", "b"),
+            founder_transfer_signing_input("g", 1, "a", "x"), founder_transfer_signing_input("g", 1, "ab", ""),
+        ]);
+        all_distinct(vec![
+            prekey_signing_input("fp", 1, b"x", b"m"), prekey_signing_input("fp", 2, b"x", b"m"),
+            prekey_signing_input("fq", 1, b"x", b"m"), prekey_signing_input("fp", 1, b"y", b"m"),
+            prekey_signing_input("fp", 1, b"x", b"n"), prekey_signing_input("fp", 1, b"xm", b""),
+        ]);
+        let r = [revoke(b"s")];
+        all_distinct(vec![
+            identity_exchange_signing_input("i", "d", "n", b"p", "r", 1, &r, &[0; 32]),
+            identity_exchange_signing_input("j", "d", "n", b"p", "r", 1, &r, &[0; 32]),
+            identity_exchange_signing_input("i", "e", "n", b"p", "r", 1, &r, &[0; 32]),
+            identity_exchange_signing_input("i", "d", "o", b"p", "r", 1, &r, &[0; 32]),
+            identity_exchange_signing_input("i", "d", "n", b"q", "r", 1, &r, &[0; 32]),
+            identity_exchange_signing_input("i", "d", "n", b"p", "s", 1, &r, &[0; 32]),
+            identity_exchange_signing_input("i", "d", "n", b"p", "r", 2, &r, &[0; 32]),
+            identity_exchange_signing_input("i", "d", "n", b"p", "r", 1, &[], &[0; 32]),
+            identity_exchange_signing_input("i", "d", "n", b"p", "r", 1, &[revoke(b"t")], &[0; 32]),
+            identity_exchange_signing_input("i", "d", "n", b"p", "r", 1, &r, &[1; 32]),
+            identity_exchange_signing_input("id", "", "n", b"p", "r", 1, &r, &[0; 32]),
+        ]);
+        assert_ne!(revokes_digest(&[revoke(b"s")]), revokes_digest(&[revoke(b"s"), revoke(b"s")]));
+    }
+
+    /// Peer-filled collections stop at their limit while decoding (CRY-9).
+    #[test]
+    fn collection_counts_are_bounded() {
+        let text = |n: usize| MessageContent::Text {
+            group_id: Some("g".into()), text: String::new(), group_message_local_id: None, sent_at_ms: 0,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None,
+            mentions: vec![String::new(); n],
+        };
+        assert!(MessageContent::from_cbor(&to_cbor(&text(256)).unwrap()).is_ok());
+        assert!(MessageContent::from_cbor(&to_cbor(&text(257)).unwrap()).is_err());
     }
 }

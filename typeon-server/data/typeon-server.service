@@ -69,6 +69,16 @@ CapabilityBoundingSet=
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+ProtectProc=invisible
+RemoveIPC=true
+# Not set: ProcSubset=pid hides /proc/uptime, which the clock-jump guard reads.
+
+# Database encryption at rest (SQLCipher). The key file holds 64 hex characters:
+#   sudo install -d -m 0700 /etc/typeon-server
+#   openssl rand -hex 32 | sudo tee /etc/typeon-server/db.key >/dev/null; sudo chmod 0600 /etc/typeon-server/db.key
+#LoadCredential=dbkey:/etc/typeon-server/db.key
+#Environment=TYPEON_SERVER_DB_KEY_FILE=%d/dbkey
 
 [Install]
 WantedBy=multi-user.target

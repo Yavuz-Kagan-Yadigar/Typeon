@@ -110,8 +110,12 @@ impl P2PCore {
         let origin = origin.filter(|o| valid_sticker_origin(o)).map_or_else(|| format!("jxl:{id}"), str::to_string);
         // Same bytes, or the same origin (a WhatsApp sticker encoded twice): kept once.
         if let Ok(have) = conn.query_row("SELECT id FROM stickers WHERE id = ?1 OR origin_id = ?2", params![id, origin], |r| r.get::<_, String>(0)) {
-            let _ = std::fs::remove_file(&tmp);
-            return Ok(have);
+            if self.sticker_enc_path(&have).is_ok_and(|p| p.exists()) {
+                let _ = std::fs::remove_file(&tmp);
+                return Ok(have);
+            }
+            // The row's file is gone (interrupted restore, manual cleanup): this copy replaces the row.
+            let _ = conn.execute("DELETE FROM stickers WHERE id = ?1", params![have]);
         }
         let enc = dir.join(format!("{id}.enc"));
         std::fs::rename(&tmp, &enc).inspect_err(|_| { let _ = std::fs::remove_file(&tmp); }).map_err(|e| e.to_string())?;
@@ -181,6 +185,27 @@ impl P2PCore {
     }
 
     pub(crate) fn delete_sticker(&mut self, id: &str, sync: bool) -> Result<(), String> {
+        self.delete_stickers(&[id.to_string()], sync)
+    }
+
+    /// Deletes every sticker in `ids` and tells my other devices in ONE echo. Returns the first error after
+    /// trying them all.
+    pub(crate) fn delete_stickers(&mut self, ids: &[String], sync: bool) -> Result<(), String> {
+        let mut first_err = None;
+        let mut done = Vec::new();
+        for id in ids {
+            match self.delete_sticker_here(id) {
+                Ok(()) => done.push(id.clone()),
+                Err(e) => { first_err.get_or_insert(e); }
+            }
+        }
+        if sync && !done.is_empty() {
+            self.send_to_siblings(SiblingEchoBody::StickerRemoved { ids: done });
+        }
+        first_err.map_or(Ok(()), Err)
+    }
+
+    fn delete_sticker_here(&mut self, id: &str) -> Result<(), String> {
         let enc_path = self.sticker_enc_path(id)?;
         let conn = self.db.as_ref().ok_or("DB not open")?;
         conn.execute("DELETE FROM stickers WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
@@ -190,9 +215,6 @@ impl P2PCore {
         let _ = std::fs::remove_file(cache.join(format!("anim-{id}.gif")));
         let _ = std::fs::remove_file(cache.join(format!("first-{id}.png")));
         remove_cached_conversions(&self.attachments_dir()?, "sticker-", id);
-        if sync {
-            self.send_to_siblings(SiblingEchoBody::StickerRemoved { id: id.to_string() });
-        }
         Ok(())
     }
 
@@ -215,12 +237,14 @@ impl P2PCore {
         serde_json::Value::from(rows).to_string()
     }
 
-    /// A sibling echo with no chat (sticker store changes) to all my other devices.
+    /// A sibling echo with no chat (sticker store, contact and block changes) to all my other devices.
     pub(crate) fn send_to_siblings(&mut self, body: SiblingEchoBody) {
         let content = MessageContent::SiblingEcho { conversation_identity_id: None, group_id: None, body };
-        for fp in self.sibling_active_devices() {
+        let siblings = self.sibling_active_devices();
+        self.journal_sibling_op(&content, &siblings);
+        for fp in siblings {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
-                error!("SiblingEcho (sticker) send failed (sibling={}): {}", crate::log_id(&fp), e);
+                error!("SiblingEcho send failed (sibling={}): {}", crate::log_id(&fp), e);
             }
         }
     }
@@ -234,6 +258,7 @@ impl P2PCore {
         if !self.node_mode_enabled {
             return;
         }
+        self.evict_failed_partials();
         let limit = self.history_storage_limit_bytes;
         let conn = match &self.db {
             Some(c) => c,
@@ -248,7 +273,7 @@ impl P2PCore {
         let (complete, partial): (i64, i64) = conn.query_row(
             "SELECT COALESCE(SUM(CASE status WHEN 'complete' THEN total_size ELSE 0 END), 0), \
                     COALESCE(SUM(CASE status WHEN 'complete' THEN 0 ELSE bytes_transferred END), 0) \
-             FROM files WHERE status IN ('complete', 'downloading', 'failed')",
+             FROM files WHERE status IN ('complete', 'downloading', 'failed') AND direction != 'sent'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ).unwrap_or((0, 0));
@@ -259,8 +284,9 @@ impl P2PCore {
         // Evicting complete files cannot free what downloads hold, and
         // charging them here let a few running downloads empty the store:
         // in-flight bytes are bounded at offer time (`receive_file_offer`).
-        // Sent files count but are not evicted: their copy is what peers
-        // download from. A received file loses only this device's copy and
+        // Sent files are neither counted nor evicted: their copy is what peers
+        // download from, and counting what can never be freed evicted every
+        // received file once the sent ones alone filled the limit. A received file loses only this device's copy and
         // goes back to 'offered': deleting the row took the
         // bubble with it, and one contact's files evicted everyone else's.
         let mut stmt = match conn.prepare(
@@ -324,6 +350,69 @@ impl P2PCore {
         }
     }
 
+    /// Failed partial downloads go first, oldest first, back to 'offered': kept only for a resume, they were never evicted, and offers that
+    /// stop being served filled the disk past the limit.
+    pub(crate) fn evict_failed_partials(&mut self) {
+        let limit = self.history_storage_limit_bytes;
+        let Some(conn) = &self.db else { return };
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(CASE status WHEN 'complete' THEN total_size ELSE bytes_transferred END), 0) \
+             FROM files WHERE status IN ('complete', 'downloading', 'failed') AND direction != 'sent'",
+            [], |r| r.get(0),
+        ).unwrap_or(0);
+        let mut over = (total.max(0) as u64).saturating_sub(limit);
+        if over == 0 {
+            return;
+        }
+        let failed: Vec<(String, i64)> = conn
+            .prepare("SELECT file_id, bytes_transferred FROM files WHERE status = 'failed' AND direction = 'received' AND bytes_transferred > 0 ORDER BY created_at ASC")
+            .and_then(|mut st| st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map(|it| it.flatten().collect()))
+            .unwrap_or_default();
+        for (file_id, bytes) in failed {
+            if over == 0 {
+                break;
+            }
+            if self.active_downloads.contains_key(&file_id) {
+                continue;
+            }
+            if self.remove_local_attachment(&file_id).is_ok() {
+                over = over.saturating_sub(bytes.max(0) as u64);
+            }
+        }
+    }
+
+    /// `.enc` files in `attachments/` with no `files` row: left by a process killed while encrypting an outgoing file (the row is written
+    /// only when the encryption is done). Only files untouched for an hour, so no encryption still running is hit. Called at start.
+    pub(crate) fn sweep_orphan_enc_files(&self) {
+        let (Some(conn), Ok(dir)) = (&self.db, self.attachments_dir()) else { return };
+        // Temporary files of a sticker store or a conversion cache write a killed process left; nothing runs yet at start.
+        for (tmp_dir, prefix, suffix) in [(self.stickers_dir().ok(), ".tmp-", ""), (Some(dir.join("sticker_cache")), ".", ".tmp")] {
+            let Some(entries) = tmp_dir.and_then(|d| std::fs::read_dir(d).ok()) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(prefix) && name.ends_with(suffix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".enc")) else { continue };
+            let old = entry.metadata().ok().and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .map_or(false, |age| age.as_secs() > 3600);
+            if !old || !is_safe_file_id(id) {
+                continue;
+            }
+            let known = conn.query_row("SELECT 1 FROM files WHERE file_id = ?1", params![id], |_| Ok(())).is_ok();
+            if !known {
+                info!("Orphan attachment file removed: {}", id);
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
     /// Called from `poll_events`. This is a SAFETY NET in addition to the calls to `enforce_history_storage_limit` at file-completion time. It
     /// trims files that have already accumulated, for example after the user LOWERS the limit. It is rate limited by
     /// `HISTORY_STORAGE_SWEEP_INTERVAL_MS` (so a full SQL SUM query does not run on every turn).
@@ -359,10 +448,7 @@ impl P2PCore {
 
     /// Removes one attachment completely (the DB row, the on-disk `.enc` blob, and any `plain_cache` copy). See `enforce_history_storage_limit`.
     pub(crate) fn delete_attachment_file(&mut self, file_id: &str) {
-        self.remove_attachment_copy(file_id);
-        if let Some(conn) = &self.db {
-            let _ = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
-        }
+        self.remove_attachment_copy_with(file_id, true);
         self.finish_blob_upload(file_id);
         self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());
     }
@@ -370,6 +456,12 @@ impl P2PCore {
     /// Removes this device's copy of an attachment (`.enc`, decrypted cache,
     /// running transfer); the `files` row is the caller's business.
     pub(crate) fn remove_attachment_copy(&mut self, file_id: &str) {
+        self.remove_attachment_copy_with(file_id, false);
+    }
+
+    /// `drop_row`: the `files` row is deleted too, before the `.enc`: a kill in between leaves an orphan `.enc`
+    /// (swept at start), not a 'complete' row with no file.
+    fn remove_attachment_copy_with(&mut self, file_id: &str, drop_row: bool) {
         let (file_name, sha): (Option<String>, Option<String>) = self.db.as_ref().and_then(|conn| {
             conn.query_row("SELECT file_name, sha256_hex FROM files WHERE file_id = ?1", params![file_id], |r| Ok((r.get(0)?, r.get(1)?))).ok()
         }).unwrap_or_default();
@@ -384,6 +476,11 @@ impl P2PCore {
         if let (Some(h), false, Ok(dir)) = (sha.as_deref(), shared, self.attachments_dir()) {
             let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("anim-{h}.gif")));
             let _ = std::fs::remove_file(dir.join("plain_cache").join(format!("first-{h}.png")));
+        }
+        if drop_row {
+            if let Some(conn) = &self.db {
+                let _ = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
+            }
         }
         if let Ok(enc_path) = self.enc_path_for(file_id) {
             let _ = std::fs::remove_file(enc_path);
@@ -427,7 +524,8 @@ impl P2PCore {
             .sum::<u64>();
         let attachments_dir = base_path.join("attachments");
         let enc_bytes = dir_size(&attachments_dir, Some("enc"));
-        let cache_bytes = dir_size(&attachments_dir.join("plain_cache"), None);
+        // Decrypted copies and the encrypted conversion cache.
+        let cache_bytes = dir_size(&attachments_dir.join("plain_cache"), None) + dir_size(&attachments_dir.join("sticker_cache"), None);
         let stickers_bytes = dir_size(&base_path.join("stickers"), None);
 
         // (file_id, group_id, peer fingerprint, is a voice message, sent by me)
@@ -608,8 +706,15 @@ impl P2PCore {
             Some(g) => ("group_id = ?1", vec![g]),
             None => ("peer_device_fingerprint = ?1 AND group_id IS NULL", fps.iter().collect()),
         };
+        // My messages still on their way: their queued sends are withdrawn after the commit.
+        let mut unsent: Vec<String> = Vec::new();
         for k in keys {
             let old = format!("{cond} AND COALESCE(NULLIF(sent_at_ms,0), timestamp) < ?2");
+            if let Ok(mut st) = tx.prepare(&format!("SELECT message_id FROM messages WHERE {old} AND status IN ('pending', 'sent') AND message_id IS NOT NULL")) {
+                if let Ok(rows) = st.query_map(params![k, before_ms], |r| r.get::<_, String>(0)) {
+                    unsent.extend(rows.flatten());
+                }
+            }
             for sql in [
                 format!("DELETE FROM message_reactions WHERE message_id IN (SELECT message_id FROM messages WHERE {old})"),
                 format!("DELETE FROM message_seen WHERE message_id IN (SELECT message_id FROM messages WHERE {old})"),
@@ -622,7 +727,12 @@ impl P2PCore {
         // No history answer or sibling backfill may bring the rows back.
         // After the commit: a failed delete left the rows hidden for good.
         self.raise_history_floor(&floor_key, before_ms as u64);
+        for id in &unsent {
+            self.withdraw_unsent(id);
+        }
         for file_id in &old_files {
+            // A file offer still queued goes the same way (its message id is the file id).
+            self.withdraw_unsent(file_id);
             self.delete_attachment_file(file_id);
         }
         Ok(())

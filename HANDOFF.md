@@ -47,7 +47,7 @@ Features: 1:1 messages, groups, edit, delete, reactions, read state, files/media
 | `typeon-crypto/src/packet.rs` | `MessagePacket`, `MessageContent` (message types), signature input |
 | `typeon-crypto/src/server_proto.rs` | Server message types + default limits (`mailbox_ttl_ms` = 14 days) |
 | `typeon-crypto/src/server_seal.rs` | Second seal on the envelope sent to the server |
-| `p2p_messenger_android/app/src/main/cpp/rust/src/lib.rs` | Core root (~930 lines): `P2PCore` struct, global `RUNTIME`/`CORE`, module list, `CORE_SRC`. It used to be one 29,000-line file; it is now split into topic modules (line below) |
+| `p2p_messenger_android/app/src/main/cpp/rust/src/lib.rs` | Core root (~780 lines): `P2PCore` struct, global `RUNTIME`/`CORE`, module list, `CORE_SRC`. It used to be one 29,000-line file; it is now split into topic modules (line below) |
 | same folder, core topic modules (all `impl P2PCore` / `use super::*`) | `core_lock.rs` (core lock), `media_unlocked.rs` (file and label work without the lock), `wire.rs` (libp2p wire types), `util.rs` (helpers, signature inputs, `mono_ms`), `types.rs` (types), `tuning.rs` (constants), `db.rs` (`init_db`, schema, SQLCipher), `pairing.rs` (QR/pairing, `IdentityExchange`), `devices.rs` (device fan-out/authority), `sibling_sync.rs` (sibling devices: sync, read state, history), `contacts.rs` (contacts, block, delete/wipe), `session.rs` (handshake, ratchet rotation), `send.rs` (sending, reactions, edit/delete, Ack), `receive.rs` (`receive_message`), `archive.rs` (message archive, history requests), `persist.rs` (sealed blobs, ratchet persistence), `group_ops.rs` (group operations), `storage.rs` (labels, storage), `network/` (`start_network`, reconnect, retry, direct/server publish route in `publish.rs`), `file_transfer.rs` (file transfer), `poll.rs` (`poll_events`, `process_incoming_envelope`), `recovery.rs` (recovery file), `jni_exports/` (JNI functions `Java_com_p2p_messenger_P2PLib_*`), `core_tests.rs` (tests). Details: TECHNICAL_HANDOFF §1.1 |
 | same folder `api.rs` | Plain Rust interface without JNI. Linux and Windows call this |
 | same folder `server_client/` | Client side of the server: `mod.rs` (sweeps, errors), `connection.rs` (enroll, rebind), `mailbox.rs` (register, deposit, fetch, ack), `archive.rs`, `blobs.rs` |
@@ -66,7 +66,7 @@ Features: 1:1 messages, groups, edit, delete, reactions, read state, files/media
 | `trafficvis/` | Traffic visualisation simulator (`traffic_visualization.html`, `selftest.js`) |
 | `p2p_messenger_android_server/` | Android app for the server. Screen: `ServerActivity` |
 | `typeon-server/src/` | Server logic: `lib.rs` (`ServerCore`, constants), `handlers.rs` (requests), `store/` (SQLite: `mod.rs` schema, `mail.rs` mailboxes and `seq`, `enrollments.rs`, `archive.rs`, `blobs.rs`), `blobs.rs`, `limits.rs`, `sweep.rs`, `config.rs`, `relay_streams.rs`, `jni.rs`, `bin/typeon-server.rs` (CLI) |
-| `tools/` | `sign-update.sh` (owner's offline update signing), `bump-version.sh`, `import_icons.py` |
+| `tools/` | `sign-update.sh` (owner's offline update signing), `bump-version.sh` |
 | `Linux/src/` | Desktop client (Linux + Windows, same crate `typeon-linux`). `core.rs` core bridge, `ui/*.rs` screens, `prefs.rs`/`theme.rs`/`font.rs`/`audio.rs`/`qr.rs`/`util.rs` helpers, `call_media.rs` calls (GStreamer), `keyring.rs` + `secrets.rs` key storage (Secret Service: GNOME Keyring / KDE Wallet). **Windows files:** `win.rs` (tray icon, notifications, autostart, fonts), `keyring_win.rs` (DPAPI vault key), `audio_win.rs` (WASAPI recording); on Windows `main.rs` routes the `audio`/`keyring` modules to these |
 | `Linux/packaging/` | Flatpak packaging (`README.md`). `Linux/packaging/windows/`: Windows cross-build/package scripts (`build.sh`, `package.sh`, `package-msys2.sh`, `fetch-sysroot.py`) and `TEST-NOTES.md` |
 | `AGENTS.md` | Shared rules for agents + build recipes (Linux, Windows cross-build) |
@@ -99,11 +99,11 @@ If you change a JNI function, `jni_exports/` and `P2PLib.kt` (and `api.rs` if ne
 4. If 30 min have passed, the ratchet is renewed (`maybe_rotate_ratchet`).
 5. The message is encrypted, hybrid-signed, and sent over the direct envelope protocol if the peer is connected. It is deposited on the server when the direct path is down, when the message is critical (handshake, rotation, call signal), or when there is no Ack after 1.5 s. Otherwise it stays in the retry queue (`network/publish.rs`). Gossipsub no longer exists.
 6. Types that wait for an Ack are written to the `awaiting_confirmation` list and to the DB (`pending_durable_retries`, `pending_group_messages`).
-7. Retry: first after 15 s (`ACK_RETRY_INITIAL_MS`), then with backoff up to 120 s (`ACK_RETRY_MAX_MS`). After about 25 min, a fresh encrypted copy with the same `message_id`. It gives up after **7 days** (`TEXT_RETRY_GIVE_UP_MS`).
+7. Retry: first after 15 s (`ACK_RETRY_INITIAL_MS`), then with backoff up to 120 s (`ACK_RETRY_MAX_MS`). A packet that was decrypted but not taken (or whose copy no longer decrypts) makes the receiver send `ResendRequest`; the sender re-encrypts it under the same `message_id` (at most every quarter of the message's age, 30 s to 25 min). Pending packets are re-encrypted only on a chain generation change, a handshake redo or such a request; otherwise the same bytes are offered again, and every regeneration withdraws the previous server copy. It gives up after **7 days** (`TEXT_RETRY_GIVE_UP_MS`).
 
 ### 3.3 Receiving a message
 1. `receive_message` decrypts with the ratchet.
-2. It **writes to the archive first** (`archive_message`). If that succeeds it sends an Ack. If it fails it delays the Ack.
+2. It **writes to the archive first** (`archive_message`). If that succeeds it sends an Ack. If it fails the packet is not taken and no Ack is sent; the receiver sends `ResendRequest` and the sender re-encrypts the packet.
 3. If the same `message_id` arrives a second time, it is dropped.
 4. Rate limit: at most 60 packets per 10 s (`RATE_LIMIT_MAX_PER_WINDOW`); 600 on an established connection.
 5. Types that do **not** get an Ack (on purpose): `Ack`, `Seen`, `TypingIndicator`, `AddressAnnounce`, `SiblingHistoryResponse`. (`HistorySyncResponse` does get an Ack.)
@@ -116,7 +116,8 @@ If you change a JNI function, `jni_exports/` and `P2PLib.kt` (and `api.rs` if ne
 - The other side sends every message separately to all active devices of the contact.
 - My own messages reach my other device through `SiblingEcho` (text, edit, delete).
 - History is fetched page by page with `SiblingHistoryRequest`.
-- Read state syncs between devices with `ReadStateSync`.
+- Read state syncs between devices with `ReadStateSync` (retried up to 7 days, sent only when a newer received message exists).
+- A pairing code makes a contact of one identity only; a contact from a code whose device never proves itself is removed after 2 × `PAIRING_WINDOW_MS`. Contact add/remove ordering between siblings uses generations, not clocks. The root ignores contact removal and foreign-founded group changes coming from linked devices.
 - A non-primary device gets contact and group info through `DeviceSync`/`SyncPayload`.
 
 ### 3.5 Groups
@@ -127,10 +128,10 @@ If you change a JNI function, `jni_exports/` and `P2PLib.kt` (and `api.rs` if ne
 ### 3.6 Network
 - libp2p. Transport: Noise + yamux. **No gossipsub** (removed in c798a6f): envelopes go point to point. Discovery: Kademlia (client mode). Relay: Circuit Relay v2. Identify on. DCUtR and mDNS are not in the build.
 - Custom protocols: `/p2pmessenger/envelope/1.0.0`, `/p2pmessenger/ack/1.0.0`, `/p2pmessenger/keepalive/1.0.0` (and `1.1.0`), `/p2pmessenger/filexfer/1.0.0`, `/typeon/server/1.0.0`, `/typeon/media/1.0.0` (calls), `/typeon/relay/1.0.0`.
-- **The internet is reached only through the Tor onion service.** mDNS and UPnP are not in the build. Plain outgoing TCP is refused with `DialReject`. This is intended, so IP addresses do not leak. Do not "fix" it.
+- **The internet is reached only through the Tor onion service.** mDNS and UPnP are not in the build. There is no TCP listener and no TCP dial: inbound onion streams reach the swarm in-process (`tor::OnionListen`). This is intended, so IP addresses do not leak. Do not "fix" it.
 - Tor states (`TorStatus`): `Disabled`, `Bootstrapping`, `Ready`, `Failed`.
 - `start_network` starts the network. `poll_events` returns events as JSON.
-- Reconnect: `reconnect_sweep` every 15 s. `dial_with_relay_fallback` tries direct first, then the relay.
+- Reconnect: `reconnect_sweep` every 15 s. `dial_with_relay_fallback` dials onion, direct and relay circuits concurrently.
 - Keepalive interval: 2 s with the screen on, 20 s idle, 60 s in power saving.
 - Files: sent in chunks, per-file key, download from several sources at once, up to 4 GB.
 - EXIF, GPS and device info are removed from sent images and videos (`attachments.rs` and `OutgoingMedia.kt`). Orientation is kept.
@@ -138,7 +139,7 @@ If you change a JNI function, `jni_exports/` and `P2PLib.kt` (and `api.rs` if ne
 ### 3.7 Server (optional)
 - What it does: while the recipient is offline it **writes the encrypted envelope to disk**, and gives it over when the recipient comes back.
 - Three operations: `Deposit` (leave), `Fetch` (take), `Ack` (may delete).
-- Default retention: **14 days** (`mailbox_ttl_ms`, `server_proto.rs`). An enrolled device that is idle for 30 days is put to sleep (`ENROLLMENT_IDLE_MS`). Default maximum 16 enrollments (`DEFAULT_MAX_ENROLLMENTS`; the Android server app sets the same 16 in `jni.rs`). At most 60 public enrollments per hour. The public join code lasts **3 days** and is renewed (`PUBLIC_CODE_TTL_MS`).
+- Default retention: **14 days** (`mailbox_ttl_ms`, `server_proto.rs`). An enrolled device that is idle for 30 days is put to sleep (`ENROLLMENT_IDLE_MS`). Per-device quotas are `budget / max_devices` (6/10 blob, 3/10 archive, 1/10 mail, capped at the defaults); archive and blobs stop at 90 % of the budget. Default maximum 16 enrollments (`DEFAULT_MAX_ENROLLMENTS`; the Android server app sets the same 16 in `jni.rs`). At most 60 public enrollments per hour. The public join code lasts **3 days** and is renewed (`PUBLIC_CODE_TTL_MS`).
 - The server cannot read content: the envelope is already end-to-end encrypted, with a second seal on top. The session mailbox name comes from the static DH of the two devices' long-term KEM X25519 keys (fixed per pair, not changed on rotation; `server_seal::session_mailbox`). The seal key comes from the ratchet root.
 - The server can see: size, time, and which PeerId reads which mailbox. This is a known and accepted limit.
 - The server can delay or drop messages but cannot forge them. So: a normal message goes direct when the peer is connected. The server copy is made only if there is no Ack after 1.5 s (`ACK_SUSPECT_MS`). The handshake (`Handshake`, `IdentityExchange`) and ratchet renewal notices always go to both (`network/publish.rs`).

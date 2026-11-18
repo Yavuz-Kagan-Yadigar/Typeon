@@ -83,14 +83,18 @@ class AppLockActivity : AppCompatActivity() {
                 } else {
                     AppLock.verify(this@AppLockActivity, entered)
                 }
+                if (!ok && !createMode) AppLock.noteFailedAttempt(this@AppLockActivity)
+                // Unlock here, not on Main: a rotation cancels the scope before withContext runs
+                // and a correct password would be lost.
+                if (ok) {
+                    AppLock.clearFailedAttempts(this@AppLockActivity)
+                    AppLock.markUnlocked()
+                }
                 withContext(Dispatchers.Main) {
                     submit.isEnabled = true
                     if (ok) {
-                        AppLock.clearFailedAttempts(this@AppLockActivity)
-                        AppLock.markUnlocked()
                         finish()
                     } else {
-                        if (!createMode) AppLock.noteFailedAttempt(this@AppLockActivity)
                         password.text.clear()
                         showError(error, getString(R.string.error_app_lock_wrong))
                     }

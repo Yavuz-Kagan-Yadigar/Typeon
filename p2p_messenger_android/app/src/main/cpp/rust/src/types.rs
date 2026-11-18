@@ -119,6 +119,9 @@ pub struct PendingMessageSummary {
     /// (in pairwise group fan-out, each `PendingMessageSummary` maps to one device of one member). Empty if unknown (rare: the device record may have been
     /// deleted or revoked). In that case Kotlin falls back to a short fingerprint.
     pub device_name: String,
+    /// Display name of the contact that owns the target device; empty when it is none (a sibling, a removed contact).
+    #[serde(default)]
+    pub contact_name: String,
     pub group_id: Option<String>,
     pub text: String,
     pub original_sent_at: u64,
@@ -247,6 +250,12 @@ pub struct AttachmentSummary {
     /// Shown without a bubble frame, see `MessageContent::FileOffer.sticker`.
     #[serde(default)]
     pub sticker: bool,
+    /// The sender's send time (ms): the order key of the bubble, like a text's `sent_at_ms`. `created_at` for older rows.
+    #[serde(default)]
+    pub sent_at_ms: u64,
+    /// My own file only: the send status of its offer ("pending" | "sent" | "error" | "delivered"); None when not known.
+    #[serde(default)]
+    pub send_status: Option<String>,
 }
 
 /// In-memory state of an ongoing download (see `download_file`, `request_next_chunk` and the attachments.rs module note). Chunks are ALWAYS requested in

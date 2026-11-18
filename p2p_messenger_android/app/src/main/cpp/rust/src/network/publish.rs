@@ -107,7 +107,7 @@ impl P2PCore {
         // still unacknowledged at the first retry (`ACK_RETRY_INITIAL_MS`). Before, with a server configured, two phones on the same LAN
         // uploaded every message over Tor to the server for the first 30 s (about 15 KB per message plus a Tor round trip).
         // The guarantee is unchanged: without an Ack, the envelope falls back to the server.
-        // Handshake, IdentityExchange and rotation announcements always go by both paths (see `should_shadow_on_gossipsub`).
+        // Handshake, IdentityExchange and rotation announcements always go by both paths (`critical` below).
         let direct = self.direct_peer_for(target_device_fingerprint, envelope)
             .map_or(false, |p| self.swarm.as_ref().map_or(false, |s| s.is_connected(&p)));
         let critical = self.call_signal_sending || match envelope {
@@ -249,15 +249,16 @@ impl P2PCore {
         // The entry is also written to the encrypted DB, so it survives a process kill. Written by reference before the move
         // into the struct. The real start time is stored, not `now`. Otherwise the 7-day give-up window would reset on every refresh.
         let original_sent_at = original_sent_at_override.unwrap_or(now);
+        // The packet is stamped with the chain generation it was encrypted under.
+        let chain_stamp = self.chain_stamp_for(target_device_fingerprint);
         if let Some(content) = &regen_content {
-            self.persist_durable_retry(message_id, target_device_fingerprint, content, original_sent_at);
+            self.persist_durable_retry(message_id, target_device_fingerprint, content, original_sent_at, Some((&envelope, chain_stamp.as_str())));
         }
         let retry_interval_ms = retry_interval_ms_override.unwrap_or(ACK_RETRY_INITIAL_MS);
         self.awaiting_confirmation.insert(message_id.to_string(), PendingConfirmation {
             suspect_probed: false,
             direct_delivered: false,
-            // The packet is stamped with the chain generation it was encrypted under.
-            chain_stamp: self.chain_stamp_for(target_device_fingerprint),
+            chain_stamp,
             peer_device_fingerprint: target_device_fingerprint.to_string(),
             envelope,
             next_retry_at: now + retry_interval_ms,
@@ -389,27 +390,27 @@ impl P2PCore {
             if first_sent_at >= now {
                 continue;
             }
-            // Critical (see `MAX_UNCONFIRMED_AGE_MS`): a packet older than this can no longer be decrypted by the peer, because its ratchet
-            // has probably gone through a DH/KEM rotation. Resending it only makes the recipient show "Decryption failed" forever.
-            // See `PendingConfirmation.chain_stamp`: if the session generation changed, the packet is undecryptable at the peer. Refresh it
-            // now instead of waiting for the age limit. The age check remains only as a fallback for the case with no rotation at all.
+            // See `PendingConfirmation.chain_stamp`: if the session generation changed, the packet is re-encrypted on the current chain.
             // The stamp is computed once per peer (see `stamp_cache`), not once per message.
             let stale_chain = match stamp_cache.get(&peer_fp) {
                 Some(current) => !current.is_empty() && !chain_stamp.is_empty() && current != &chain_stamp,
                 None => false,
             };
-            if stale_chain || now.saturating_sub(first_sent_at) > MAX_UNCONFIRMED_AGE_MS {
-                // The real give-up limit is now `original_sent_at` (when the message first entered the queue, stable across refreshes),
-                // checked against `TEXT_RETRY_GIVE_UP_MS`. This check runs even when `regen_content` is set. Otherwise a message would be
-                // refreshed and retried for days or weeks, and the 7-day limit would mean nothing.
-                let give_up_for_real = now.saturating_sub(original_sent_at) > TEXT_RETRY_GIVE_UP_MS;
-                // Sync packets are not refreshed: re-encrypting and re-depositing
-                // them every ~30 min for 7 days to a device that is switched off
-                // cost ~1000 server deposits a day on mobile data. The first
-                // deposit stays on the server, and a returning device catches up
-                // anyway (sibling backfill, roster on reconnect, next read mark,
-                // next digest).
-                if matches!(regen_content, Some(
+            // The real give-up limit is `original_sent_at` (when the message first entered the queue, stable across refreshes).
+            let give_up_for_real = now.saturating_sub(original_sent_at) > TEXT_RETRY_GIVE_UP_MS;
+            // Age alone, same chain generation: the peer can still open these bytes (it keeps a replaced receive chain for 7 days), and
+            // the server already holds them. They are offered again unchanged. Re-encrypting here made a new signed copy and a new server
+            // deposit every 25 minutes for 7 days. A peer that cannot open them asks for a fresh copy (`ResendRequest`).
+            // Only a lost handshake needs a new session: `maybe_redo_handshake` checks that (it throttles itself) and regenerates every
+            // pending packet of the peer when it really replaced the session.
+            if !stale_chain && !give_up_for_real && now.saturating_sub(first_sent_at) > MAX_UNCONFIRMED_AGE_MS {
+                self.maybe_redo_handshake(&peer_fp);
+                if self.awaiting_confirmation.get(&message_id).map_or(true, |p| p.first_sent_at >= now) {
+                    continue;
+                }
+            } else if stale_chain || give_up_for_real {
+                // Sync packets past the give-up limit leave quietly: there is no bubble to mark.
+                if give_up_for_real && matches!(regen_content, Some(
                     MessageContent::SiblingEcho { .. } | MessageContent::ReadStateSync { .. }
                     | MessageContent::DeviceSync(_) | MessageContent::WbDigest { .. })) {
                     info!("Packet {} (sync -> {}) left without refresh", message_id, &peer_fp[..peer_fp.len().min(8)]);
@@ -425,7 +426,7 @@ impl P2PCore {
                         // `message_id` and `original_sent_at` (see `send_message_content_inner`). The UI bubble and the `awaiting_confirmation` entry
                         // stay continuous. The pending-messages screen lists only Text, so this log line is the only place the other kinds show up.
                         let kind = content.kind();
-                        warn!("Packet {} ({} -> {}) exceeded max age without confirmation, REFRESHING and retrying with the SAME id",
+                        warn!("Packet {} ({} -> {}) encrypted under a replaced chain, REFRESHING and retrying with the SAME id",
                             message_id, kind, &peer_fp[..peer_fp.len().min(8)]);
                         if let Err(e) = self.send_message_content_inner(
                             peer_fp.clone(), &content, None,
@@ -474,6 +475,8 @@ impl P2PCore {
                             (group_message_local_id.clone().unwrap_or_else(|| m.header.message_id.clone()), Some(gid.clone())),
                         _ => (m.header.message_id.clone(), None),
                     };
+                    // A copy to another device of the peer may have been acked: a delivered bubble keeps its mark.
+                    let delivered = self.sent_row_delivered(&event_message_id);
                     let mut status_event = serde_json::json!({
                         "type": "status", "peer": self.canonical_peer_key(&peer_fp),
                         "message_id": event_message_id, "status": "error"
@@ -481,12 +484,14 @@ impl P2PCore {
                     if let Some(gid) = event_group_id {
                         status_event["group_id"] = serde_json::Value::String(gid);
                     }
-                    self.attachment_events.push(status_event.to_string());
+                    if !delivered {
+                        self.attachment_events.push(status_event.to_string());
+                    }
                 }
                 if give_up_for_real {
                     error!("Packet {} not confirmed for {} ms (TEXT_RETRY_GIVE_UP_MS), giving up for good", message_id, TEXT_RETRY_GIVE_UP_MS);
                 } else {
-                    error!("Packet {} exceeded max age ({} ms) without confirmation, giving up (probably ratchet rotation passed)", message_id, MAX_UNCONFIRMED_AGE_MS);
+                    error!("Packet {} encrypted under a replaced chain and cannot be regenerated, giving up", message_id);
                 }
                 continue;
             }
@@ -501,8 +506,9 @@ impl P2PCore {
                             _ => (m.header.message_id.clone(), None),
                         };
                         // The bubble shows the error mark until told otherwise.
+                        // A group row left "pending" when every copy was only queued (`send_group_message_with_status`) turns "sent" too.
                         let was_failed = self.db.as_ref().map_or(false, |c| c.query_row(
-                            "SELECT 1 FROM messages WHERE message_id = ?1 AND status = ?2 AND direction = 'sent'
+                            "SELECT 1 FROM messages WHERE message_id = ?1 AND (status = ?2 OR (?3 IS NOT NULL AND status = 'pending')) AND direction = 'sent'
                                AND (?3 IS NULL OR group_id = ?3)",
                             params![row_id, MessageSendStatus::Failed.as_str(), row_group], |_| Ok(())).is_ok());
                         if was_failed {
@@ -514,7 +520,7 @@ impl P2PCore {
                                 ev["group_id"] = serde_json::Value::String(gid.clone());
                                 if let Some(conn) = &self.db {
                                     let _ = conn.execute(
-                                        "UPDATE messages SET status = 'sent' WHERE message_id = ?1 AND group_id = ?2 AND direction = 'sent' AND status = ?3",
+                                        "UPDATE messages SET status = 'sent' WHERE message_id = ?1 AND group_id = ?2 AND direction = 'sent' AND status IN (?3, 'pending')",
                                         params![row_id, gid, MessageSendStatus::Failed.as_str()],
                                     );
                                 }
@@ -531,10 +537,12 @@ impl P2PCore {
                     self.remove_durable_retry(&message_id);
                     if let NetworkEnvelope::Message(m) = &envelope {
                         self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
-                        self.attachment_events.push(serde_json::json!({
-                            "type": "status", "peer": self.canonical_peer_key(&peer_fp),
-                            "message_id": m.header.message_id, "status": "error"
-                        }).to_string());
+                        if !self.sent_row_delivered(&m.header.message_id) {
+                            self.attachment_events.push(serde_json::json!({
+                                "type": "status", "peer": self.canonical_peer_key(&peer_fp),
+                                "message_id": m.header.message_id, "status": "error"
+                            }).to_string());
+                        }
                     }
                     continue;
                 }
@@ -548,6 +556,37 @@ impl P2PCore {
                 pending.retry_interval_ms = (pending.retry_interval_ms * 2).min(ACK_RETRY_MAX_MS);
                 pending.next_retry_at = current_time_ms() + pending.retry_interval_ms;
             }
+        }
+    }
+
+    /// Our sent row `id` is already marked delivered (another device of the peer acked a copy).
+    pub(crate) fn sent_row_delivered(&self, id: &str) -> bool {
+        self.db.as_ref().map_or(false, |c| c.query_row(
+            "SELECT 1 FROM messages WHERE message_id = ?1 AND direction = 'sent' AND status = 'delivered'",
+            params![id], |_| Ok(())).is_ok())
+    }
+
+    /// The peer decrypted `message_id` but could not take it yet, or cannot decrypt our copy (its key is spent): it asks for a fresh copy
+    /// (`MessageContent::ResendRequest`). A byte-identical retry can never decrypt again. The gap grows with the message's age (a quarter of
+    /// it, 30 s to 25 min), so a packet the peer keeps refusing is re-encrypted no more often than the old fixed 25-minute refresh.
+    pub(crate) fn regen_on_request(&mut self, peer_fp: &str, message_id: &str) {
+        let now = current_time_ms();
+        let Some(p) = self.awaiting_confirmation.get(message_id) else { return };
+        if p.peer_device_fingerprint != peer_fp {
+            return;
+        }
+        let Some(content) = p.regen_content.clone() else { return };
+        let age = now.saturating_sub(p.original_sent_at);
+        if age > TEXT_RETRY_GIVE_UP_MS || now.saturating_sub(p.first_sent_at) < (age / 4).clamp(30_000, MAX_UNCONFIRMED_AGE_MS) {
+            return;
+        }
+        let (original_sent_at, retry_interval_ms) = (p.original_sent_at, p.retry_interval_ms);
+        info!("Peer asked for a fresh copy of {} ({} -> {})", crate::log_id(message_id), content.kind(), crate::log_id(peer_fp));
+        if let Err(e) = self.send_message_content_inner(
+            peer_fp.to_string(), &content, None,
+            Some(message_id.to_string()), Some(original_sent_at), Some(retry_interval_ms),
+        ) {
+            warn!("Fresh copy on request failed (normal retry continues): {}", e);
         }
     }
 
@@ -638,6 +677,10 @@ impl P2PCore {
                     // See `PendingMessageSummary.device_name`.
                     device_name: self.known_remote_devices.get(&p.peer_device_fingerprint)
                         .map(|d| d.device_name.clone())
+                        .unwrap_or_default(),
+                    contact_name: self.known_remote_devices.get(&p.peer_device_fingerprint)
+                        .and_then(|d| self.contacts.values().find(|c| c.trusted_identity_id == d.identity_id))
+                        .map(|c| c.display_name.clone())
                         .unwrap_or_default(),
                     group_id: group_id.clone(),
                     text: text.clone(),

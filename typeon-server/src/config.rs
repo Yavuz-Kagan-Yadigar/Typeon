@@ -36,6 +36,10 @@ pub fn join_code(store: &Store, rotate: bool) -> Result<String, String> {
 /// (`PUBLIC_CODE_TTL_MS`), when its invite row is gone (for example a `data` restore from an old backup), or
 /// with `rotate`. The old invite row is deleted, so the old code stops working at once.
 ///
+/// Unlike every other invite, this token is kept in clear (`meta`), so the CLI and the app can show the code again.
+/// A copy of an unkeyed database therefore gives a working join code until it expires or is rotated (at most 3 days).
+/// Accepted: the code is public by design; set a DB key to protect it at rest.
+///
 /// A free function, because the Android server's JNI layer cannot see `ServerCore` (it lives inside the network
 /// task). It uses only `Store`. A second copy of this logic there would drift apart.
 pub fn public_join_token(store: &Store, rotate: bool) -> Result<String, String> {
@@ -62,7 +66,7 @@ pub fn public_join_token(store: &Store, rotate: bool) -> Result<String, String> 
 impl ServerConfig {
     pub fn new(data_dir: PathBuf) -> Self {
         let limits = ServerLimits::default();
-        // 64 x (256 MiB mail + 1 GiB archive + 4 GiB blob) = 336 GiB.
+        // 16 x (256 MiB mail + 1 GiB archive + 4 GiB blob) = 84 GiB.
         let total = DEFAULT_MAX_ENROLLMENTS as u64
             * (limits.max_mail_bytes + limits.max_archive_bytes + limits.max_blob_bytes);
         ServerConfig {
@@ -74,6 +78,18 @@ impl ServerConfig {
             total_storage_budget_bytes: Some(total),
             max_enrollments: DEFAULT_MAX_ENROLLMENTS,
         }
+    }
+
+    /// Sets the total disk budget and splits it over `max_enrollments` (set that first): blob 6/10, archive 3/10,
+    /// mail 1/10 of one device's share, never above the defaults. Otherwise the per-device quotas could add up to
+    /// several times the budget.
+    pub fn apply_storage_budget(&mut self, budget: u64) {
+        self.total_storage_budget_bytes = Some(budget);
+        let per_device = (budget / self.max_enrollments.max(1) as u64).max(8 * 1024 * 1024);
+        let defaults = ServerLimits::default();
+        self.limits.max_blob_bytes = (per_device * 6 / 10).min(defaults.max_blob_bytes);
+        self.limits.max_archive_bytes = (per_device * 3 / 10).min(defaults.max_archive_bytes);
+        self.limits.max_mail_bytes = (per_device / 10).min(defaults.max_mail_bytes);
     }
 }
 

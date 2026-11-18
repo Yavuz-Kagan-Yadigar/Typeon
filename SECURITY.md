@@ -31,8 +31,10 @@ These are deliberate trade-offs, each explained further down:
 - **Updates trust one offline key.** Every app installs an update only when
   the release's `SHA256SUMS` carries the owner's Ed25519 signature
   (`SHA256SUMS.sig`, made with `tools/sign-update.sh` on the owner's machine,
-  public key pinned in `update.rs`). A GitHub account or CI compromise alone
-  cannot push code; theft of that key can. Android additionally requires the
+  public key pinned in `update.rs`). Signing checks that the GitHub tag matches the
+  local tag, that the assets match `SHA256SUMS` and `dist/`, and that the APKs
+  carry the release certificate. A build that CI poisoned from a clean commit
+  is still not caught; theft of the signing key is not caught either. Android additionally requires the
   APK signing key.
 
 ---
@@ -470,9 +472,10 @@ pre-authorization. This is now implemented, in a **reachability-only v1**:
   app launches an `arti` onion service (`arti-client`, built on the Tor
   Project's own Rust Tor). Its `.onion` address is stable across restarts
   (arti's keystore, the Tor analogue of the persistent libp2p PeerId).
-  Incoming Tor streams are bridged to the app's local libp2p TCP listener,
-  so the swarm treats them as ordinary inbound connections — no custom
-  libp2p listener needed.
+  Incoming Tor streams reach the swarm in-process through `tor::OnionListen`,
+  a listen-only libp2p transport fed by a channel. No TCP port or socket is
+  opened. A stopped onion service is relaunched automatically; inbound
+  upgrades must finish within 30 s.
 - **Dialing.** A small custom libp2p transport routes `/dns/<hash>.onion/…`
   dials through `arti`'s `TorClient::connect`, composed alongside the normal
   TCP/relay transports (it only claims `.onion` addresses, so everything

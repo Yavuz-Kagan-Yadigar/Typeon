@@ -47,7 +47,8 @@ object NotificationHelper {
      * was revoked" and "account deleted" alerts, the notification bar is the only trace. They used to be cleared
      * together with the message notifications, so the user could lose the alert before reading it.
      */
-    private val securityAlertIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+    // Marked in the notification itself: an in-memory id set was empty in a new process.
+    private const val EXTRA_SECURITY_ALERT = "com.p2p.messenger.security_alert"
 
     /** `showDeviceAlertNotification` and `showDeviceRevokedNotification` use fixed slots, independent of identity. */
     private val DEVICE_ALERT_NOTIFICATION_ID = "device_alert".hashCode()
@@ -96,12 +97,11 @@ object NotificationHelper {
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        securityAlertIds.add(SELF_REVOKED_NOTIFICATION_ID)
         show(
             context, SELF_REVOKED_NOTIFICATION_ID,
             context.getString(R.string.app_name),
             context.getString(R.string.device_unlinked_notification),
-            intent
+            intent, security = true
         )
     }
 
@@ -117,7 +117,6 @@ object NotificationHelper {
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        securityAlertIds.add(DEVICE_ALERT_NOTIFICATION_ID)
         show(
             context, DEVICE_ALERT_NOTIFICATION_ID,
             context.getString(R.string.title_security_warning_dialog),
@@ -125,7 +124,7 @@ object NotificationHelper {
             // after unlock.
             if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_device_warning, contactName, shortCode)
             else context.getString(R.string.msg_security_warning),
-            intent
+            intent, security = true
         )
     }
 
@@ -138,10 +137,9 @@ object NotificationHelper {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val id = ("deleted:$peerDeviceFingerprint").hashCode()
-        securityAlertIds.add(id)
         show(context, id, context.getString(R.string.app_name),
             if (NotificationPrefs.showMessageText(context)) context.getString(R.string.msg_contact_deleted_account, name)
-            else context.getString(R.string.notif_contact_deleted_account_hidden), intent)
+            else context.getString(R.string.notif_contact_deleted_account_hidden), intent, security = true)
     }
 
     fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String, messageId: String = "", mention: Boolean = false) {
@@ -190,7 +188,7 @@ object NotificationHelper {
             .filter { it.id != com.p2p.messenger.ui.CallActivity.NOTIFICATION_ID }
             // The foreground service notification is not a message. It is the service's own ongoing slot.
             .filter { it.id != com.p2p.messenger.service.P2PService.NOTIFICATION_ID }
-            .filter { !securityAlertIds.contains(it.id) }
+            .filter { !it.notification.extras.getBoolean(EXTRA_SECURITY_ALERT) }
             .forEach { manager.cancel(it.tag, it.id) }
     }
 
@@ -251,7 +249,7 @@ object NotificationHelper {
 
     /** Consecutive messages from the same chat share one notification ID (a hash of conversationId). So they update one
      *  notification instead of stacking and filling the notification bar. */
-    private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent, alert: Boolean = true, channel: String = MESSAGE_CHANNEL_ID) {
+    private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent, alert: Boolean = true, channel: String = MESSAGE_CHANNEL_ID, security: Boolean = false) {
         // Tapping the notification opens the app in the normal launcher way, not the specific chat. One back press also
         // leaves it.
         val isChat = contentIntent.component?.className.let {
@@ -292,6 +290,7 @@ object NotificationHelper {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
+            .apply { if (security) addExtras(android.os.Bundle().apply { putBoolean(EXTRA_SECURITY_ALERT, true) }) }
             .build()
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.notify(notificationId, notification)

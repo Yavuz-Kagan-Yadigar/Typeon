@@ -230,9 +230,15 @@ task cargoNdkBuild(type: Exec) {
     def taskNames = gradle.startParameter.taskNames
     def taskNamesLower = taskNames.collect { it.toLowerCase() }
     def debugOnly = !taskNames.isEmpty() && taskNamesLower.any { it.contains('debug') } && taskNamesLower.every { !it.contains('release') }
+        // A debug-hooks .so goes to the debug source set only (it overrides main's there), so a
+        // later `assembleRelease -x cargoNdkBuild` can never package it. A normal run removes it,
+        // and the debug variant then uses main's .so.
+    doFirst {
+        if (!debugOnly) project.delete("${projectDir}/src/debug/jniLibs")
+    }
     commandLine resolveCargoExecutable(), 'ndk',
             '-t', 'armeabi-v7a', '-t', 'arm64-v8a', '-t', 'x86_64',
-            '-o', "${projectDir}/src/main/jniLibs",
+            '-o', debugOnly ? "${projectDir}/src/debug/jniLibs" : "${projectDir}/src/main/jniLibs",
             'build', '--release', '--locked',
             *(debugOnly ? ['--features', 'debug-hooks'] : [])
 }

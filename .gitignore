@@ -114,3 +114,11 @@ Mesaj-Akisi-Senaryosu.md
 Pil-LTE-Ozeti-*.md
 Test-Bulgulari-*.md
 HANDOFF.local.md
+inspection-*/
+.audit/
+*_FINDINGS.md
+# Signing and device secrets, should one ever land in the tree.
+*.pem
+pass.txt
+lineage.bin
+debug_db_key.hex

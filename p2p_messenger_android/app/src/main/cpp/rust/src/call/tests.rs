@@ -56,7 +56,9 @@ fn replay_window() {
 
 #[test]
 fn send_recv_through_the_static() {
-    media_start([3u8; 32], [9u8; 8]);
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    media().floors.clear();
+    media_start(&[3u8; 32], [9u8; 8]);
     // Talk to ourselves: our own stream id as a remote.
     media_add_remote("self", &[3u8; 32], &[9u8; 8]);
     let packet = seal_packet(&[3u8; 32], &[9u8; 8], 1, 1, b"opus");
@@ -117,4 +119,44 @@ fn one_late_frame_is_not_a_standing_queue() {
     r.rotate_base();
     r.record_delay(600.0);
     assert_eq!(r.take_queue_ms(), 0);
+}
+
+#[test]
+fn a_rejoin_keeps_the_replay_floor_of_the_same_key() {
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    media().floors.clear();
+    let (key, sid) = ([6u8; 32], [5u8; 8]);
+    media_start(&[1u8; 32], [2u8; 8]);
+    media_add_remote("peer", &key, &sid);
+    for seq in 1..=10 {
+        media_on_packet(&seal_packet(&key, &sid, seq, 1, b"a"));
+    }
+    while media_recv(0).is_some() {}
+    // Leave and join again: the peer goes on with the same key and stream id.
+    media_stop();
+    media_start(&[3u8; 32], [4u8; 8]);
+    media_add_remote("peer", &key, &sid);
+    media_on_packet(&seal_packet(&key, &sid, 7, 1, b"old"));
+    assert!(media_recv(0).is_none(), "a recorded packet is not new after a rejoin");
+    media_on_packet(&seal_packet(&key, &sid, 11, 1, b"new"));
+    assert_eq!(media_recv(0).unwrap(), b"\x01\x00new");
+    // Removing the remote keeps its floor too.
+    media_remove_remote("peer");
+    media_add_remote("peer", &key, &sid);
+    media_on_packet(&seal_packet(&key, &sid, 11, 1, b"again"));
+    assert!(media_recv(0).is_none());
+    media_stop();
+}
+
+#[test]
+fn one_reporter_does_not_set_the_shared_encoder() {
+    let mut m = Media::default();
+    let now = current_time_ms();
+    m.reports.insert("a".into(), (100, now));
+    assert_eq!(reported_queue(&m), 100);
+    m.reports.insert("b".into(), (65_000, now));
+    m.reports.insert("c".into(), (200, now));
+    assert_eq!(reported_queue(&m), 200, "the median, not the worst");
+    m.reports.insert("d".into(), (65_000, now - REPORT_TTL_MS));
+    assert_eq!(reported_queue(&m), 200, "stale reports do not count");
 }

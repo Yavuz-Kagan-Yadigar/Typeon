@@ -9,6 +9,11 @@ license = "GPL-3.0-or-later"
 name = "typeon"
 path = "src/main.rs"
 
+[features]
+# Windows: a release build that keeps its console window, shipped as
+# typeon-debug.exe for RUST_LOG diagnostics (packaging/windows/package.sh).
+console = []
+
 [dependencies]
 # THE protocol core — the very same crate the Android app ships (crypto,
 # double ratchet, SQLite schema, libp2p/Tor transport, multi-device linking).

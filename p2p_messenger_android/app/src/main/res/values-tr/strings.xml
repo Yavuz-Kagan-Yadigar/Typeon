@@ -68,6 +68,7 @@
     <string name="lbl_server_history_warn">Yeni bir cihazın eski mesajlarınızı yüklemesini sağlar. Canlı mesajların aksine bu yedek ileri-gizli değildir: arşiv anahtarını ele geçiren, o ana kadar yüklenmiş her şeyi okur.</string>
     <string name="msg_server_history_upload">Son mesajlarınız ona, sunucunun okuyamayacağı şekilde mühürlenmiş olarak yüklenecek.</string>
     <string name="action_remove_server">Kaldır</string>
+    <string name="confirm_remove_server">%1$s sunucusu kaldırılsın mı? Yeniden katılmak için katılım kodu yeniden gerekir.</string>
     <string name="state_server_connected">Bağlı</string>
     <string name="state_server_connecting">Bağlanılıyor…</string>
     <string name="state_server_not_enrolled">Kayıtlı değil</string>
@@ -130,6 +131,7 @@
     <string name="error_recovery_password_empty">Bir parola girin</string>
     <string name="msg_recovery_exporting">Kurtarma dosyası dışa aktarılıyor…</string>
     <string name="msg_recovery_export_success">Kurtarma dosyası kaydedildi</string>
+    <string name="msg_recovery_export_trimmed">Kurtarma dosyası kaydedildi. Çok büyüktü: yalnızca en yeni %1$d mesaj içinde</string>
     <string name="error_recovery_export_failed">Kurtarma dosyası dışa aktarılamadı</string>
 
     <!-- Spec dışı, kullanıcı isteği: export'un eksik karşılığı — kurtarma
@@ -480,6 +482,8 @@
     <string name="call_missed">Cevapsız arama</string>
     <string name="call_via_p2p">doğrudan</string>
     <string name="call_via_server">sunucu üzerinden</string>
+    <string name="call_audio_failing">gelen ses çalınamıyor</string>
+    <string name="call_mic_failing">mikrofon kullanılamıyor</string>
     <string name="call_waiting_media">medya bekleniyor</string>
     <string name="call_needs_android10">Aramalar için Android 10 veya üstü gerekli</string>
     <string name="call_permission_needed">Aramalar için mikrofon (görüntülü için kamera) izni gerekli</string>

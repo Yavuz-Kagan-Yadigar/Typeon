@@ -100,7 +100,8 @@ impl Recording {
     /// Blocking: it waits for ffmpeg to write the Ogg trailer. Call it off the
     /// main thread.
     pub fn finish(mut self) -> Result<(PathBuf, u32), String> {
-        let duration_ms = self.elapsed_ms() as u32;
+        // ffmpeg stops at `-t 600`; a later stop must not claim more.
+        let duration_ms = self.elapsed_ms().min(600_000) as u32;
 
         if let Some(stdin) = self.child.stdin.as_mut() {
             // Ignore the error: if ffmpeg already exited the pipe is closed,

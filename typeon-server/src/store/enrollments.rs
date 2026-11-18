@@ -71,6 +71,17 @@ impl Store {
             .unwrap_or(0)
     }
 
+    /// Like `count_active_enrollments`, for the enrollments that came in with one invite.
+    pub fn count_active_enrollments_by_invite(&self, invite_hash: &[u8], idle_before: i64) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM enrollments WHERE invite_hash = ?1 AND state = 'active' AND last_seen_at >= ?2",
+                params![invite_hash, idle_before],
+                |r| r.get(0),
+            )
+            .unwrap_or(i64::MAX)
+    }
+
     /// Puts active enrollments last seen before `before` to sleep: their
     /// reader rows go, and mail in boxes nobody reads any more goes with them.
     /// The row, its key and its quota counters stay, so the device comes back

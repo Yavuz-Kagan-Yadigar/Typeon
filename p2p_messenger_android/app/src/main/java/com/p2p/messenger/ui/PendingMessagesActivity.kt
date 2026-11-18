@@ -48,8 +48,21 @@ class PendingMessagesActivity : AppCompatActivity() {
     /** A message acknowledged or given up while this screen is open. */
     private val listener: (String) -> Unit = { json ->
         if (json.contains("\"type\":\"ack\"") || json.contains("\"type\":\"status\"")) {
-            runOnUiThread { loadPendingMessages() }
+            // A burst of acks reloads once: coalesce on the main thread.
+            runOnUiThread {
+                if (!reloadQueued) {
+                    reloadQueued = true
+                    reloadHandler.postDelayed({ reloadQueued = false; loadPendingMessages() }, 500)
+                }
+            }
         }
+    }
+    private var reloadQueued = false
+    private val reloadHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    override fun onDestroy() {
+        reloadHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
     override fun onPause() {
@@ -75,25 +88,14 @@ class PendingMessagesActivity : AppCompatActivity() {
     }
 
     /**
-     * Turns `peer_device_fingerprint` / `group_id` (see types.rs `PendingMessageSummary`) into a readable name. It reuses the existing
-     * `listContacts` / `listGroups` JNI calls, and does not reinvent name resolution here (the same pattern as NotificationHelper).
+     * Turns `peer_device_fingerprint` / `group_id` (see types.rs `PendingMessageSummary`) into a readable name: the core's
+     * `contact_name` for a 1:1 row, `listGroups` for a group row.
      */
     private fun fetchPendingMessages(): List<PendingMessagesAdapter.Item> {
         val pendingJson = try {
             JSONArray(P2PLib.listPendingMessages())
         } catch (e: Exception) {
             return emptyList()
-        }
-        val contactsByFp = mutableMapOf<String, String>()
-        try {
-            val contacts = JSONArray(P2PLib.listContacts())
-            for (i in 0 until contacts.length()) {
-                val c = contacts.getJSONObject(i)
-                val fp = c.optString("active_device_fingerprint")
-                if (fp.isNotEmpty()) contactsByFp[fp] = c.optString("display_name")
-            }
-        } catch (e: Exception) {
-        // Name not resolved, so a shortened fingerprint is shown.
         }
         val groupsById = mutableMapOf<String, String>()
         try {
@@ -114,7 +116,7 @@ class PendingMessagesActivity : AppCompatActivity() {
             val targetName = if (groupId != null) {
                 groupsById[groupId] ?: groupId.take(8)
             } else {
-                contactsByFp[fp] ?: fp.take(8)
+                obj.optString("contact_name").ifEmpty { fp.take(8) }
             }
             result.add(
                 PendingMessagesAdapter.Item(

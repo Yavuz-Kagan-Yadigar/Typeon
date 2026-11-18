@@ -215,7 +215,8 @@ impl P2PCore {
                     return DeviceCheckOutcome::UnverifiedNewDeviceAlert;
                 }
                 // The sender read our code: a pairing, carried to siblings (`SyncedContact.added_at_ms`).
-                self.note_contact_added(identity_id, now);
+                let gen = self.contact_next_gen(identity_id);
+                self.note_contact_added(identity_id, gen);
             }
             DeviceCheckOutcome::NewDeviceViaSignedAdd => {
                 if let Some(cid) = &contact_id {
@@ -324,7 +325,15 @@ impl P2PCore {
 
     /// Blocks a contact: sessions and queues to all of its devices are deleted, pending "new device" alerts are cleared, and it is never connected to again.
     /// The difference from `delete_contact` is that the block SURVIVES deleting the contact.
+    /// The user's block: also made on my other devices (`SiblingEchoBody::Blocked`), where the person's messages and calls kept arriving.
     pub(crate) fn block_identity(&mut self, identity_id: &str) -> Result<(), String> {
+        self.block_identity_local(identity_id)?;
+        self.send_to_siblings(SiblingEchoBody::Blocked { identity_id: identity_id.to_string(), blocked: true });
+        Ok(())
+    }
+
+    /// `block_identity` on this device only (a sibling's block).
+    pub(crate) fn block_identity_local(&mut self, identity_id: &str) -> Result<(), String> {
         if self.my_identity_id().as_deref() == Some(identity_id) {
             return Err("You cannot block your own identity".to_string());
         }
@@ -340,10 +349,23 @@ impl P2PCore {
             .filter(|d| d.identity_id == identity_id)
             .map(|d| d.device_fingerprint.clone())
             .collect();
+        // The addresses are kept: an unblock re-handshakes (`unblock_identity_local`) and has
+        // nothing to dial without them. A blocked device is not dialed (`reconnect_sweep`) and
+        // its packets are dropped (`is_blocked`).
+        // The PeerId binding too: without it the device's inbound connection reads as a stranger's and
+        // is closed after 2 min, so the unblock handshake had no path at all.
+        let addrs: Vec<(String, Option<String>, Option<String>, Option<libp2p::PeerId>)> = fps.iter()
+            .map(|fp| (fp.clone(), self.device_last_addr.get(fp).cloned(), self.device_onion_addr.get(fp).cloned(),
+                       self.device_to_peer_id.get(fp).copied()))
+            .collect();
         for fp in &fps {
-            // Session, topic subscription, queues, addresses, downloads and
-            // the live connection.
+            // Session, topic subscription, queues, downloads and the live connection.
             self.drop_device_sessions(fp);
+        }
+        for (fp, last, onion, pid) in addrs {
+            if let Some(a) = last { self.remember_device_addr(&fp, &a); }
+            if let Some(a) = onion { self.remember_onion_addr(&fp, &a); }
+            if let Some(pid) = pid { self.device_to_peer_id.insert(fp, pid); }
         }
         self.pending_device_alerts.retain(|_, a| a.identity_id != identity_id);
         self.persist_device_alerts();
@@ -362,13 +384,21 @@ impl P2PCore {
 
     /// Lifts a block. Deliberately called only from a face-to-face re-pairing (`register_contact_from_pairing`, i.e. QR or manual code) and on the user's explicit
     /// request. No packet from the network can reach this function.
+    /// Also lifted on my other devices.
     pub(crate) fn unblock_identity(&mut self, identity_id: &str) {
+        if self.unblock_identity_local(identity_id) {
+            self.send_to_siblings(SiblingEchoBody::Blocked { identity_id: identity_id.to_string(), blocked: false });
+        }
+    }
+
+    /// `unblock_identity` on this device only. `true` if a block was lifted.
+    pub(crate) fn unblock_identity_local(&mut self, identity_id: &str) -> bool {
         if self.blocked_identities.contains(identity_id) {
             // Disk first: lifted only in memory, the block came back on restart.
             if let Some(conn) = &self.db {
                 if let Err(e) = conn.execute("DELETE FROM blocked_identities WHERE identity_id = ?1", params![identity_id]) {
                     error!("Could not remove identity block: {}", e);
-                    return;
+                    return false;
                 }
             }
             self.blocked_identities.remove(identity_id);
@@ -385,11 +415,44 @@ impl P2PCore {
             for fp in fps {
                 let _ = self.ensure_handshake(&fp);
             }
+            return true;
         }
+        false
     }
 
     pub(crate) fn list_blocked_identities(&self) -> Vec<String> {
         self.blocked_identities.iter().cloned().collect()
+    }
+
+    /// Contacts made from a scanned code whose device never proved it belongs to the identity (`cunp:<identity>` =
+    /// expiry, written by `pair_with_code`): removed once the pairing window is over. A crafted code (someone's
+    /// public identity id with another device's fingerprint) left a contact whose only device was the stranger's,
+    /// and the real person's code was refused from then on.
+    pub(crate) fn sweep_unproved_contacts(&mut self) {
+        let now = current_time_ms();
+        let rows: Vec<(String, String)> = self.db.as_ref()
+            .and_then(|c| c.prepare("SELECT k, v FROM app_meta WHERE k LIKE 'cunp:%'").ok())
+            .map(|mut st| st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map(|rows| rows.flatten().collect()).unwrap_or_default())
+            .unwrap_or_default();
+        for (k, v) in rows {
+            if v.parse::<u64>().map_or(false, |until| until > now) { continue; }
+            self.meta_del(&k);
+            let identity_id = k.trim_start_matches("cunp:").to_string();
+            if self.known_remote_devices.values().any(|d| d.identity_id == identity_id) { continue; }
+            let Some(cid) = self.identity_to_contact.get(&identity_id).cloned() else { continue };
+            info!("Contact from a code never proved its device, removed: {}", crate::log_id(&identity_id));
+            match self.delete_contact_local(&cid, 0) {
+                Ok(()) => {
+                    // Not a removal by the user: the person's own pairing must still work.
+                    if let Some(conn) = &self.db {
+                        let _ = conn.execute("DELETE FROM removed_contacts WHERE identity_id = ?1", params![identity_id]);
+                    }
+                    self.attachment_events.push(serde_json::json!({"type": "device_change", "identity_id": identity_id}).to_string());
+                }
+                Err(e) => warn!("Could not remove unproved contact: {}", e),
+            }
+        }
     }
 
     /// Called when the user taps "Re-verify and accept" on the alert screen.
@@ -421,8 +484,14 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Called when the user taps "Reject" (the default behaviour, ).
+    /// Called when the user taps "Reject" (the default behaviour, ). My other devices refuse the device too.
     pub(crate) fn reject_pending_device_alert(&mut self, device_fingerprint: &str) {
+        let Some(identity_id) = self.pending_device_alerts.get(device_fingerprint).map(|a| a.identity_id.clone()) else { return };
+        self.reject_pending_device_alert_local(device_fingerprint);
+        self.send_to_siblings(SiblingEchoBody::ContactDeviceRevoked { identity_id, device_fingerprint: device_fingerprint.to_string() });
+    }
+
+    pub(crate) fn reject_pending_device_alert_local(&mut self, device_fingerprint: &str) {
         let Some(alert) = self.pending_device_alerts.remove(device_fingerprint) else { return };
         self.persist_device_alerts();
         // Remembered as a revoked entry of the contact, so the next
@@ -851,7 +920,8 @@ impl P2PCore {
     /// `sync`: also delete it on my other devices (`SiblingEchoBody::ContactRemoved`).
     pub(crate) fn delete_contact(&mut self, contact_id: &str, sync: bool) -> Result<(), String> {
         let identity_id = self.contacts.get(contact_id).ok_or("Contact not found")?.trusted_identity_id.clone();
-        let removed_at_ms = current_time_ms();
+        // A generation, not a time (`contact_next_gen`).
+        let removed_at_ms = self.contact_next_gen(&identity_id);
         self.delete_contact_local(contact_id, removed_at_ms)?;
         if sync {
             self.send_to_siblings(SiblingEchoBody::ContactRemoved { identity_id, removed_at_ms });
@@ -859,7 +929,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// `removed_at`: when the user deleted it (here, or on the sibling that sent the delete).
+    /// `removed_at`: the removal generation (`contact_next_gen`), made here or on the sibling that sent the delete.
     pub(crate) fn delete_contact_local(&mut self, contact_id: &str, removed_at: u64) -> Result<(), String> {
         let contact = self.contacts.get(contact_id).ok_or("Contact not found")?.clone();
         // see the `hfloor:` filter in the HistorySyncResponse arm.
@@ -938,7 +1008,39 @@ impl P2PCore {
     }
 
     /// Revokes ONE device of a contact by setting `Contact::revoke_device` and `DeviceRecord.is_active`. It runs the same cleanup steps as `delete_contact`, but keeps the contact and its history. It stops all traffic to and from this device fingerprint (checked via `is_active` in `receive_message` and `process_handshake_init`). Other devices of the same contact are not affected.
+    /// The user's revoke: my other devices stop trusting the device too (`SiblingEchoBody::ContactDeviceRevoked`).
     pub(crate) fn revoke_contact_device(&mut self, contact_id: &str, device_fingerprint: &str) -> Result<(), String> {
+        self.revoke_contact_device_local(contact_id, device_fingerprint)?;
+        let identity_id = self.contacts.get(contact_id).map(|c| c.trusted_identity_id.clone()).unwrap_or_default();
+        self.send_to_siblings(SiblingEchoBody::ContactDeviceRevoked { identity_id, device_fingerprint: device_fingerprint.to_string() });
+        Ok(())
+    }
+
+    /// A sibling revoked or rejected this contact device: the same here, for whatever state the device has on this side.
+    pub(crate) fn apply_sibling_device_revoke(&mut self, identity_id: &str, device_fingerprint: &str) -> Result<(), String> {
+        if self.pending_device_alerts.get(device_fingerprint).map_or(false, |a| a.identity_id == identity_id) {
+            self.reject_pending_device_alert_local(device_fingerprint);
+            return Ok(());
+        }
+        let Some(cid) = self.identity_to_contact.get(identity_id).cloned() else { return Ok(()) };
+        let status = self.contacts.get(&cid).and_then(|c| c.find_device(device_fingerprint)).map(|d| d.status.clone());
+        match status {
+            Some(contact::KnownDeviceStatus::Revoked) => Ok(()),
+            Some(_) => self.revoke_contact_device_local(&cid, device_fingerprint),
+            None => {
+                // Not seen here yet: remembered revoked, as a rejected alert is.
+                if let Some(c) = self.contacts.get_mut(&cid) {
+                    let now = current_time_ms();
+                    c.add_device_unverified(device_fingerprint.to_string(), now);
+                    c.revoke_device(device_fingerprint, now);
+                }
+                if let Some(c) = self.contacts.get(&cid) { self.persist_contact(c); }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn revoke_contact_device_local(&mut self, contact_id: &str, device_fingerprint: &str) -> Result<(), String> {
         let mut contact = self.contacts.get(contact_id).cloned().ok_or("Contact not found")?;
         // Everything below acts on the fingerprint alone: for a device of
         // someone else (even one of our own siblings) it would deactivate the
@@ -1129,6 +1231,7 @@ impl P2PCore {
         self.first_contact_cache.take();
         self.last_call_end = None;
         call::drop_media();
+        crate::server_client::clear_session_mailbox_memo();
         if let Some(conn) = &self.db {
             for table in [
                 "identities", "own_devices", "contacts", "groups", "messages",
@@ -1143,9 +1246,14 @@ impl P2PCore {
                 "blocked_identities", "deleted_identities", "removed_contacts", "removed_groups",
                 "wb_strokes", "wb_tombstones", "wb_page_sigs", "own_prekeys", "peer_prekeys",
                 // They hold other people's identity ids (who reacted, who saw).
-                "message_reactions", "message_seen", "stickers",
+                "message_reactions", "message_seen", "stickers", "sibling_journal",
             ] {
                 let _ = conn.execute(&format!("DELETE FROM {}", table), []);
+            }
+            // `secure_delete` clears the pages of the main file; earlier page
+            // images stayed in the WAL file until the next checkpoint.
+            if let Err(e) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
+                warn!("WAL checkpoint after wipe failed: {}", e);
             }
         }
         if let Ok(dir) = self.attachments_dir() {
@@ -1179,6 +1287,7 @@ impl P2PCore {
         self.history_sent_bytes.clear();
         self.history_answered_by.clear();
         self.chunk_rate_limiter.clear();
+        self.chunk_bytes_served.clear();
         self.recent_inbound_digests.clear();
         self.sibling_backfill_since.clear();
         self.recently_acked.clear();

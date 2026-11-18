@@ -34,7 +34,13 @@ object FontOverride {
     fun forceOnWindow(activity: android.app.Activity) {
         if (hooked.put(activity, true) != null) return
         val root = activity.window.decorView
-        root.viewTreeObserver.addOnGlobalLayoutListener { forceTree(root) }
+        // One walk after a burst of layout passes (scrolling, typing), as ThemePrefs.applyTextColorLegacy does.
+        val walkNow = Runnable { forceTree(root) }
+        root.viewTreeObserver.addOnGlobalLayoutListener {
+            if (current == null) return@addOnGlobalLayoutListener
+            root.removeCallbacks(walkNow)
+            root.postDelayed(walkNow, 50)
+        }
     }
 
     private val hooked = java.util.WeakHashMap<android.app.Activity, Boolean>()

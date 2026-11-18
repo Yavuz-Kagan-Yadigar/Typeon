@@ -69,6 +69,10 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     // Core reads (contacts, blocked ids, safety codes) happen off the GTK
     // thread into `data`; typing in the search box only re-filters it.
     let data: Rc<RefCell<Vec<(core::ContactSummary, bool, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    // Rows re-read the list after their own actions (block, trust, ...).
+    // Weak here, owned by the event subscription below (see `chats::build`).
+    let refresh_cell: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let refresh_weak = Rc::downgrade(&refresh_cell);
     let render: Rc<dyn Fn()> = {
         let main = main.clone();
         let list = list.clone();
@@ -80,11 +84,15 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
             while let Some(child) = list.first_child() {
                 list.remove(&child);
             }
+            let refresh: Rc<dyn Fn()> = refresh_weak
+                .upgrade()
+                .and_then(|cell| cell.borrow().clone())
+                .unwrap_or_else(|| Rc::new(|| {}));
             for (contact, blocked, code) in data.borrow().iter() {
                 if !needle.is_empty() && !contact.display_name.to_lowercase().contains(&needle) {
                     continue;
                 }
-                list.append(&build_row(&main, contact, *blocked, code.clone()));
+                list.append(&build_row(&main, contact, *blocked, code.clone(), refresh.clone()));
             }
             stack.set_visible_child_name(if list.first_child().is_none() { "empty" } else { "list" });
         })
@@ -132,6 +140,8 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
         })
     };
 
+    *refresh_cell.borrow_mut() = Some(refresh.clone());
+
     {
         let render = render.clone();
         let query = query.clone();
@@ -156,10 +166,13 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     }
     {
         let refresh = refresh.clone();
+        let refresh_cell = refresh_cell.clone();
         main.app.subscribe(&container, move |event| {
+            let _ = &refresh_cell;
+            // `sync`: contacts paired on the phone arrive in its DeviceSync.
             if matches!(
                 event.kind.as_str(),
-                "profile_update" | "device_change" | "device_linked" | "address_announce"
+                "profile_update" | "device_change" | "device_linked" | "address_announce" | "sync"
             ) {
                 refresh();
             }
@@ -169,7 +182,13 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     container.upcast()
 }
 
-fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, safety_code: String) -> gtk::ListBoxRow {
+fn build_row(
+    main: &Rc<MainUi>,
+    contact: &core::ContactSummary,
+    blocked: bool,
+    safety_code: String,
+    refresh: Rc<dyn Fn()>,
+) -> gtk::ListBoxRow {
     let fingerprint = contact.active_device_fingerprint.clone().unwrap_or_default();
     let ready = !fingerprint.is_empty();
 
@@ -215,10 +234,12 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         let contact_id = contact.contact_id.clone();
         let name = contact.display_name.clone();
         let device = fingerprint.clone();
+        let refresh = refresh.clone();
         revoke.connect_clicked(move |_| {
             let app_inner = app.clone();
             let contact_id = contact_id.clone();
             let device = device.clone();
+            let refresh = refresh.clone();
             dialogs::confirm(
                 &app,
                 "Revoke this device?",
@@ -234,11 +255,15 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
                     let app_inner = app_inner.clone();
                     let contact_id = contact_id.clone();
                     let device = device.clone();
+                    let refresh = refresh.clone();
                     crate::app::run_in_background(
                         move || core::revoke_contact_device(&contact_id, &device),
-                        move |result| match result {
-                            Ok(()) => app_inner.toast("Device revoked."),
-                            Err(error) => app_inner.toast(&error),
+                        move |result| {
+                            match result {
+                                Ok(()) => app_inner.toast("Device revoked."),
+                                Err(error) => app_inner.toast(&error),
+                            }
+                            refresh();
                         },
                     );
                 },
@@ -258,12 +283,17 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         unblock.add_css_class("flat");
         let app = main.app.clone();
         let identity_id = contact.identity_id.clone();
+        let refresh = refresh.clone();
         unblock.connect_clicked(move |_| {
             let app = app.clone();
             let identity_id = identity_id.clone();
+            let refresh = refresh.clone();
             crate::app::run_in_background(
                 move || core::unblock_identity(&identity_id),
-                move |()| app.toast("Unblocked."),
+                move |()| {
+                    app.toast("Unblocked.");
+                    refresh();
+                },
             );
         });
         row.add_suffix(&unblock);
@@ -277,9 +307,11 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         let app = main.app.clone();
         let identity_id = contact.identity_id.clone();
         let name = contact.display_name.clone();
+        let refresh = refresh.clone();
         block.connect_clicked(move |_| {
             let app_inner = app.clone();
             let identity_id = identity_id.clone();
+            let refresh = refresh.clone();
             dialogs::confirm(
                 &app,
                 "Block this person?",
@@ -293,11 +325,15 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
                 move || {
                     let app_inner = app_inner.clone();
                     let identity_id = identity_id.clone();
+                    let refresh = refresh.clone();
                     crate::app::run_in_background(
                         move || core::block_identity(&identity_id),
-                        move |result| match result {
-                            Ok(()) => app_inner.toast("Blocked."),
-                            Err(error) => app_inner.toast(&error),
+                        move |result| {
+                            match result {
+                                Ok(()) => app_inner.toast("Blocked."),
+                                Err(error) => app_inner.toast(&error),
+                            }
+                            refresh();
                         },
                     );
                 },
@@ -319,6 +355,7 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         let app = main.app.clone();
         let contact_id = contact.contact_id.clone();
         let name = contact.display_name.clone();
+        let refresh = refresh.clone();
         // "Verified" does not exchange keys. Keys are already in use
         // end to end. What is missing is confirming that the keys really
         // belong to this contact. Only the user can do that, by comparing the
@@ -327,6 +364,7 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
         trust.connect_clicked(move |_| {
             let app_inner = app.clone();
             let contact_id = contact_id.clone();
+            let refresh = refresh.clone();
             let body = if safety_code.is_empty() {
                 format!(
                     "You met {} through a group, not face to face. Only do this if you have \
@@ -350,11 +388,15 @@ fn build_row(main: &Rc<MainUi>, contact: &core::ContactSummary, blocked: bool, s
                 move || {
                     let app_inner = app_inner.clone();
                     let contact_id = contact_id.clone();
+                    let refresh = refresh.clone();
                     crate::app::run_in_background(
                         move || core::trust_contact(&contact_id),
-                        move |result| match result {
-                            Ok(()) => app_inner.toast("Marked as verified."),
-                            Err(error) => app_inner.toast(&error),
+                        move |result| {
+                            match result {
+                                Ok(()) => app_inner.toast("Marked as verified."),
+                                Err(error) => app_inner.toast(&error),
+                            }
+                            refresh();
                         },
                     );
                 },

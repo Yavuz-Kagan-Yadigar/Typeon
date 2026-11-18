@@ -11,10 +11,12 @@ impl P2PCore {
         for contact in self.contacts.values() {
             // Do not sync our own identity (the sibling devices) as a contact.
             if my_id.as_deref() == Some(contact.trusted_identity_id.as_str()) { continue; }
-            let devices: Vec<SyncedDevice> = self.known_remote_devices.values()
+            let mut devices: Vec<SyncedDevice> = self.known_remote_devices.values()
                 .filter(|d| d.identity_id == contact.trusted_identity_id)
                 .map(|d| self.synced_for_sibling(d))
                 .collect();
+            // Stable order (here and below): `sync_roster_to` skips parts it sent unchanged.
+            devices.sort_by(|a, b| a.device_fingerprint.cmp(&b.device_fingerprint));
             let device_proofs = devices.iter()
                 .filter(|d| d.device_fingerprint != contact.trusted_identity_id)
                 .filter_map(|d| self.device_add_proof(&d.device_fingerprint))
@@ -32,12 +34,15 @@ impl P2PCore {
                 added_at_ms: self.contact_added_at(&contact.trusted_identity_id),
             });
         }
+        contacts.sort_by(|a, b| a.identity_id.cmp(&b.identity_id));
         // Contact avatars are left out on purpose (the 1 MiB `max_transmit_size` limit). Groups, however, were embedded as-is through
         // `serde_json::to_value(g)`, and `Group.avatar_jpeg` lives inside that struct. Avatars are 720p / 85% JPEG (about 100-250 KB), so a few
         // groups with avatars exceed the `DeviceSync` / `DeviceLinkGrant` limit. `try_publish_raw` treats that as `PublishFailure::Permanent`: no retry,
         // and the message is dropped from `awaiting_confirmation`, so the device sync was silently never sent. The group avatar travels separately,
         // in the founder's `GroupUpdate` (`GroupChange::AvatarUpdate`).
-        let groups: Vec<serde_json::Value> = self.groups.values()
+        let mut sorted_groups: Vec<&Group> = self.groups.values().collect();
+        sorted_groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        let groups: Vec<serde_json::Value> = sorted_groups.into_iter()
             .map(|g| {
                 let mut stripped = g.clone();
                 stripped.avatar_jpeg = None;
@@ -51,9 +56,12 @@ impl P2PCore {
             siblings.push(dev);
         }
         if let Some(id) = &my_id {
-            for rec in self.known_remote_devices.values().filter(|d| &d.identity_id == id) {
-                siblings.push(self.synced_for_sibling(rec));
-            }
+            let mut others: Vec<SyncedDevice> = self.known_remote_devices.values()
+                .filter(|d| &d.identity_id == id)
+                .map(|rec| self.synced_for_sibling(rec))
+                .collect();
+            others.sort_by(|a, b| a.device_fingerprint.cmp(&b.device_fingerprint));
+            siblings.extend(others);
         }
         let sibling_proofs = siblings.iter()
             .filter(|d| Some(&d.device_fingerprint) != my_id.as_ref())
@@ -64,7 +72,24 @@ impl P2PCore {
             archive_root_key: self.archive_root_key_bytes(),
             name_changed_at_ms: self.meta_u64("name_changed_at"),
             own_revokes: self.own_revokes_to_send(None),
+            blocked: {
+                let mut b: Vec<String> = self.blocked_identities.iter().cloned().collect();
+                b.sort();
+                b
+            },
+            removed_groups: self.removed_group_ids(),
         }
+    }
+
+    /// Ids in `removed_groups`, newest 4096 (the receive bound), sorted.
+    pub(crate) fn removed_group_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.db.as_ref().and_then(|c| {
+            let mut stmt = c.prepare("SELECT group_id FROM removed_groups ORDER BY rowid DESC LIMIT 4096").ok()?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).ok()?;
+            Some(rows.flatten().collect())
+        }).unwrap_or_default();
+        ids.sort();
+        ids
     }
 
     /// `build_sync_payload` cut into parts of at most `SYNC_CHUNK_DEVICES`
@@ -103,6 +128,8 @@ impl P2PCore {
                     archive_root_key: first.archive_root_key.clone(),
                     name_changed_at_ms: first.name_changed_at_ms,
                     own_revokes: Vec::new(),
+                    blocked: Vec::new(),
+                    removed_groups: Vec::new(),
                 }
             });
             rest = tail;
@@ -119,6 +146,8 @@ impl P2PCore {
             archive_root_key: first.archive_root_key.clone(),
             name_changed_at_ms: first.name_changed_at_ms,
             own_revokes: Vec::new(),
+            blocked: Vec::new(),
+            removed_groups: Vec::new(),
         };
         let (mut chunk, mut bytes) = (Vec::new(), 0usize);
         for g in groups {
@@ -168,6 +197,15 @@ impl P2PCore {
     /// and replaces a group copy older than the sibling's.
     /// Returns the newly learned contact identity ids, so the caller can introduce itself to them.
     pub(crate) fn import_sync_payload(&mut self, sync: &SyncPayload) -> Vec<String> {
+        self.import_sync_payload_from(sync, true)
+    }
+
+    /// `trusted`: the payload comes from the root device, or this device is
+    /// not the root. Otherwise (a secondary's payload on the root) a group
+    /// is taken or replaced only when this identity founded it: any linked
+    /// device (a stolen one too) could plant groups or rewrite them, with
+    /// nothing signed by their founder.
+    pub(crate) fn import_sync_payload_from(&mut self, sync: &SyncPayload, trusted: bool) -> Vec<String> {
         let now = current_time_ms();
         let my_id = self.my_identity_id();
         let mut learned = Vec::new();
@@ -175,13 +213,13 @@ impl P2PCore {
             if my_id.as_deref() == Some(sc.identity_id.as_str()) { continue; }
             if !is_fingerprint_hex(&sc.identity_id) { continue; }
             // Deleted here or on a sibling: the sibling's copy brings it back only
-            // if the user paired with it again after that removal. A stale copy
-            // (paired before the removal) does not. Clamped: a stamp in the future
-            // would beat every later removal.
-            let added_at = sc.added_at_ms.min(now);
+            // if the user paired with it again after that removal (generations,
+            // `contact_next_gen`; equal = made without knowing of each other,
+            // the pairing wins). A stale copy (paired before the removal) does not.
+            let added_at = sc.added_at_ms;
             if !self.identity_to_contact.contains_key(&sc.identity_id) {
                 if let Some(removed_at) = self.contact_removed_at(&sc.identity_id) {
-                    if added_at <= removed_at { continue; }
+                    if added_at < removed_at { continue; }
                     if let Some(conn) = &self.db {
                         let _ = conn.execute("DELETE FROM removed_contacts WHERE identity_id = ?1", params![sc.identity_id]);
                     }
@@ -289,6 +327,7 @@ impl P2PCore {
                 // Left or deleted on this device (`remove_group_locally`): the
                 // sibling's copy must not bring it back.
                 if self.group_removed_locally(&g.group_id) { continue; }
+                if !trusted && my_id.as_deref() != Some(g.founder_identity_id.as_str()) { continue; }
                 match self.groups.get(&g.group_id) {
                     None => {}
                     // A newer version from the sibling replaces a stale copy:
@@ -304,6 +343,15 @@ impl P2PCore {
                 }
                 self.persist_group(&g);
                 self.groups.insert(g.group_id.clone(), g);
+            }
+        }
+        // Groups left or deleted on the sibling and not held here: marked, so an old founder-signed update cannot
+        // re-create them (only an explicit new Add of us can, see `process_group_update`).
+        for gid in &sync.removed_groups {
+            if is_group_id(gid) && !self.groups.contains_key(gid) {
+                if let Some(conn) = &self.db {
+                    let _ = conn.execute("INSERT OR IGNORE INTO removed_groups (group_id, version, founder) VALUES (?1, 0, '')", params![gid]);
+                }
             }
         }
         // Sibling devices: learn the other devices of our identity (3+ devices). Skip our own fingerprint and do not overwrite known ones.
@@ -365,6 +413,14 @@ impl P2PCore {
                 self.known_remote_devices.insert(sd.device_fingerprint.clone(), rec);
                 self.import_mailbox_secrets(sd);
                 if let Some(addr) = &sd.last_addr { self.remember_device_addr(&sd.device_fingerprint, addr); }
+            }
+        }
+        // Blocks made on a sibling (an unblock travels as `SiblingEchoBody::Blocked`).
+        for id in &sync.blocked {
+            if is_fingerprint_hex(id) && my_id.as_deref() != Some(id.as_str()) && !self.blocked_identities.contains(id) {
+                if let Err(e) = self.block_identity_local(id) {
+                    warn!("Block received via sync not applied: {}", e);
+                }
             }
         }
         // The revokes of my own devices, for a sibling linked after them.
@@ -450,8 +506,29 @@ impl P2PCore {
             }
             _ => None,
         };
+        // Each part goes to a sibling only when it changed since it was last
+        // sent there (`rsh:<sibling>` = "sent at|hash,hash,..."): every trigger
+        // (pairing steps, rename, reconnect after each network change) sent
+        // the whole roster, about 4.2 KB per contact device, to every sibling.
+        // Everything is sent again once a day, in case a copy was lost.
+        let part_hash = |content: &MessageContent| ciborium_bytes(content).ok()
+            .map(|b| hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(&b)[..8]));
+        let hashes: Vec<Option<String>> = parts.iter().map(|c| part_hash(c)).collect();
+        let now = current_time_ms();
         for fp in siblings {
-            for content in &parts {
+            let key = format!("rsh:{}", fp);
+            let stored = self.meta_str(&key).unwrap_or_default();
+            let (at, sent_list) = stored.split_once('|')
+                .map(|(a, h)| (a.parse::<u64>().unwrap_or(0), h.to_string()))
+                .unwrap_or((0, String::new()));
+            let fresh = now.saturating_sub(at) < ROSTER_RESEND_ALL_MS;
+            let sent: std::collections::HashSet<&str> = if fresh { sent_list.split(',').filter(|h| !h.is_empty()).collect() } else { Default::default() };
+            let mut now_sent: Vec<String> = Vec::new();
+            for (content, hash) in parts.iter().zip(&hashes) {
+                if let Some(h) = hash.as_deref().filter(|h| sent.contains(h)) {
+                    now_sent.push(h.to_string());
+                    continue;
+                }
                 let avatar = avatar_key(&fp, content);
                 if let Some((k, h)) = &avatar {
                     if self.meta_str(k).as_deref() == Some(h.as_str()) {
@@ -463,10 +540,14 @@ impl P2PCore {
                         if let Some((k, h)) = &avatar {
                             self.meta_put(k, h);
                         }
+                        if let Some(h) = hash {
+                            now_sent.push(h.clone());
+                        }
                     }
                     Err(e) => error!("DeviceSync send failed: {}", e),
                 }
             }
+            self.meta_put(&key, &format!("{}|{}", if fresh { at } else { now }, now_sent.join(",")));
         }
     }
 
@@ -508,6 +589,15 @@ impl P2PCore {
                 None => return,
             }
         };
+        // Nothing received since the last send: every chat open (the frontends pass "now") sent one signed packet to each
+        // sibling and to every device of every group member, a server deposit for each offline one, with nothing new
+        // for any of them to mark.
+        let floor = received_floor.unwrap_or(0).max(0) as u64;
+        let sent_key = format!("rsw:{}", gid_owned.as_deref().or(conv_id_owned.as_deref()).unwrap_or(""));
+        if floor == 0 || floor <= self.meta_u64(&sent_key) {
+            return;
+        }
+        self.meta_put(&sent_key, &floor.to_string());
         let content = MessageContent::ReadStateSync {
             conversation_identity_id: conv_id_owned.clone(),
             group_id: gid_owned.clone(),
@@ -532,6 +622,7 @@ impl P2PCore {
 
         // Collect the targets first (borrow checker: before sending).
         let mut targets: Vec<String> = self.sibling_active_devices();
+        self.journal_sibling_op(&content, &targets);
         if is_group {
             if let Ok(group) = self.groups.get(group_id).cloned_group() {
                 let own_id = self.my_identity_id().unwrap_or_default();
@@ -598,6 +689,7 @@ impl P2PCore {
                     if canon != peer_fp { keys.push(canon); }
                 }
             }
+            let mut have: std::collections::HashSet<String> = ids.iter().cloned().collect();
             for k in keys {
                 if let Ok(mut stmt) = conn.prepare(
                     "SELECT message_id FROM messages
@@ -610,7 +702,7 @@ impl P2PCore {
                 ) {
                     if let Ok(rows) = stmt.query_map(params![k, read_at, viewer_identity_id], |r| r.get::<_, String>(0)) {
                         for id in rows.flatten() {
-                            if !ids.contains(&id) { ids.push(id); }
+                            if have.insert(id.clone()) { ids.push(id); }
                         }
                     }
                 }
@@ -650,14 +742,6 @@ impl P2PCore {
     /// Multi-device: echoes a 1:1 message, edit, or delete that I sent to my sibling devices, so it also appears as "sent" there.
     /// `peer_fp`: the device of the contact I sent to (its identity is resolved from it).
     pub(crate) fn echo_1to1_to_siblings(&mut self, peer_fp: &str, body: SiblingEchoBody) {
-        let siblings = self.sibling_active_devices();
-        if siblings.is_empty() {
-            // If no sibling device is linked, this silently sends NOTHING. The log distinguishes "the edit/delete never reached the other device"
-            // here from a send failure (the `error!` below). An empty list means either no sibling device is linked, or the roster sync
-            // (`sync_to_siblings`) has not completed yet.
-            warn!("echo_1to1_to_siblings: no known active sibling device, nothing sent (peer={})", crate::log_id(&peer_fp));
-            return;
-        }
         let identity_id = match self.known_remote_devices.get(peer_fp) {
             Some(d) => d.identity_id.clone(),
             None => return,
@@ -667,6 +751,16 @@ impl P2PCore {
             group_id: None,
             body,
         };
+        let siblings = self.sibling_active_devices();
+        // Also for a sibling not in the list (stale) or one whose copy is lost: see `journal_sibling_op`.
+        self.journal_sibling_op(&content, &siblings);
+        if siblings.is_empty() {
+            // If no sibling device is linked, this silently sends NOTHING. The log distinguishes "the edit/delete never reached the other device"
+            // here from a send failure (the `error!` below). An empty list means either no sibling device is linked, or the roster sync
+            // (`sync_to_siblings`) has not completed yet.
+            warn!("echo_1to1_to_siblings: no known active sibling device, nothing sent (peer={})", crate::log_id(&peer_fp));
+            return;
+        }
         for fp in siblings {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
                 error!("SiblingEcho (1:1) send failed (sibling={}): {}", crate::log_id(&fp), e);
@@ -676,17 +770,18 @@ impl P2PCore {
 
     /// See `echo_1to1_to_siblings`. The group counterpart.
     pub(crate) fn echo_group_to_siblings(&mut self, group_id: &str, body: SiblingEchoBody) {
-        let siblings = self.sibling_active_devices();
-        if siblings.is_empty() {
-            // Same debugging rationale as `echo_1to1_to_siblings`.
-            warn!("echo_group_to_siblings: no known active sibling device, nothing sent (group={})", group_id);
-            return;
-        }
         let content = MessageContent::SiblingEcho {
             conversation_identity_id: None,
             group_id: Some(group_id.to_string()),
             body,
         };
+        let siblings = self.sibling_active_devices();
+        self.journal_sibling_op(&content, &siblings);
+        if siblings.is_empty() {
+            // Same debugging rationale as `echo_1to1_to_siblings`.
+            warn!("echo_group_to_siblings: no known active sibling device, nothing sent (group={})", group_id);
+            return;
+        }
         for fp in siblings {
             if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
                 error!("SiblingEcho (group) send failed (sibling={}): {}", crate::log_id(&fp), e);
@@ -708,21 +803,186 @@ impl P2PCore {
         if siblings.is_empty() { return; }
         self.last_sibling_backfill_at = now;
         for fp in siblings {
-            // only what the sibling archived since the last answered
-            // request (minus a clock-skew margin), not the newest rows again.
-            let state = self.sibling_backfill_since.entry(fp.clone()).or_default();
-            let since = (state.1 > 0).then(|| state.1.saturating_sub(SIBLING_BACKFILL_SINCE_MARGIN_MS) as i64);
-            state.0 = now;
-            let content = MessageContent::SiblingHistoryRequest {
-                per_conversation_limit: SIBLING_BACKFILL_PER_CONVERSATION,
-                conversation_identity_id: None,
-                group_id: None,
-                before_timestamp: None,
-                since_timestamp: since,
-                after_timestamp: None,
-            };
-            let _ = self.send_message_content(fp, &content, None);
+            self.send_sibling_backfill_request(&fp);
         }
+    }
+
+    /// One unscoped backfill request to `fp`: only what it archived since its last answer (`sibling_backfill_since`,
+    /// on disk as `sbw:<fp>`, so a restart does not start over with the newest rows), and its journal operations
+    /// after the last position it reported (`sjw:<fp>`).
+    pub(crate) fn send_sibling_backfill_request(&mut self, fp: &str) {
+        let now = current_time_ms();
+        let saved = self.meta_u64(&format!("sbw:{}", fp));
+        let ops_since = self.meta_str(&format!("sjw:{}", fp)).and_then(|v| v.parse::<u64>().ok());
+        let state = self.sibling_backfill_since.entry(fp.to_string()).or_insert((0, saved));
+        let since = (state.1 > 0).then(|| state.1.min(i64::MAX as u64) as i64);
+        state.0 = now;
+        let content = MessageContent::SiblingHistoryRequest {
+            per_conversation_limit: SIBLING_BACKFILL_PER_CONVERSATION,
+            conversation_identity_id: None,
+            group_id: None,
+            before_timestamp: None,
+            since_timestamp: since,
+            after_timestamp: None,
+            ops_since,
+        };
+        let _ = self.send_message_content(fp.to_string(), &content, None);
+    }
+
+    /// A backfill answer from `fp`: moves its watermark and journal position, and asks for the rest at once when the
+    /// answer was cut. `covered_to`: the sibling's clock, taken as is; `None` (the first answer, newest rows per chat)
+    /// keeps the request time minus a clock-skew margin.
+    pub(crate) fn note_sibling_backfill_answer(&mut self, fp: &str, covered_to: Option<i64>, ops_seq: Option<u64>, more: bool) {
+        let mut advanced = false;
+        if let Some(state) = self.sibling_backfill_since.get_mut(fp) {
+            if state.0 > 0 {
+                let next = match covered_to {
+                    Some(c) => c.max(0) as u64,
+                    None => state.0.saturating_sub(SIBLING_BACKFILL_SINCE_MARGIN_MS),
+                };
+                advanced = next != state.1;
+                *state = (0, next);
+                let next = next.to_string();
+                self.meta_put(&format!("sbw:{}", fp), &next);
+            }
+        }
+        if let Some(seq) = ops_seq {
+            let key = format!("sjw:{}", fp);
+            if self.meta_str(&key).and_then(|v| v.parse::<u64>().ok()) != Some(seq) {
+                advanced = true;
+                self.meta_put(&key, &seq.to_string());
+            }
+        }
+        // Each follow-up starts where this answer ended, so the chain ends.
+        if more && advanced {
+            self.send_sibling_backfill_request(fp);
+        }
+    }
+
+    /// The automatic backfill after a watermark (`since`, this device's archive clock): every row and attachment
+    /// archived in `[since, covered_to)`, oldest first, within the entry and byte caps. Returns
+    /// `(entries, covered_to, cut)`. A cut answer ends at a time over all chats: the per-chat limit of
+    /// `build_sibling_history_response` kept only the newest rows of a busy chat, and the watermark then passed the
+    /// rest for good.
+    pub(crate) fn build_sibling_backfill(&self, since: i64) -> (Vec<SiblingHistoryEntry>, i64, bool) {
+        let now = current_time_ms().min(i64::MAX as u64) as i64;
+        let Some(conn) = &self.db else { return (Vec::new(), since, false) };
+        let cap = SIBLING_BACKFILL_MAX_ENTRIES;
+        let since = since.max(0);
+        // The first time past the cap over all chats: everything before it fits one answer by count.
+        let cut: Option<i64> = conn.query_row(
+            "SELECT t FROM (SELECT timestamp AS t FROM messages WHERE timestamp >= ?1
+                            UNION ALL SELECT created_at AS t FROM files WHERE status = 'complete' AND created_at >= ?1)
+             ORDER BY t LIMIT 1 OFFSET ?2",
+            params![since, cap as i64], |r| r.get(0),
+        ).ok();
+        // ponytail: more than a whole answer archived in one millisecond (a history-sync batch) goes whole into the
+        // merge below, which ends inside it and skips the rest of that millisecond. A (time, id) cursor if that matters.
+        let hi = cut.map_or(i64::MAX, |c| c.max(since + 1));
+        let peers: Vec<String> = conn.prepare(
+            "SELECT peer_device_fingerprint FROM messages WHERE group_id IS NULL AND peer_device_fingerprint IS NOT NULL AND timestamp >= ?1 AND timestamp < ?2
+             UNION SELECT peer_device_fingerprint FROM files WHERE group_id IS NULL AND peer_device_fingerprint IS NOT NULL AND status = 'complete' AND created_at >= ?1 AND created_at < ?2",
+        ).and_then(|mut st| st.query_map(params![since, hi], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>())
+            .unwrap_or_default();
+        let own_id = self.my_identity_id();
+        let rows_max = cap as u32 + 1;
+        let mut unlimited = usize::MAX;
+        let mut all: Vec<(i64, SiblingHistoryEntry)> = Vec::new();
+        let mut files_done: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for peer_fp in peers {
+            let Some(identity_id) = self.known_remote_devices.get(&peer_fp).map(|d| d.identity_id.clone()) else { continue };
+            if own_id.as_ref() == Some(&identity_id) { continue; }
+            for m in self.load_message_history_q(&peer_fp, rows_max, Some(hi), Some(since - 1), false, false) {
+                if m.is_deleted { continue; }
+                let Some(mid) = m.message_id.clone().filter(|id| !id.is_empty()) else { continue };
+                let reactions = self.reaction_rows(&mid);
+                all.push((m.timestamp.min(i64::MAX as u64) as i64, SiblingHistoryEntry {
+                    conversation_identity_id: Some(identity_id.clone()),
+                    group_id: None,
+                    direction: m.direction,
+                    text: m.text,
+                    message_id: mid,
+                    sender_identity_id: None,
+                    reply_to_message_id: m.reply_to_message_id,
+                    reply_to_preview: m.reply_to_preview,
+                    reply_to_sender_identity_id: None,
+                    sent_at_ms: m.sent_at_ms,
+                    author_proof: None,
+                    file: None,
+                    reactions,
+                }));
+            }
+            // Attachments once per contact (they live under any of its devices).
+            if files_done.insert(identity_id.clone()) {
+                let fps: Vec<String> = self.known_remote_devices.values()
+                    .filter(|d| d.identity_id == identity_id)
+                    .map(|d| d.device_fingerprint.clone())
+                    .collect();
+                for e in self.sibling_file_entries(&fps, None, Some(&identity_id), since, hi, rows_max, &mut unlimited) {
+                    all.push((e.sent_at_ms.min(i64::MAX as u64) as i64, e));
+                }
+            }
+        }
+        for gid in self.groups.keys() {
+            for m in self.load_group_message_history_q(gid, rows_max, Some(hi), Some(since - 1), false, false) {
+                if m.is_deleted { continue; }
+                let Some(mid) = m.message_id.clone().filter(|id| !id.is_empty()) else { continue };
+                let author_proof = self.group_author_proof(gid, &mid);
+                let reactions = self.reaction_rows(&mid);
+                all.push((m.timestamp.min(i64::MAX as u64) as i64, SiblingHistoryEntry {
+                    conversation_identity_id: None,
+                    group_id: Some(gid.clone()),
+                    direction: m.direction,
+                    text: m.text,
+                    message_id: mid,
+                    sender_identity_id: m.sender_identity_id,
+                    reply_to_message_id: m.reply_to_message_id,
+                    reply_to_preview: m.reply_to_preview,
+                    reply_to_sender_identity_id: m.reply_to_sender_identity_id,
+                    sent_at_ms: m.sent_at_ms,
+                    author_proof,
+                    file: None,
+                    reactions,
+                }));
+            }
+            for e in self.sibling_file_entries(&[], Some(gid), None, since, hi, rows_max, &mut unlimited) {
+                all.push((e.sent_at_ms.min(i64::MAX as u64) as i64, e));
+            }
+        }
+        all.sort_by_key(|(t, _)| *t);
+        let cost = |e: &SiblingHistoryEntry| match e.file.as_deref() {
+            Some(MessageContent::FileOffer { caption, chunk_hashes, preview_jpeg, .. }) =>
+                512 + caption.len() + chunk_hashes.len() + preview_jpeg.as_ref().map_or(0, |p| p.len()),
+            _ => e.text.len() + e.author_proof.as_ref().map_or(0, |p| p.len()),
+        };
+        let mut covered = cut.map_or(now.max(since), |c| c.max(since + 1));
+        let mut stopped = false;
+        let mut budget = HISTORY_SYNC_MAX_TEXT_BYTES;
+        let mut entries = Vec::new();
+        for (t, mut e) in all {
+            if entries.len() >= cap {
+                covered = covered.min(t.max(since + 1));
+                stopped = true;
+                break;
+            }
+            if cost(&e) > budget {
+                // An attachment goes without its preview first, as in `sibling_file_entries`.
+                if let Some(MessageContent::FileOffer { preview_jpeg, .. }) = e.file.as_deref_mut() {
+                    *preview_jpeg = None;
+                }
+            }
+            let c = cost(&e);
+            // Never fits an answer: skipped for good, as before.
+            if c > HISTORY_SYNC_MAX_TEXT_BYTES { continue; }
+            if c > budget {
+                covered = covered.min(t.max(since + 1));
+                stopped = true;
+                break;
+            }
+            budget -= c;
+            entries.push(e);
+        }
+        (entries, covered, cut.is_some() || stopped)
     }
 
     /// Requests an older page of ONE chat from our own sibling devices, even when the counterpart (contact or group member) is unreachable.
@@ -750,6 +1010,7 @@ impl P2PCore {
             before_timestamp: Some(before),
             since_timestamp: None,
             after_timestamp: Some(after),
+            ops_since: None,
         };
         let now = current_time_ms();
         self.sibling_fetch_open.retain(|_, (_, at)| now.saturating_sub(*at) < TEXT_RETRY_GIVE_UP_MS);
@@ -1054,6 +1315,8 @@ impl P2PCore {
             let Ok(file_key) = self.unwrap_file_key(&enc_key, &key_nonce) else { continue };
             let caption = caption.unwrap_or_default();
             let chunk_hashes = chunk_hashes.unwrap_or_default();
+            // A row stored before chunk hash lists existed: every receiver refuses its offer ("chunk hash list missing").
+            if chunk_hashes.is_empty() { continue; }
             // Over the budget, the preview is dropped first. The file still arrives, shown with a generic icon until it is downloaded.
             let bare = 512 + caption.len() + chunk_hashes.len();
             let preview_len = preview_jpeg.as_ref().map_or(0, |p| p.len());
@@ -1111,7 +1374,7 @@ impl P2PCore {
             peer_fp, sender, group_id.map(str::to_string), &file_id, &file_name, &mime_type,
             total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size, &chunk_hashes,
             &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
-            reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
+            reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(), created_at,
         );
         if ev["type"] != "file_offer" { return false; }
         if let Some(conn) = &self.db {
@@ -1302,6 +1565,144 @@ impl P2PCore {
         }
         self.meta_put(&format!("hidden_dev:{fp}"), "1");
         Ok(())
+    }
+
+    /// Some active device of my identity other than this one is known.
+    pub(crate) fn has_linked_sibling(&self) -> bool {
+        let Some(my_id) = self.my_identity_id() else { return false };
+        self.known_remote_devices.values().any(|d| d.identity_id == my_id && d.is_active && !self.own_devices.contains_key(&d.device_fingerprint))
+    }
+
+    /// Keeps a non-additive operation sent to my siblings (edit, delete, reaction, contact or sticker removal, group
+    /// left, block, contact device revoke, read state). A sibling whose copy was never queued (left out of
+    /// `sibling_active_devices` as stale) or given up after the 7-day retry limit gets it again with its next backfill
+    /// (`replay_sibling_journal`). The backfill only adds rows, so these stayed diverged for good. Texts, files and
+    /// stickers are not kept: the backfill and `StickersRequest` bring them. Only the newest op per target is kept.
+    /// `targets`: the siblings the live copy was queued for.
+    pub(crate) fn journal_sibling_op(&self, content: &MessageContent, targets: &[String]) {
+        let dkey = match content {
+            MessageContent::SiblingEcho { body, group_id, .. } => match body {
+                SiblingEchoBody::Edit { target_message_id, .. } => format!("ed:{}", target_message_id),
+                SiblingEchoBody::Delete { target_message_id } => format!("del:{}", target_message_id),
+                SiblingEchoBody::Reaction { target_message_id, emoji, .. } => format!("re:{}:{}", target_message_id, emoji),
+                SiblingEchoBody::GroupLeft => format!("gl:{}", group_id.as_deref().unwrap_or("")),
+                // One journal row per sticker, so a later re-add (`Sticker` below) clears exactly its own row.
+                SiblingEchoBody::StickerRemoved { ids } if ids.len() != 1 => {
+                    for id in ids {
+                        let one = MessageContent::SiblingEcho {
+                            conversation_identity_id: None,
+                            group_id: None,
+                            body: SiblingEchoBody::StickerRemoved { ids: vec![id.clone()] },
+                        };
+                        self.journal_sibling_op(&one, targets);
+                    }
+                    return;
+                }
+                SiblingEchoBody::StickerRemoved { ids } => format!("sr:{}", ids[0]),
+                SiblingEchoBody::ContactRemoved { identity_id, .. } => format!("cr:{}", identity_id),
+                SiblingEchoBody::Blocked { identity_id, .. } => format!("bl:{}", identity_id),
+                SiblingEchoBody::ContactDeviceRevoked { device_fingerprint, .. } => format!("dr:{}", device_fingerprint),
+                // Added again: an older removal must not be replayed over it.
+                SiblingEchoBody::Sticker { id, .. } => {
+                    if let Some(conn) = &self.db {
+                        let _ = conn.execute("DELETE FROM sibling_journal WHERE dkey = ?1", params![format!("sr:{}", id)]);
+                    }
+                    return;
+                }
+                _ => return,
+            },
+            MessageContent::ReadStateSync { conversation_identity_id, group_id, .. } =>
+                format!("rs:{}", group_id.as_deref().or(conversation_identity_id.as_deref()).unwrap_or("")),
+            _ => return,
+        };
+        if !self.has_linked_sibling() { return; }
+        let Some(conn) = &self.db else { return };
+        let Ok(bytes) = ciborium_bytes(content) else { return };
+        let now = current_time_ms().min(i64::MAX as u64) as i64;
+        let _ = conn.execute("DELETE FROM sibling_journal WHERE dkey = ?1", params![dkey]);
+        if let Err(e) = conn.execute(
+            "INSERT INTO sibling_journal (at, dkey, targets, content) VALUES (?1, ?2, ?3, ?4)",
+            params![now, dkey, targets.join(","), bytes],
+        ) {
+            warn!("Sibling journal write failed: {}", e);
+        }
+        let _ = conn.execute(
+            "DELETE FROM sibling_journal WHERE seq <= (SELECT MAX(seq) FROM sibling_journal) - ?1 OR at < ?2",
+            params![SIBLING_JOURNAL_MAX_ROWS as i64, now.saturating_sub(SIBLING_JOURNAL_MAX_AGE_MS as i64)],
+        );
+    }
+
+    /// Sends `fp` again the journal operations after position `since` that it never got: its live copy was not
+    /// queued for it, or was queued before the retry limit. Returns the position to answer with, and whether
+    /// operations are left after it. `None`: a first request; nothing is sent, only the position.
+    // ponytail: an old `GroupLeft` or `ContactDeviceRevoked` replayed after the user joined the group again or
+    // accepted the device again on that sibling undoes it there. Stamp them with a generation if that shows.
+    pub(crate) fn replay_sibling_journal(&mut self, fp: &str, since: Option<u64>) -> (u64, bool) {
+        let (top, rows) = {
+            let Some(conn) = &self.db else { return (since.unwrap_or(0), false) };
+            let top = conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM sibling_journal", [], |r| r.get::<_, i64>(0))
+                .map_or(0, |v| v.max(0) as u64);
+            let Some(since) = since else { return (top, false) };
+            let rows: Vec<(i64, i64, String, Vec<u8>)> = conn.prepare(
+                "SELECT seq, at, targets, content FROM sibling_journal WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+            ).and_then(|mut st| st.query_map(params![since.min(i64::MAX as u64) as i64, SIBLING_JOURNAL_REPLAY_MAX as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?.collect::<rusqlite::Result<Vec<_>>>()).unwrap_or_default();
+            (top, rows)
+        };
+        let since = since.unwrap_or(0);
+        let cut = rows.len() >= SIBLING_JOURNAL_REPLAY_MAX;
+        let given_up_before = current_time_ms().saturating_sub(TEXT_RETRY_GIVE_UP_MS).min(i64::MAX as u64) as i64;
+        let mut last = since;
+        for (seq, at, targets, bytes) in rows {
+            let got_live = at > given_up_before && targets.split(',').any(|t| t == fp);
+            if !got_live {
+                match MessageContent::from_cbor(&bytes) {
+                    Ok(content) => {
+                        if let Err(e) = self.send_message_content(fp.to_string(), &content, None) {
+                            warn!("Sibling journal replay stopped: {}", e);
+                            return (last, true);
+                        }
+                    }
+                    Err(e) => warn!("Sibling journal row {} unreadable: {}", seq, e),
+                }
+            }
+            last = seq.max(0) as u64;
+        }
+        (if cut { last } else { top.max(last) }, cut)
+    }
+
+    /// The new device acked its `DeviceLinkGrant`: it adopted this identity. Only now do contacts and the other
+    /// siblings learn of it, and does it get the rest of the roster. Announced when the grant was sent, a device that
+    /// refused the grant (its QR screen closed first) got every contact's messages as a ghost sibling.
+    pub(crate) fn finish_device_link(&mut self, fp: &str, device_add: &DeviceAdd) {
+        if self.known_remote_devices.get(fp).map_or(true, |d| !d.is_active || Some(&d.identity_id) != self.my_identity_id().as_ref()) {
+            return;
+        }
+        info!("Linked device adopted the identity: {}", crate::log_id(fp));
+        self.meta_del(&format!("rsh:{}", fp));
+        // Announce the new device to all contacts.
+        self.broadcast_device_add_to_contacts(device_add);
+        // The other roster parts, and the existing siblings learn about the new device too (3+ devices).
+        self.sync_to_siblings();
+    }
+
+    /// Logout on a linked device: asks the root to revoke this device
+    /// (`SiblingEchoBody::DeviceLeaving`). Ack-tracked, so an offline root gets
+    /// it from the server. Returns the packet id to wait on; `None` on the root.
+    pub(crate) fn announce_leaving(&mut self) -> Option<String> {
+        if self.own_device_add.is_none() {
+            return None;
+        }
+        let root = self.my_identity_id()?;
+        let content = MessageContent::SiblingEcho { conversation_identity_id: None, group_id: None, body: SiblingEchoBody::DeviceLeaving };
+        match self.send_message_content(root, &content, None) {
+            Ok((id, _)) => Some(id),
+            Err(e) => {
+                error!("DeviceLeaving send failed: {}", e);
+                None
+            }
+        }
     }
 
     /// Revokes a SIBLING device of my identity: builds a signed `DeviceRevoke` and broadcasts it to all contacts and the other sibling devices,

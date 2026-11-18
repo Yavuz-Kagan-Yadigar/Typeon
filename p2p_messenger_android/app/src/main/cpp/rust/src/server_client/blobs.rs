@@ -3,14 +3,18 @@
 use super::*;
 
 impl P2PCore {
-    /// A queued blob upload that a server can take now: a routing server, connected, enrolled, and not in deposit
-    /// backoff.
+    /// A queued blob upload that a server can take now: a routing server, connected, enrolled, not in deposit or blob
+    /// backoff, and free to take the head upload (`blob_server_free`).
     pub(crate) fn blob_upload_can_run(&self) -> bool {
         let now = mono_ms();
         !self.server_blob_uploads.is_empty()
             && self.servers.iter().any(|s| {
                 s.route_messages
-                    && self.server_rt.get(&s.server_id).map_or(false, |r| r.connected && r.enrolled && now >= r.deposit_backoff_until)
+                    && self.server_rt.get(&s.server_id).map_or(false, |r| {
+                        r.connected && r.enrolled && now >= r.deposit_backoff_until && now >= r.blob_backoff_until
+                    })
+                    // Not while the upload waits for its own server to come back.
+                    && self.blob_server_free(&s.server_id, now)
             })
     }
 
@@ -82,10 +86,23 @@ impl P2PCore {
         self.server_blob_uploads.push(up);
     }
 
+    /// May the head upload go to `server_id` now? Yes for its own server, for an upload with none, and when its server
+    /// no longer routes or has not been ready for `BLOB_SERVER_MOVE_MS`.
+    pub(super) fn blob_server_free(&self, server_id: &str, now: u64) -> bool {
+        let Some(own) = self.server_blob_uploads.first().and_then(|u| u.server_id.as_deref()) else { return true };
+        if own == server_id || !self.servers.iter().any(|s| s.server_id == own && s.route_messages) {
+            return true;
+        }
+        self.server_rt.get(own).map_or(true, |rt| rt.unready_since != 0 && now.saturating_sub(rt.unready_since) >= BLOB_SERVER_MOVE_MS)
+    }
+
     /// Uploads the next chunks of the head upload, up to its window in flight.
     pub(super) fn server_flush_blobs(&mut self, server_id: &str, peer_id: PeerId) {
-        // Quota or rate error on a chunk: wait, as `Deposit` does.
-        if self.server_rt.get(server_id).map_or(false, |r| mono_ms() < r.deposit_backoff_until) {
+        // Quota or rate error on a chunk: wait, as `Deposit` does. A server error: wait for the blob backoff.
+        if self.server_rt.get(server_id).map_or(false, |r| {
+            let now = mono_ms();
+            now < r.deposit_backoff_until || now < r.blob_backoff_until
+        }) {
             return;
         }
         // Progress counts for one server only (see `PendingBlobUpload.server_id`). After a restart the server is not remembered

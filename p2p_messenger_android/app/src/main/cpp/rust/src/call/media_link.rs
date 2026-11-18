@@ -6,11 +6,12 @@ pub(super) fn media() -> MutexGuard<'static, Media> {
     MEDIA.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-pub(super) fn media_start(key: [u8; 32], sid: [u8; 8]) {
+pub(super) fn media_start(key: &[u8; 32], sid: [u8; 8]) {
     let mut m = media();
     let generation = m.generation + 1;
     let next_link_id = m.next_link_id;
-    *m = Media { active: true, generation, key: Zeroizing::new(key), sid, next_link_id, ..Default::default() };
+    let floors = keep_floors(&mut m);
+    *m = Media { active: true, generation, key: Zeroizing::new(*key), sid, next_link_id, floors, ..Default::default() };
 }
 
 /// Dropping the links closes their channels, which ends the writer tasks and
@@ -19,7 +20,8 @@ pub(super) fn media_stop() {
     let mut m = media();
     let generation = m.generation + 1;
     let next_link_id = m.next_link_id;
-    *m = Media { generation, next_link_id, ..Default::default() };
+    let floors = keep_floors(&mut m);
+    *m = Media { generation, next_link_id, floors, ..Default::default() };
     drop(m);
     INBOX_READY.notify_all();
 }
@@ -27,6 +29,37 @@ pub(super) fn media_stop() {
 /// See `wipe_all_local_state`.
 pub(crate) fn drop_media() {
     media_stop();
+    media().floors.clear();
+}
+
+/// A peer keeps its key, stream id and counter for its whole call session,
+/// also while we leave and join again. The highest `seq` seen under each key
+/// outlives our remote, so a rejoin does not open a fresh replay window under
+/// the same key (a relay could replay the recorded part of the call).
+fn keep_floors(m: &mut Media) -> VecDeque<([u8; 32], u64)> {
+    let mut floors = std::mem::take(&mut m.floors);
+    for r in m.remotes.values() {
+        push_floor(&mut floors, &r.key, r.max_seq);
+    }
+    floors
+}
+
+fn push_floor(floors: &mut VecDeque<([u8; 32], u64)>, key: &[u8; 32], max_seq: u64) {
+    if max_seq == 0 {
+        return;
+    }
+    let tag = key_tag(key);
+    floors.retain(|(t, _)| *t != tag);
+    if floors.len() >= 64 {
+        floors.pop_front();
+    }
+    floors.push_back((tag, max_seq));
+}
+
+/// Floors are keyed by a hash, so no media key outlives its call in memory.
+fn key_tag(key: &[u8; 32]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(key).into()
 }
 
 pub(super) fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
@@ -55,6 +88,10 @@ pub(super) fn media_add_remote(fp: &str, key: &[u8], sid: &[u8]) {
     if let Some(old) = m.remotes.get(fp).filter(|r| *r.key == key) {
         remote.max_seq = old.max_seq;
         remote.seen = old.seen;
+    } else if let Some(&(_, floor)) = m.floors.iter().find(|(t, _)| *t == key_tag(&key)) {
+        // Everything up to the floor counts as seen.
+        remote.max_seq = floor;
+        remote.seen = u64::MAX;
     }
     m.remotes.insert(fp.to_string(), remote);
     let send_key = pair_key(&m.key, fp);
@@ -72,7 +109,9 @@ pub(crate) fn relay_listen_keys() -> Vec<Vec<u8>> {
 
 pub(super) fn media_remove_remote(fp: &str) {
     let mut m = media();
-    m.remotes.remove(fp);
+    if let Some(r) = m.remotes.remove(fp) {
+        push_floor(&mut m.floors, &r.key, r.max_seq);
+    }
     m.targets.remove(fp);
 }
 
@@ -89,9 +128,10 @@ pub(super) fn media_last_rx(fp: &str) -> u64 {
     media().remotes.get(fp).map(|r| r.last_rx_ms).unwrap_or(0)
 }
 
-/// Time since the last packet from `fp`, on the monotonic clock.
+/// Time since the last packet from `fp` (or since it was added, before its
+/// first packet), on the monotonic clock.
 pub(super) fn media_rx_age(fp: &str) -> Option<Duration> {
-    media().remotes.get(fp).and_then(|r| r.last_rx).map(|t| t.elapsed())
+    media().remotes.get(fp).map(|r| r.last_rx.unwrap_or(r.added).elapsed())
 }
 
 pub(super) fn media_stats() -> serde_json::Value {
@@ -115,9 +155,14 @@ pub(super) fn backlog_of(m: &Media) -> usize {
     local.max(reported_queue(m) as usize / 100)
 }
 
+/// The (lower) median of the fresh reports: the one encoder serves every
+/// receiver, so one slow or hostile reporter must not set its quality for all.
+/// Its audio is held back per receiver (`Target::audio_hold`).
 pub(super) fn reported_queue(m: &Media) -> u32 {
     let now = current_time_ms();
-    m.reports.values().filter(|(_, at)| now.saturating_sub(*at) < REPORT_TTL_MS).map(|(q, _)| *q).max().unwrap_or(0)
+    let mut q: Vec<u32> = m.reports.values().filter(|(_, at)| now.saturating_sub(*at) < REPORT_TTL_MS).map(|(q, _)| *q).collect();
+    q.sort_unstable();
+    q.get(q.len().saturating_sub(1) / 2).copied().unwrap_or(0)
 }
 
 pub(super) fn depth_max(kind: u8) -> usize {
@@ -478,8 +523,11 @@ pub(super) async fn open_link(mut control: libp2p_stream::Control, peer: PeerId,
 /// with it (a Tor circuit dying is the usual cause). The decoders on both
 /// ends now have holes: ask every sender for a keyframe, and send one.
 fn link_lost(m: &mut Media) {
-    m.keyframe_asked = true;
-    m.keyframe_at = current_time_ms();
+    let now = current_time_ms();
+    if now.saturating_sub(m.keyframe_at) >= KEYFRAME_MIN_MS {
+        m.keyframe_asked = true;
+        m.keyframe_at = now;
+    }
     m.remotes.values_mut().for_each(|r| r.want_keyframe = true);
 }
 
@@ -514,6 +562,9 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
             tokio::spawn(async move {
                 let idle = Duration::from_millis(MEDIA_LOST_MS);
                 let opened = Instant::now();
+                // Only a call target's stream that ends costs keyframes: any
+                // connected peer could open and drop streams in a loop.
+                let mut was_target = false;
                 loop {
                     let wait = {
                         let m = media();
@@ -521,6 +572,7 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
                             break;
                         }
                         if m.targets.values().any(|t| t.peer == Some(peer)) {
+                            was_target = true;
                             idle
                         } else {
                             match INBOUND_GRACE.checked_sub(opened.elapsed()) {
@@ -534,7 +586,9 @@ pub(crate) fn spawn_media_acceptor(control: &mut libp2p_stream::Control) {
                 }
                 let mut m = media();
                 if m.generation == generation {
-                    link_lost(&mut m);
+                    if was_target {
+                        link_lost(&mut m);
+                    }
                     let left = m.inbound.get(&peer).map_or(0, |n| n.saturating_sub(1));
                     if left == 0 {
                         m.inbound.remove(&peer);

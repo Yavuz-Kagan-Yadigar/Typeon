@@ -124,11 +124,14 @@ impl Store {
     ///
     /// Two rules. Completed blobs live for `blob_ttl_ms` after their LAST SERVE, so a file still being downloaded keeps
     /// living. Unfinished uploads are dropped 24 hours after their last chunk (`blob_touch` per chunk).
+    ///
+    /// Both also have a hard cap from `created_at`, whatever is served or written: a downloader asking for chunk 0
+    /// every few weeks (or an uploader sending one chunk a day) would keep a blob, and its uploader's quota, for ever.
     pub fn blobs_to_gc(&self, now: i64, ttl_ms: i64) -> Vec<String> {
         let mut stmt = match self.conn.prepare(
             "SELECT blob_id FROM blobs
-             WHERE (complete = 1 AND last_served_at + ?1 <= ?2)
-                OR (complete = 0 AND last_served_at + 86400000 <= ?2)
+             WHERE (complete = 1 AND (last_served_at + ?1 <= ?2 OR created_at + 2 * ?1 <= ?2))
+                OR (complete = 0 AND (last_served_at + 86400000 <= ?2 OR created_at + 7 * 86400000 <= ?2))
              LIMIT 512",
         ) {
             Ok(s) => s,

@@ -351,6 +351,7 @@ internal fun GroupChatActivity.loadAndPlayVoiceMessage(item: SimpleChatAdapter.I
                 created = player
                 player.setDataSource(path)
                 player.setOnCompletionListener {
+                    com.p2p.messenger.util.VoiceAudio.end(this@loadAndPlayVoiceMessage)
                     voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
                     adapter.updateVoicePlayback(attachment.fileId, false, 0, voicePlaybackSpeed)
                 }
@@ -361,6 +362,7 @@ internal fun GroupChatActivity.loadAndPlayVoiceMessage(item: SimpleChatAdapter.I
                     player.playbackParams = PlaybackParams().setSpeed(voicePlaybackSpeed)
                 }
                 player.start()
+                com.p2p.messenger.util.VoiceAudio.begin(this@loadAndPlayVoiceMessage) { stopVoicePlayback() }
                 voicePlayer = player
                 voicePlayingFileId = attachment.fileId
                 voicePlaybackHandler.post(voicePlaybackTickRunnable)
@@ -399,10 +401,9 @@ internal fun GroupChatActivity.stopVoicePlayback() {
     voiceLoadRequest++
     val fileId = voicePlayingFileId
     voicePlaybackHandler.removeCallbacks(voicePlaybackTickRunnable)
-    try {
-        voicePlayer?.stop()
-        voicePlayer?.release()
-    } catch (e: Exception) { /* zaten serbest bırakılmış olabilir */ }
+    try { voicePlayer?.stop() } catch (e: Exception) { }
+    try { voicePlayer?.release() } catch (e: Exception) { }
+    com.p2p.messenger.util.VoiceAudio.end(this)
     voicePlayer = null
     voicePlayingFileId = null
     if (fileId != null) adapter.updateVoicePlayback(fileId, false, 0, voicePlaybackSpeed)

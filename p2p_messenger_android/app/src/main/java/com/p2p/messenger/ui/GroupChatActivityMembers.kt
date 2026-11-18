@@ -447,6 +447,9 @@ internal fun GroupChatActivity.updateMentionPopup(input: EditText) {
 @Volatile private var contactListCache: JSONArray? = null
 @Volatile private var contactListCacheAt: Long = 0
 
+/** One decoded avatar per distinct hex string: every bubble and seen-viewer of a member shares the same bytes. */
+internal fun GroupChatActivity.sharedAvatarBytes(hex: String): ByteArray = avatarBytesCache.getOrPut(hex) { hexToBytes(hex) }
+
 /**
  * Cached for a short time. Group history loading calls `resolveContactByIdentity` once per row (through `itemFromGroupHistoryJson` and `itemFromGroupAttachmentJson`).
  * Without a cache, each call re-runs `P2PLib.listContacts()`: a JNI call and a DB query that reads the whole contact list, avatar hex blobs included, and parses the JSON.

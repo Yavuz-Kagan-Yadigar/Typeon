@@ -145,7 +145,13 @@ class SettingsFragment : Fragment() {
     internal val torStatusRunnable = object : Runnable {
         override fun run() {
             updateTorStatusLabel()
-            updateStatusView?.text = context?.let { com.p2p.messenger.service.SelfUpdate.statusText(it) }
+            // A file read: off the main thread.
+            context?.let { ctx ->
+                lifecycleScope.launch {
+                    val text = withContext(Dispatchers.IO) { com.p2p.messenger.service.SelfUpdate.statusText(ctx) }
+                    updateStatusView?.text = text
+                }
+            }
             // The Tor status (bootstrap) can change within seconds, so refresh every 2 s.
             torStatusHandler.postDelayed(this, 2000)
         }
@@ -283,15 +289,20 @@ class SettingsFragment : Fragment() {
         historyStorageLimitValue.text = formatStorageLimit(HISTORY_STORAGE_LIMIT_STEPS_BYTES[closestStepIndex(currentLimitBytes)])
         setHistoryStorageLimitVisible(nodeModeSwitch.isChecked)
         historyStorageLimitSlider.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            // Applied only on release: every step of a drag used to evict received files down to that limit.
+            private var tracking = false
             override fun onProgressChanged(bar: android.widget.SeekBar, progress: Int, fromUser: Boolean) {
                 val bytes = HISTORY_STORAGE_LIMIT_STEPS_BYTES[progress]
                 historyStorageLimitValue.text = formatStorageLimit(bytes)
-                if (fromUser) {
+                if (fromUser && !tracking) {
                     P2PService.setHistoryStorageLimitBytes(requireContext(), bytes)
                 }
             }
-            override fun onStartTrackingTouch(bar: android.widget.SeekBar) {}
-            override fun onStopTrackingTouch(bar: android.widget.SeekBar) {}
+            override fun onStartTrackingTouch(bar: android.widget.SeekBar) { tracking = true }
+            override fun onStopTrackingTouch(bar: android.widget.SeekBar) {
+                tracking = false
+                P2PService.setHistoryStorageLimitBytes(requireContext(), HISTORY_STORAGE_LIMIT_STEPS_BYTES[bar.progress])
+            }
         })
 
         nodeModeSwitch.setOnCheckedChangeListener { _, isChecked ->
@@ -299,16 +310,8 @@ class SettingsFragment : Fragment() {
             setHistoryStorageLimitVisible(isChecked)
         }
 
-        // Tor onion service: reachable even behind CGNAT (see tor.rs and SECURITY.md). Unlike node mode there is NO live toggle: a change takes effect
-        // only when the network layer restarts (the transport can only be added in startNetwork). So the user is shown a 'restart the app' notice.
-        val torSwitch = view.findViewById<SwitchMaterial>(R.id.tor_switch)
+        // Tor is mandatory (the core starts no network without it): no switch, only its status.
         torStatusView = view.findViewById(R.id.tor_status)
-        torSwitch.isChecked = P2PService.isTorEnabled(requireContext())
-        torSwitch.setOnCheckedChangeListener { _, isChecked ->
-            P2PService.setTorEnabled(requireContext(), isChecked)
-            Toast.makeText(requireContext(), R.string.tor_restart_needed, Toast.LENGTH_LONG).show()
-            if (!isChecked) Toast.makeText(requireContext(), R.string.tor_off_no_network, Toast.LENGTH_LONG).show()
-        }
         val betaSwitch = view.findViewById<SwitchMaterial>(R.id.beta_updates_switch)
         updateStatusView = view.findViewById(R.id.update_status)
         view.findViewById<Button>(R.id.btn_check_updates).setOnClickListener {

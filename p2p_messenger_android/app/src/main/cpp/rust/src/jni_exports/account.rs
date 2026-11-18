@@ -83,17 +83,17 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_pbkdf2Sha256<'local>(mut en
     let pw = zeroize::Zeroizing::new(jstr(&mut env, &password).unwrap_or_default());
     let salt = jbytearray_to_vec(&mut env, &salt);
     let out = catch_panic(move || {
-        let mut out = vec![0u8; out_len.clamp(1, 64) as usize];
+        let mut out = zeroize::Zeroizing::new(vec![0u8; out_len.clamp(1, 64) as usize]);
         // An argument that failed to copy arrives empty: no key from that (a
         // hash of the empty password was stored as the app lock).
         if pw.is_empty() || salt.is_empty() {
-            Vec::new()
+            Default::default()
         } else if let Some(it) = std::num::NonZeroU32::new(iterations.clamp(0, 5_000_000) as u32) {
             // bounded like `out_len` (the app uses 300 000).
-            ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, it, &salt, pw.as_bytes(), &mut out);
+            ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, it, &salt, pw.as_bytes(), &mut out[..]);
             out
         } else {
-            Vec::new()
+            Default::default()
         }
     })
     .unwrap_or_default();
@@ -282,6 +282,18 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_exportRecovery<'local>(mut 
     }
 }
 
+/// After `exportRecovery`: the number of newest messages the file holds when it had to be cut, 0 when complete.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_lastRecoveryTrimmed<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) -> jni::sys::jint {
+    crate::recovery::RECOVERY_TRIMMED.load(std::sync::atomic::Ordering::SeqCst).min(i32::MAX as usize) as jni::sys::jint
+}
+
+/// A linked device logging out asks the root to revoke it (`api::announce_leaving`, waits up to 3 s for the ack). No-op on the root.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_announceLeaving<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) {
+    crate::api::announce_leaving();
+}
+
 /// Counterpart of `exportRecovery`. See the `import_recovery` docs. Same pattern as `createIdentity`: on success it returns `identity_id` and puts the
 /// generated secret bundle in `pending_secret_bundle`. The Kotlin side (see `IdentityManager.persistNewIdentity`) must fetch it at once with
 /// `getPendingSecretBundle`, encrypt it with the Keystore, and write it to disk, just as for a new identity.
@@ -323,10 +335,11 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_checkUpdate<'local>(
     let (Some(dir), Some(current)) = (jstr(&mut env, &dir), jstr(&mut env, &current)) else {
         return safe_new_jstring(&mut env, "Error: bad arguments");
     };
-    let out = match crate::update::check_blocking(&dir, &current, "typeon-client-{v}.apk", force != 0, false) {
-        Ok(Some((_, path))) => path.to_string_lossy().into_owned(),
-        Ok(None) => String::new(),
-        Err(e) => format!("Error: {e}"),
+    // A panic on fetched data must not unwind into JNI (that aborts the process).
+    let out = match catch_panic(move || crate::update::check_blocking(&dir, &current, "typeon-client-{v}.apk", force != 0, false)) {
+        Ok(Ok(Some((_, path)))) => path.to_string_lossy().into_owned(),
+        Ok(Ok(None)) => String::new(),
+        Ok(Err(e)) | Err(e) => format!("Error: {e}"),
     };
     safe_new_jstring(&mut env, out)
 }

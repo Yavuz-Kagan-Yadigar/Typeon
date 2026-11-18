@@ -668,6 +668,9 @@ pub(super) fn load_sticker(state: &Rc<AttachmentState>) {
     });
 }
 
+/// Largest still sticker decoded (a 2048 x 2048 canvas, 16 MB of RGBA).
+const MAX_STICKER_PIXELS: i64 = 2048 * 2048;
+
 /// The sticker's frames as textures with their durations in ms.
 pub(super) fn sticker_frames(file_id: &str) -> Vec<(gtk::gdk::Texture, u32)> {
     use gtk::gdk;
@@ -685,9 +688,15 @@ pub(super) fn sticker_frames(file_id: &str) -> Vec<(gtk::gdk::Texture, u32)> {
                 (texture.upcast(), ms)
             })
             .collect(),
-        // Not a JPEG XL (an older sticker): one still picture.
+        // Not a JPEG XL (an older sticker): one still picture. The file is
+        // the sender's: a common format and a sticker-sized canvas only, read
+        // from the header before anything is decoded.
         Err(_) => core::attachment_plaintext_path(file_id)
             .ok()
+            .filter(|path| {
+                crate::ui::media::image_ok(path)
+                    .is_some_and(|(w, h)| i64::from(w) * i64::from(h) <= MAX_STICKER_PIXELS)
+            })
             .and_then(|path| gdk::Texture::from_filename(path).ok())
             .map(|texture| vec![(texture, 0)])
             .unwrap_or_default(),

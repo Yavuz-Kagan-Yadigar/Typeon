@@ -13,27 +13,18 @@ key vault, and the desktop plumbing that Android gets from system services.
 No Electron, no webview, no container: one statically-linked Rust binary
 against the system GTK4.
 
-## Primary or secondary
+## Secondary device only
 
-First launch offers the same three choices the phone does:
-
-- **Create a new account** — this computer becomes an account in its own right.
-- **Link to a device I already have** — generates its own keypair, shows a
-  device-link QR, and waits to be adopted. The other device signs a `DeviceAdd`,
-  ships a full sync (contacts, groups, sibling devices) and announces this one to
-  every contact. Its secret key never moves. Afterwards the two are independent:
-  contacts fan every message out to all your active devices, so neither has to be
-  online for the other to receive anything.
-- **Restore from a recovery file** — rebuilds a previous identity from its
-  encrypted backup.
+The desktop is a secondary device only. It cannot create or restore an account.
+First launch offers one choice, **Link to my phone**: the app generates its own
+keypair, shows a device-link QR, and waits to be adopted. The phone signs a
+`DeviceAdd`, ships a full sync (contacts, groups, sibling devices) and announces
+this one to every contact. Its secret key never moves. Afterwards the two are
+independent: contacts fan every message out to all your active devices, so
+neither has to be online for the other to receive anything.
 
 A half-finished link resumes on the next launch rather than dropping you into an
-empty window.
-
-**One asymmetry to know about:** a Linux machine acting as the *primary* cannot
-adopt another device, because adopting means scanning the other device's QR and
-a desktop generally has no camera pointed at a phone. Linux-as-secondary works
-fine — the phone scans the QR this app displays.
+empty window. The phone scans the QR this app displays; the desktop never scans.
 
 ## Building
 

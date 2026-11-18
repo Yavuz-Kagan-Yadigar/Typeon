@@ -10,9 +10,9 @@
 //!
 //! It deliberately cannot create an account. See `ui::onboarding`.
 
-// Windows release: a GUI program, no console window next to it. The debug
-// build keeps its console so `RUST_LOG=info` output is visible.
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// Windows release: a GUI program, no console window next to it. Debug builds
+// and the `console` feature keep it so `RUST_LOG=info` output is visible.
+#![cfg_attr(all(windows, not(debug_assertions), not(feature = "console")), windows_subsystem = "windows")]
 
 mod app;
 #[cfg_attr(windows, path = "audio_win.rs")]
@@ -97,6 +97,72 @@ fn sweep_plain_cache(data_dir: &std::path::Path) {
     }
 }
 
+/// Holds an OS lock (`flock` / `LockFileEx`) on `instance.lock` for the whole
+/// process. False only when another process holds it.
+static INSTANCE_LOCK: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+fn lock_data_dir(data_dir: &std::path::Path) -> bool {
+    if INSTANCE_LOCK.lock().map_or(false, |l| l.is_some()) {
+        return true;
+    }
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(data_dir.join("instance.lock"))
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("typeon: no instance lock: {error}");
+            return true;
+        }
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            if let Ok(mut l) = INSTANCE_LOCK.lock() {
+                *l = Some(file);
+            }
+            true
+        }
+        Err(std::fs::TryLockError::WouldBlock) => false,
+        Err(std::fs::TryLockError::Error(error)) => {
+            eprintln!("typeon: no instance lock: {error}");
+            true
+        }
+    }
+}
+
+/// Erases the data directory after `core::shutdown`. Windows cannot delete an open file, and the
+/// instance lock is held open for the whole process, so it is released first. Then every file is
+/// removed one by one, so a file still held (e.g. by an arti task) does not keep the database and
+/// the keys on disk, and the tree goes last, with short retries for files closed mid-walk.
+pub(crate) fn erase_data_dir(data_dir: &std::path::Path) -> std::io::Result<()> {
+    if let Ok(mut l) = INSTANCE_LOCK.lock() {
+        l.take();
+    }
+    fn remove_files(dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                remove_files(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    let mut result = std::fs::remove_dir_all(data_dir);
+    for wait_ms in [200, 500, 1000] {
+        if result.is_ok() || !data_dir.exists() {
+            return Ok(());
+        }
+        remove_files(data_dir);
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        result = std::fs::remove_dir_all(data_dir);
+    }
+    result
+}
+
 /// Windows `--background`: the first window stays hidden in the tray.
 #[cfg(windows)]
 static START_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -120,7 +186,18 @@ fn activate(application: &adw::Application) {
         eprintln!("typeon: cannot create {}: {error}", data_dir.display());
         return;
     }
-    // A crash or kill skips the close-time sweep below; clear what it left.
+    // Backstop for single-instance mode, which needs a session bus (GLib on
+    // Windows falls back to non-unique without one). Two cores on one data
+    // directory would share a PeerId and race on ratchet state and the archive.
+    if !lock_data_dir(&data_dir) {
+        show_blocking_error(
+            application,
+            "Typeon is already running",
+            "Another Typeon process is using this profile. Open it from its window or the tray.",
+        );
+        return;
+    }
+    // A crash or kill skips the shutdown-time sweep below; clear what it left.
     sweep_plain_cache(&data_dir);
 
     // Hard requirement, checked before the database is even opened: this
@@ -213,14 +290,14 @@ fn activate(application: &adw::Application) {
         }
     });
 
-    // Deferred read-state must not be lost on exit.
-    #[cfg(not(windows))]
+    // Deferred read-state must not be lost on exit. `application.quit()`
+    // (SIGTERM, self-update, menu Quit) emits no close-request, so the flush
+    // and sweep run at shutdown, on every platform.
     {
         let app = app.clone();
-        window.connect_close_request(move |_| {
+        application.connect_shutdown(move |_| {
             app.prefs.borrow_mut().flush();
             sweep_plain_cache(&app.data_dir);
-            glib::Propagation::Proceed
         });
     }
     // Windows: closing the window keeps Typeon running in the tray (GLib's
@@ -238,27 +315,44 @@ fn activate(application: &adw::Application) {
                 glib::Propagation::Proceed
             });
         }
-        let app = app.clone();
-        application.connect_shutdown(move |_| {
-            app.prefs.borrow_mut().flush();
-            sweep_plain_cache(&app.data_dir);
-            win::remove_tray();
-        });
+        application.connect_shutdown(|_| win::remove_tray());
         // Our own tray icon (Open / Quit menu), there from the start. GLib's
         // notification backend adds its icon only when a notification shows.
         {
             let window = window.clone();
             let application = application.clone();
+            let app = app.clone();
             win::install_tray(move |action| match action {
                 win::TrayAction::Open => window.present(),
                 win::TrayAction::Quit => application.quit(),
+                // Logoff / shutdown: the process is killed once this returns,
+                // so the shutdown work runs here, synchronously.
+                win::TrayAction::EndSession => {
+                    // Runs inside a Win32 dispatch: never panic on a live borrow.
+                    if let Ok(mut prefs) = app.prefs.try_borrow_mut() {
+                        prefs.flush();
+                    }
+                    sweep_plain_cache(&app.data_dir);
+                    core::announce_offline();
+                    win::remove_tray();
+                }
             });
         }
     }
 
     // Peers stop dialing this device until it connects again (phones kept
-    // building Tor circuits to a closed desktop).
-    application.connect_shutdown(|_| core::announce_offline());
+    // building Tor circuits to a closed desktop). The goodbye can wait for
+    // the core lock and then up to 2.5 s: hide the windows first, so Quit
+    // does not look stuck.
+    application.connect_shutdown(|application| {
+        for window in application.windows() {
+            window.set_visible(false);
+        }
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.flush();
+        }
+        core::announce_offline();
+    });
     // Session logout sends SIGTERM: quit cleanly, so the goodbye goes out.
     #[cfg(unix)]
     {

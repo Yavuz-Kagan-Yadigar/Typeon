@@ -36,7 +36,9 @@ impl P2PCore {
 
     /// `false`: the write failed (disk full, SQLITE_BUSY). A sender must not publish then: after a restart the same message key and nonce
     /// would be used again. With no DB or no key it returns `true`, because there is nothing to fall behind.
-    pub(crate) fn persist_ratchet_state(&self, peer_device_fingerprint: &str) -> bool {
+    /// `durable`: the commit is synced (FULL). Needed whenever the send chain may have moved (a send, a rotation, a new session).
+    /// A plain receive moves only the receive side: a lost commit there only means a redelivered packet decrypts again.
+    pub(crate) fn persist_ratchet_state(&self, peer_device_fingerprint: &str, durable: bool) -> bool {
         let state = match self.ratchets.get(peer_device_fingerprint) {
             Some(s) => s,
             None => return true,
@@ -65,7 +67,7 @@ impl P2PCore {
         // With WAL and synchronous=NORMAL, a commit that returned can still be lost on power loss. The send chain would then roll back,
         // and the next message would reuse a key and nonce. This commit is synced (FULL: the WAL is synced at commit). The rest of the database
         // keeps NORMAL. Inside an open transaction the pragma is left alone.
-        let durable = conn.is_autocommit();
+        let durable = durable && conn.is_autocommit();
         if durable {
             let _ = conn.pragma_update(None, "synchronous", "FULL");
         }
@@ -81,6 +83,41 @@ impl P2PCore {
             error!("Ratchet state could not be written ({}): {}", crate::log_id(&peer_device_fingerprint), e);
         }
         written.is_ok()
+    }
+
+    /// Runs `write` (several statements) as one transaction, synced at commit when `durable` (see `persist_ratchet_state`). `write` returns
+    /// `false` to roll everything back. Inside an open transaction it simply runs.
+    pub(crate) fn in_synced_transaction(&self, durable: bool, write: impl FnOnce(&Self) -> bool) -> bool {
+        let Some(conn) = &self.db else { return write(self) };
+        if !conn.is_autocommit() {
+            return write(self);
+        }
+        if durable {
+            let _ = conn.pragma_update(None, "synchronous", "FULL");
+        }
+        let ok = match conn.unchecked_transaction() {
+            Ok(tx) => write(self) && tx.commit().is_ok(),
+            Err(e) => {
+                error!("Ratchet state transaction could not start: {}", e);
+                false
+            }
+        };
+        if durable {
+            let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        }
+        ok
+    }
+
+    /// `persist_ratchet_state` plus the removal of the peer's skipped-key rows, in one transaction. After a rotation or a new
+    /// session the rows belong to the replaced chain: a stop between two separate writes loaded them as keys of the new chain.
+    pub(crate) fn persist_ratchet_state_replacing_skipped(&self, peer_device_fingerprint: &str) -> bool {
+        self.in_synced_transaction(true, |core| {
+            let ok = core.persist_ratchet_state(peer_device_fingerprint, true);
+            if ok {
+                core.clear_persisted_skipped_keys(peer_device_fingerprint);
+            }
+            ok
+        })
     }
 
     /// Restores ALL ratchet sessions stored in the DB into `self.ratchets`, at app start (after `skipped_key_encryption_key` is loaded;
@@ -192,7 +229,9 @@ impl P2PCore {
     /// So the `TEXT_RETRY_GIVE_UP_MS` window (7 days) was reset on every app start and every `regen` refresh (every 25 minutes). The result:
     /// a message to a peer that no longer existed was retried forever, and the user was never told "not delivered". Now the real start time is
     /// carried along, so the 7-day ceiling actually applies.
-    pub(crate) fn persist_durable_retry(&self, message_id: &str, peer_device_fingerprint: &str, content: &MessageContent, original_sent_at: u64) {
+    /// `sent`: the envelope already published and the chain stamp it was encrypted under. A restart then offers the same bytes again
+    /// instead of re-encrypting and re-signing every row (see `load_pending_durable_retries_from_db`).
+    pub(crate) fn persist_durable_retry(&self, message_id: &str, peer_device_fingerprint: &str, content: &MessageContent, original_sent_at: u64, sent: Option<(&NetworkEnvelope, &str)>) {
         let conn = match &self.db { Some(c) => c, None => return };
         // Sealed like `server_archive_queue`. It used to be plain CBOR, so every sent message sat readable on disk until acked.
         let content_cbor = match ciborium_bytes(content).map(|b| self.seal_local_blob(&b)) {
@@ -200,10 +239,11 @@ impl P2PCore {
             Ok(None) => { error!("Persistent retry record could not be serialized: no encryption key"); return; }
             Err(e) => { error!("Persistent retry record could not be serialized: {}", e); return; }
         };
+        let sent_cbor: Option<Vec<u8>> = sent.and_then(|s| ciborium_bytes(&s).ok()).and_then(|b| self.seal_local_blob(&b));
         if let Err(e) = conn.execute(
-            "INSERT OR REPLACE INTO pending_durable_retries (message_id, peer_device_fingerprint, content_cbor, created_at, local_message_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![message_id, peer_device_fingerprint, content_cbor, original_sent_at as i64, group_row_id(content)],
+            "INSERT OR REPLACE INTO pending_durable_retries (message_id, peer_device_fingerprint, content_cbor, created_at, local_message_id, sent_cbor)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![message_id, peer_device_fingerprint, content_cbor, original_sent_at as i64, group_row_id(content), sent_cbor],
         ) {
             // The memory copy still retries. Only a process death loses it now.
             error!("Persistent retry record could not be written ({}): {}", message_id, e);
@@ -370,7 +410,13 @@ impl P2PCore {
             Some(rows.flatten().collect())
         }).unwrap_or_default();
         for (k, v) in kept {
-            let update = hex::decode(&v).ok()
+            // "<first queued ms>:<sealed hex>" (`send_group_update_to_member`).
+            let (since, sealed_hex) = v.split_once(':').and_then(|(t, h)| t.parse::<u64>().ok().map(|t| (t, h))).unwrap_or((0, v.as_str()));
+            if current_time_ms().saturating_sub(since) > TEXT_RETRY_GIVE_UP_MS {
+                self.meta_del(&k);
+                continue;
+            }
+            let update = hex::decode(sealed_hex).ok()
                 .and_then(|b| self.open_local_blob(&b))
                 .and_then(|p| ciborium::from_reader::<GroupUpdate, _>(p.as_slice()).ok());
             let member = k.rsplit(':').next().unwrap_or("").to_string();
@@ -412,7 +458,7 @@ impl P2PCore {
         if self.skipped_key_encryption_key.is_none() {
             return;
         }
-        let mut loaded: Vec<(String, String, Vec<u8>, u64)> = Vec::new();
+        let mut loaded: Vec<(String, String, Vec<u8>, u64, Option<Vec<u8>>)> = Vec::new();
         let mut expired: Vec<String> = Vec::new();
         {
             let conn = match &self.db { Some(c) => c, None => return };
@@ -449,12 +495,12 @@ impl P2PCore {
                 .filter(|(id, fp, _)| !self.awaiting_confirmation.contains_key(id) && self.device_recently_seen(fp))
                 .take(1000)
             {
-                let blob: Option<Vec<u8>> = conn.query_row(
-                    "SELECT content_cbor FROM pending_durable_retries WHERE message_id = ?1",
-                    params![message_id], |r| r.get(0),
+                let blob: Option<(Vec<u8>, Option<Vec<u8>>)> = conn.query_row(
+                    "SELECT content_cbor, sent_cbor FROM pending_durable_retries WHERE message_id = ?1",
+                    params![message_id], |r| Ok((r.get(0)?, r.get(1)?)),
                 ).ok();
-                if let Some(blob) = blob {
-                    loaded.push((message_id, peer_fp, blob, created_at));
+                if let Some((blob, sent)) = blob {
+                    loaded.push((message_id, peer_fp, blob, created_at, sent));
                 }
             }
         }
@@ -465,7 +511,7 @@ impl P2PCore {
             return;
         }
         info!("Restoring {} entries from persistent retry queue", loaded.len());
-        for (message_id, peer_fp, content_cbor, created_at) in loaded {
+        for (message_id, peer_fp, content_cbor, created_at, sent_cbor) in loaded {
             // CRITICAL (delivery guarantee): the row is NOT deleted here. `remove_durable_retry` used to be called BEFORE the resend ("a fresh send
             // will replace it anyway"). But if `send_message_content_inner` returns `Err` ("No ratchet session", "Missing own keys", "No identity",
             // all quite likely right after launch), the replacement never happens. Neither the disk row nor the in-memory `awaiting_confirmation` entry
@@ -520,6 +566,31 @@ impl P2PCore {
             let known = self.known_remote_devices.contains_key(&peer_fp);
             // The backoff reaches its cap (15 + 30 + 60 s) long before most restores. Do not restart it at 15 s after every process kill.
             let interval = (current_time_ms().saturating_sub(created_at) > ACK_RETRY_MAX_MS).then_some(ACK_RETRY_MAX_MS);
+            // The envelope already published, still on the current chain: it goes back into the queue as it is, due now, and
+            // `retry_unconfirmed_messages` offers it at its normal pace. No ratchet step, no signature, no new server copy.
+            let sent: Option<(NetworkEnvelope, String)> = sent_cbor.as_deref()
+                .and_then(|b| self.open_local_blob(b))
+                .and_then(|p| ciborium::from_reader(p.as_slice()).ok());
+            if let Some((envelope, stamp)) = sent {
+                if !stamp.is_empty() && stamp == self.chain_stamp_for(&peer_fp) {
+                    let now = current_time_ms();
+                    let retry_interval_ms = interval.unwrap_or(ACK_RETRY_INITIAL_MS);
+                    self.awaiting_confirmation.insert(message_id.clone(), PendingConfirmation {
+                        suspect_probed: false,
+                        direct_delivered: false,
+                        chain_stamp: stamp,
+                        peer_device_fingerprint: peer_fp,
+                        envelope,
+                        next_retry_at: now,
+                        retry_interval_ms,
+                        first_sent_at: now,
+                        original_sent_at: created_at,
+                        last_attempt_at: now,
+                        regen_content: Some(content),
+                    });
+                    continue;
+                }
+            }
             if let Err(e) = self.send_message_content_inner(
                 peer_fp, &content, None,
                 Some(message_id.clone()), Some(created_at), interval,

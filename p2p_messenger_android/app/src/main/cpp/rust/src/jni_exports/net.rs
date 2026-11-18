@@ -44,7 +44,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getNodeAddress<'local>(mut 
 /// Debug APKs only (`P2PLib` init): a release installs no logger, so nothing reaches logcat.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_enableLogging<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) {
-    android_logger::init_once(LogConfig::default().with_max_level(log::LevelFilter::Info));
+    let _ = catch_panic(|| android_logger::init_once(LogConfig::default().with_max_level(log::LevelFilter::Info)));
 }
 
 /// Tor status for the UI. Returns one of: "disabled" | "bootstrapping" | "ready" | "ready|<host>.onion" | "failed".

@@ -168,7 +168,7 @@ internal fun GroupChatActivity.itemFromGroupAttachmentJson(obj: JSONObject, know
         isMine = isMine,
         timestamp = obj.optLong("created_at", System.currentTimeMillis()),
         senderName = sender?.displayName ?: senderIdentityId?.take(8),
-        senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+        senderAvatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
         senderIdentityId = senderIdentityId,
         attachment = SimpleChatAdapter.AttachmentInfo(
             fileId = obj.optString("file_id"),
@@ -214,12 +214,16 @@ internal fun GroupChatActivity.itemFromGroupHistoryJson(obj: JSONObject): Simple
         messageId = messageId ?: UUID.randomUUID().toString(),
         text = obj.optString("text"),
         isMine = isMine,
-        status = SimpleChatAdapter.Status.SENT,
+        status = if (!isMine) SimpleChatAdapter.Status.SENT else when (if (obj.isNull("status")) "sent" else obj.optString("status", "sent")) {
+            "pending" -> SimpleChatAdapter.Status.PENDING
+            "error" -> SimpleChatAdapter.Status.ERROR
+            else -> SimpleChatAdapter.Status.SENT
+        },
         timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
         // Send order: the sender's send time (same note as ChatActivity).
         sentAtMs = obj.optLong("sent_at_ms", 0L).takeIf { it > 0 },
         senderName = sender?.displayName ?: senderIdentityId?.take(8),
-        senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+        senderAvatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
         // See the Item.senderIdentityId docs. It is always stored, regardless of `isMine`. Archive 'sent' rows also carry `sender_identity_id`
         // (see the Rust `archive_group_message` call site), so the next reply can carry the correct identity (see `startReply`).
         senderIdentityId = senderIdentityId,
@@ -251,7 +255,7 @@ internal fun GroupChatActivity.seenViewersFromHistoryJson(obj: JSONObject): List
         if (identityId.isEmpty()) continue
         val sender = resolveContactByIdentity(identityId)
         out.add(identityId to SimpleChatAdapter.SeenByViewer(
-            avatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+            avatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
             displayName = sender?.displayName ?: identityId.take(8)
         ))
     }
@@ -274,10 +278,12 @@ internal fun GroupChatActivity.resolveReplyLabel(replyToMessageId: String?, repl
 
 /** Same pattern as ChatActivity.resolveReplyLabels. */
 internal fun GroupChatActivity.resolveReplyLabels() {
+    val byId = localMessages.associateBy { it.messageId }
     for (item in localMessages) {
-        if (item.replyToMessageId != null) {
-            item.replyToSenderLabel = resolveReplyLabel(item.replyToMessageId, item.replyToSenderIdentityId)
-        }
+        val id = item.replyToMessageId ?: continue
+        val target = byId[id]
+        item.replyToSenderLabel = if (target == null) null
+            else if (target.isMine) getString(R.string.lbl_you) else target.senderName
     }
 }
 
@@ -394,6 +400,13 @@ internal fun GroupChatActivity.syncMissedGroupMessages() {
         // IO fetch above — loadGroupHistoryIfAvailable can insert
         // concurrently while this fetch is in flight, and a set captured
         // earlier would be stale, causing duplicate inserts.
+        // Hole after a long background: see ChatActivity.syncMissedMessages.
+        if (merged.size >= CHAT_PAGE_SIZE && localMessages.isNotEmpty() &&
+            merged.minOf { it.timestamp } > localMessages.maxOf { it.timestamp }
+        ) {
+            localMessages.clear()
+            noMoreOlderHistory = false
+        }
         val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
         val missed = merged.filter { it.messageId !in existingIds }
         if (adapter.refreshFrom(merged)) resolveReplyLabels()

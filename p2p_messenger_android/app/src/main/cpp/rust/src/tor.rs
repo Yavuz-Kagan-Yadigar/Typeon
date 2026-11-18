@@ -1,13 +1,11 @@
-//! Tor onion service integration, so that devices behind CGNAT can reach each other.
-//! Scope of v1: REACHABILITY only (see the SECURITY.md "Tor onion" note). The real IP can still be seen through `identify`. Full anonymity
-//! (suppressing identify and also routing outgoing traffic through Tor) is left for v2.
+//! Tor onion service integration. The node is onion-only: every connection in and out goes over Tor.
 //!
 //! Architecture:
-//! - **Host (being reachable):** an onion service is started with `arti-client`. Each inbound Tor stream (rendezvous) is bridged to the
-//!   local libp2p TCP listener (`127.0.0.1:<port>`). The libp2p swarm therefore sees it as an ordinary inbound TCP connection and does not
-//!   need to know that it came over Tor. No separate libp2p listener transport is written.
-//! - **Dial (connecting to a peer's .onion):** a separate libp2p `Transport` (`ArtiDialTransport`, below) dials `/onion3/...` addresses
-//!   over Tor with `TorClient::connect`.
+//! - **Host (being reachable):** an onion service is started with `arti-client`. Each inbound Tor stream (rendezvous) is handed to the
+//!   swarm in-process through `OnionListen`, a listen-only libp2p transport fed by a channel. No TCP port is opened, so no other app or
+//!   user on this machine can reach the swarm.
+//! - **Dial (connecting to a peer's .onion):** a separate libp2p `Transport` (`ArtiDialTransport`, below) dials
+//!   `/dns/<host>.onion/tcp/<port>` addresses over Tor with `TorClient::connect`.
 //!
 //! rustls is used instead of native-tls (to avoid openssl). arti's rustls uses `ring`, which this project already cross-compiles
 //! (see the note in Cargo.toml).
@@ -58,7 +56,7 @@ impl TorStatus {
     }
 }
 
-/// Sets a bootstrap result, except over `Failed`. `Failed` means the inbound bridge ended, and a later bootstrap does not bring it back.
+/// Sets a bootstrap result, except over `Failed`. `Failed` means the inbound bridge ended. Only its relaunch (see `launch`) leaves it.
 fn set_status(status: &Mutex<TorStatus>, new: TorStatus) {
     let mut s = status.lock().unwrap_or_else(|p| p.into_inner());
     if *s != TorStatus::Failed {
@@ -74,14 +72,19 @@ const MAX_STREAMS_PER_CIRCUIT: u32 = 3;
 /// A bridged stream that sends nothing for this long is closed. libp2p's dialer speaks first, and a silent stream held its slot
 /// for the 60 s upgrade timeout.
 const INBOUND_FIRST_BYTE_SECS: u64 = 15;
+/// An inbound connection must finish Noise and Yamux within this time after its first byte. Half the outgoing timeout: the
+/// rendezvous circuit is already built, and a stream that stalls mid-handshake held its slot for the full 60 s.
+pub const INBOUND_UPGRADE_SECS: u64 = 30;
+/// Inbound streams waiting for the swarm to take them.
+const INBOUND_QUEUE: usize = 16;
 
 /// Shared handle to the running Tor layer. The `TorClient` is also used by the dial transport (see `ArtiDialTransport`), hence the `Arc`.
 pub struct TorHandle {
     pub client: Arc<TorClient<TokioRustlsRuntime>>,
     status: Arc<Mutex<TorStatus>>,
     onion_addr: Arc<Mutex<Option<String>>>,
-    /// Keeps the onion service alive (dropping it stops the service).
-    _service: Arc<tor_hsservice::RunningOnionService>,
+    /// Keeps the onion service alive (dropping it stops the service). The bridge task swaps in a relaunched one.
+    _service: Arc<Mutex<Option<Arc<tor_hsservice::RunningOnionService>>>>,
     /// A `notify_network_changed` retry loop is running.
     rebootstrapping: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -145,12 +148,12 @@ impl TorHandle {
     }
 
     /// Starts the Tor layer. It creates the arti client, bootstraps in the background, starts the onion service, and spawns the task that
-    /// bridges inbound streams to the local `local_port`. Must be called INSIDE a tokio context (`RUNTIME.enter()` / `block_on` provides it),
+    /// hands inbound streams to the swarm. Must be called INSIDE a tokio context (`RUNTIME.enter()` / `block_on` provides it),
     /// because `TokioRustlsRuntime::current()` needs the active tokio handle.
     ///
-    /// `state_dir` / `cache_dir`: arti's key store and consensus cache, under the app's private directory. `local_port`: the fixed TCP port
-    /// libp2p listens on (see the fixed-port setting in network.rs).
-    pub fn launch(state_dir: &str, cache_dir: &str, local_port: u16) -> Result<TorHandle, String> {
+    /// `state_dir` / `cache_dir`: arti's key store and consensus cache, under the app's private directory. `onion_port`: the virtual port
+    /// of the onion service (the one in our `.onion` address). The returned `OnionListen` goes into the swarm's transport.
+    pub fn launch(state_dir: &str, cache_dir: &str, onion_port: u16) -> Result<(TorHandle, OnionListen), String> {
         let runtime = TokioRustlsRuntime::current()
             .map_err(|e| format!("TokioRustlsRuntime could not be obtained: {e}"))?;
 
@@ -170,16 +173,7 @@ impl TorHandle {
                 .config(client_config(state_dir, cache_dir).map_err(|e| (e, false))?)
                 .create_unbootstrapped()
                 .map_err(|e| (format!("Arti client: {e}"), state_suspect(&e)))?;
-            let nickname: tor_hsservice::HsNickname = ONION_NICKNAME
-                .parse()
-                .map_err(|e| (format!("Onion nickname: {e}"), false))?;
-            // One libp2p connection is one stream, and a redialing peer needs a few. Without this cap, one rendezvous circuit could take all
-            // `MAX_INBOUND_ONION_STREAMS` slots (the arti default is 65535).
-            let svc_config = OnionServiceConfigBuilder::default()
-                .nickname(nickname)
-                .max_concurrent_streams_per_circuit(MAX_STREAMS_PER_CIRCUIT)
-                .build()
-                .map_err(|e| (format!("Onion config: {e}"), false))?;
+            let svc_config = onion_service_config().map_err(|e| (e, false))?;
             let (service, rend_requests) = client
                 .launch_onion_service(svc_config)
                 .map_err(|e| (format!("Onion service could not be started: {e}"), state_suspect(&e)))?;
@@ -211,6 +205,7 @@ impl TorHandle {
             Ok(v) => v,
         };
         let client = Arc::new(client);
+        let service = Arc::new(Mutex::new(Some(service)));
 
         let status = Arc::new(Mutex::new(TorStatus::Bootstrapping));
         let onion_addr = Arc::new(Mutex::new(None::<String>));
@@ -218,7 +213,8 @@ impl TorHandle {
         let rebootstrapping = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         // Capture the .onion name right away, if it exists.
-        if let Some(hsid) = service.onion_name() {
+        let name = service.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|s| s.onion_name());
+        if let Some(hsid) = name {
             *onion_addr.lock().unwrap_or_else(|p| p.into_inner()) = Some(hsid.to_string());
         }
 
@@ -240,7 +236,8 @@ impl TorHandle {
                     match client_bg.bootstrap().await {
                         Ok(()) => {
                             // The .onion name is guaranteed to exist after a successful bootstrap.
-                            if let Some(hsid) = service_bg.onion_name() {
+                            let name = service_bg.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|s| s.onion_name());
+                            if let Some(hsid) = name {
                                 *onion_bg.lock().unwrap_or_else(|p| p.into_inner()) = Some(hsid.to_string());
                             }
                             set_status(&status_bg, TorStatus::Ready);
@@ -261,38 +258,75 @@ impl TorHandle {
             });
         }
 
-        // Background: bridge inbound onion streams to the local libp2p TCP port.
+        // Background: hand inbound onion streams to the swarm (`OnionListen`).
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<TorStream>(INBOUND_QUEUE);
         {
             let status_br = status.clone();
+            let client_br = Arc::downgrade(&client);
+            let service_br = Arc::downgrade(&service);
             tokio::spawn(async move {
-                // Anyone who knows the .onion can open streams, and each one costs a task, a socket, and a libp2p upgrade that the swarm
-                // sees as 127.0.0.1. Requests over the cap are dropped.
+                // Anyone who knows the .onion can open streams, and each one costs a task and a libp2p upgrade. Requests over the cap are
+                // dropped. A slot is held until the connection closes.
                 let slots = Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND_ONION_STREAMS));
                 let mut stream_requests = Box::pin(handle_rend_requests(rend_requests));
-                while let Some(stream_request) = stream_requests.next().await {
-                    let Ok(slot) = slots.clone().try_acquire_owned() else {
-                        log::warn!("Tor: incoming stream limit reached, request dropped");
-                        continue;
-                    };
-                    tokio::spawn(async move {
-                        bridge_incoming_stream(stream_request, local_port).await;
-                        drop(slot);
-                    });
+                let mut delay = std::time::Duration::from_secs(5);
+                loop {
+                    while let Some(stream_request) = stream_requests.next().await {
+                        let Ok(slot) = slots.clone().try_acquire_owned() else {
+                            log::warn!("Tor: incoming stream limit reached, request dropped");
+                            continue;
+                        };
+                        let tx = inbound_tx.clone();
+                        tokio::spawn(bridge_incoming_stream(stream_request, onion_port, slot, tx));
+                    }
+                    // The inbound path is gone, so stop reporting Ready, and launch the service again (same nickname, same .onion).
+                    // Before, nothing restarted it, and nobody could dial this device until the process restarted.
+                    *status_br.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Failed;
+                    loop {
+                        log::warn!("Tor: incoming stream bridge ended, relaunching the onion service in {delay:?}");
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(std::time::Duration::from_secs(600));
+                        // The handle was dropped: the network is shut down.
+                        let (Some(client), Some(slot)) = (client_br.upgrade(), service_br.upgrade()) else { return };
+                        // The old service must be gone before a new one takes its state.
+                        drop(slot.lock().unwrap_or_else(|p| p.into_inner()).take());
+                        let launched = onion_service_config()
+                            .and_then(|cfg| client.launch_onion_service(cfg).map_err(|e| e.to_string()));
+                        match launched {
+                            Ok((svc, rr)) => {
+                                *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(svc);
+                                stream_requests = Box::pin(handle_rend_requests(rr));
+                                *status_br.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Ready;
+                                delay = std::time::Duration::from_secs(5);
+                                log::info!("Tor: onion service relaunched");
+                                break;
+                            }
+                            Err(e) => log::error!("Tor: onion service relaunch failed: {e}"),
+                        }
+                    }
                 }
-                // The inbound path is gone, so stop reporting Ready.
-                *status_br.lock().unwrap_or_else(|p| p.into_inner()) = TorStatus::Failed;
-                log::info!("Tor: incoming stream bridge ended");
             });
         }
 
-        Ok(TorHandle {
-            client,
-            status,
-            onion_addr,
-            _service: service,
-            rebootstrapping,
-        })
+        let listen = OnionListen {
+            rx: inbound_rx,
+            listener: None,
+            announced: false,
+            addr: format!("/ip4/127.0.0.1/tcp/{onion_port}").parse().map_err(|_| "bad listen label".to_string())?,
+        };
+        Ok((TorHandle { client, status, onion_addr, _service: service, rebootstrapping }, listen))
     }
+}
+
+/// The onion service config. One libp2p connection is one stream, and a redialing peer needs a few. Without the per-circuit cap, one
+/// rendezvous circuit could take all `MAX_INBOUND_ONION_STREAMS` slots (the arti default is 65535).
+fn onion_service_config() -> Result<tor_hsservice::OnionServiceConfig, String> {
+    let nickname: tor_hsservice::HsNickname = ONION_NICKNAME.parse().map_err(|e| format!("Onion nickname: {e}"))?;
+    OnionServiceConfigBuilder::default()
+        .nickname(nickname)
+        .max_concurrent_streams_per_circuit(MAX_STREAMS_PER_CIRCUIT)
+        .build()
+        .map_err(|e| format!("Onion config: {e}"))
 }
 
 /// The arti config.
@@ -364,12 +398,17 @@ fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorCli
     config.build().map_err(|e| format!("Arti config: {e}"))
 }
 
-/// Accepts one inbound onion stream and bridges it both ways to the local libp2p TCP listener (`127.0.0.1:<local_port>`).
-/// `DataStream` implements both tokio and futures AsyncRead/Write, so `tokio::io::copy_bidirectional` can be used directly.
-async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, local_port: u16) {
-    // Only BEGIN to our virtual port (the one we publish, = `local_port`) is accepted. Anything else gets DONE, as arti advises, so the
+/// Accepts one inbound onion stream and hands it to the swarm (`OnionListen`). `slot` is the bridge slot; it travels with the stream and
+/// is freed when the connection closes.
+async fn bridge_incoming_stream(
+    stream_request: tor_hsservice::StreamRequest,
+    onion_port: u16,
+    slot: tokio::sync::OwnedSemaphorePermit,
+    tx: tokio::sync::mpsc::Sender<TorStream>,
+) {
+    // Only BEGIN to our virtual port (the one we publish) is accepted. Anything else gets DONE, as arti advises, so the
     // rejection looks like any onion service's.
-    if !matches!(stream_request.request(), IncomingStreamRequest::Begin(b) if b.port() == local_port) {
+    if !matches!(stream_request.request(), IncomingStreamRequest::Begin(b) if b.port() == onion_port) {
         let _ = stream_request.reject(End::new_with_reason(EndReason::DONE)).await;
         return;
     }
@@ -381,27 +420,15 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
         }
     };
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // libp2p's dialer speaks first. A stream that stays silent is dropped before it costs a libp2p upgrade.
+    use tokio::io::AsyncReadExt;
     let mut first = [0u8; 512];
     let n = match tokio::time::timeout(std::time::Duration::from_secs(INBOUND_FIRST_BYTE_SECS), tor_stream.read(&mut first)).await {
         Ok(Ok(n)) if n > 0 => n,
         _ => return,
     };
-    let mut tcp = match tokio::net::TcpStream::connect(("127.0.0.1", local_port)).await {
-        Ok(t) => t,
-        Err(e) => {
-            log::error!("Tor: could not connect to local libp2p port ({local_port}): {e}");
-            return;
-        }
-    };
-    if tcp.write_all(&first[..n]).await.is_err() {
-        return;
-    }
-
-    // Copy both ways until the connection closes. DataStream implements tokio AsyncRead/Write (the tor-proto tokio feature).
-    if let Err(e) = tokio::io::copy_bidirectional(&mut tor_stream, &mut tcp).await {
-        log::debug!("Tor bridge stream ended: {e}");
-    }
+    // The swarm reads the bytes already taken first.
+    let _ = tx.send(TorStream { inner: tor_stream, prefix: first[..n].to_vec(), _slot: Some(slot) }).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,8 +436,8 @@ async fn bridge_incoming_stream(stream_request: tor_hsservice::StreamRequest, lo
 // ---------------------------------------------------------------------------
 
 /// Extracts (host, port) from a multiaddr of the form `/dns/<host>.onion/tcp/<port>`, ONLY if the host ends in `.onion`. This transport
-/// takes responsibility for onion addresses only. For everything else it returns `MultiaddrNotSupported`, and `OrTransport` falls back to the
-/// normal TCP path (see the swarm setup in network.rs).
+/// takes responsibility for onion addresses only. For everything else it returns `MultiaddrNotSupported`; no other transport dials a
+/// non-relay address (see the swarm setup in network/mod.rs).
 fn onion_host_port(addr: &Multiaddr) -> Option<(String, u16)> {
     let mut it = addr.iter();
     let host = match it.next()? {
@@ -432,10 +459,20 @@ fn onion_host_port(addr: &Multiaddr) -> Option<(String, u16)> {
 /// (adapted from libp2p-community-tor provider.rs).
 pub struct TorStream {
     inner: DataStream,
+    /// Inbound only: bytes the bridge read before the hand-off, served first.
+    prefix: Vec<u8>,
+    /// Inbound only: the bridge slot, freed when the connection closes.
+    _slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl AsyncRead for TorStream {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<std::io::Result<usize>> {
+        if !self.prefix.is_empty() {
+            let n = buf.len().min(self.prefix.len());
+            buf[..n].copy_from_slice(&self.prefix[..n]);
+            self.prefix.drain(..n);
+            return Poll::Ready(Ok(n));
+        }
         let mut read_buf = ReadBuf::new(buf);
         futures::ready!(TokioAsyncRead::poll_read(Pin::new(&mut self.inner), cx, &mut read_buf))?;
         Poll::Ready(Ok(read_buf.filled().len()))
@@ -486,7 +523,7 @@ impl Transport for ArtiDialTransport {
     }
 
     fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        // Tor off (client is None): we do not take this address, and OrTransport falls back to TCP. Also not taken if it is NOT `.onion`.
+        // Tor off (client is None), or not a `.onion` address: not taken. No other transport dials it either.
         let client = match &self.client {
             Some(c) => c.clone(),
             None => return Err(TransportError::MultiaddrNotSupported(addr)),
@@ -510,7 +547,7 @@ impl Transport for ArtiDialTransport {
                 .connect_with_prefs(tor_addr, &prefs)
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-            Ok(TorStream { inner: stream })
+            Ok(TorStream { inner: stream, prefix: Vec::new(), _slot: None })
         }))
     }
 
@@ -527,30 +564,49 @@ impl Transport for ArtiDialTransport {
     }
 }
 
-/// Keeps the TCP transport for INBOUND connections only and rejects every `dial`. It is the transport-layer anchor of the onion-only guarantee.
+/// Listen-only libp2p transport for the onion service: the bridge task (`bridge_incoming_stream`) sends each inbound Tor stream
+/// through a channel, and this hands it to the swarm as an inbound connection. It replaces a TCP listener on 127.0.0.1, which every
+/// local app could connect to (and read our PeerId and onion address over identify, skipping the bridge limits), and whose fixed port
+/// another app could take first.
 ///
-/// The TCP transport cannot leave the swarm: the onion bridge (`bridge_incoming_stream`) connects inbound Tor streams to `127.0.0.1:<port>`. An outgoing TCP dial would
-/// connect straight to a peer's real IP, which breaks Tor anonymity (UPnP and direct SYNs to `:42611` were observed). `listen_on` and inbound streams pass through;
-/// `dial` and `dial_as_listener` return `MultiaddrNotSupported`. All outgoing traffic goes through `ArtiDialTransport` (onion) or the relay over onion, so libp2p
-/// cannot dial a clearnet address, whoever calls `swarm.dial()` (kad and identify included).
-#[derive(Clone)]
-pub struct DialReject<T>(pub T);
+/// `addr` is only a label (`/ip4/127.0.0.1/tcp/<onion port>`): peers drop loopback addresses, and no socket is behind it. `dial`
+/// returns `MultiaddrNotSupported`.
+pub struct OnionListen {
+    rx: tokio::sync::mpsc::Receiver<TorStream>,
+    listener: Option<ListenerId>,
+    announced: bool,
+    addr: Multiaddr,
+}
 
-impl<T> Transport for DialReject<T>
-where
-    T: Transport + Unpin,
-{
-    type Output = T::Output;
-    type Error = T::Error;
-    type Dial = T::Dial;
-    type ListenerUpgrade = T::ListenerUpgrade;
+impl OnionListen {
+    /// The address to pass to `Swarm::listen_on`.
+    pub fn listen_addr(&self) -> Multiaddr {
+        self.addr.clone()
+    }
+}
+
+impl Transport for OnionListen {
+    type Output = TorStream;
+    type Error = std::io::Error;
+    type Dial = futures::future::Pending<Result<Self::Output, Self::Error>>;
+    type ListenerUpgrade = futures::future::Ready<Result<Self::Output, Self::Error>>;
 
     fn listen_on(&mut self, id: ListenerId, addr: Multiaddr) -> Result<(), TransportError<Self::Error>> {
-        self.0.listen_on(id, addr)
+        if addr != self.addr || self.listener.is_some() {
+            return Err(TransportError::MultiaddrNotSupported(addr));
+        }
+        self.listener = Some(id);
+        self.announced = false;
+        Ok(())
     }
 
     fn remove_listener(&mut self, id: ListenerId) -> bool {
-        self.0.remove_listener(id)
+        if self.listener == Some(id) {
+            self.listener = None;
+            true
+        } else {
+            false
+        }
     }
 
     fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
@@ -561,12 +617,27 @@ where
         Err(TransportError::MultiaddrNotSupported(addr))
     }
 
-    fn address_translation(&self, listen: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        self.0.address_translation(listen, observed)
+    fn address_translation(&self, _listen: &Multiaddr, _observed: &Multiaddr) -> Option<Multiaddr> {
+        None
     }
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
-        Pin::new(&mut self.get_mut().0).poll(cx)
+        let this = self.get_mut();
+        let Some(listener_id) = this.listener else { return Poll::Pending };
+        if !this.announced {
+            this.announced = true;
+            return Poll::Ready(TransportEvent::NewAddress { listener_id, listen_addr: this.addr.clone() });
+        }
+        match this.rx.poll_recv(cx) {
+            Poll::Ready(Some(stream)) => Poll::Ready(TransportEvent::Incoming {
+                listener_id,
+                upgrade: futures::future::ready(Ok(stream)),
+                local_addr: this.addr.clone(),
+                send_back_addr: this.addr.clone(),
+            }),
+            // `None`: the bridge task ended for good (the Tor handle is gone). Nothing more comes.
+            _ => Poll::Pending,
+        }
     }
 }
 

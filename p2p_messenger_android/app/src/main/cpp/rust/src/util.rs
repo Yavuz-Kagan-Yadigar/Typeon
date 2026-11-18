@@ -22,6 +22,9 @@ pub(crate) fn is_safe_file_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        // Windows device names: `attachments\nul.enc` is the null device there.
+        && !matches!(id, "con" | "prn" | "aux" | "nul")
+        && !(id.len() == 4 && (id.starts_with("com") || id.starts_with("lpt")) && id.as_bytes()[3].is_ascii_digit())
 }
 
 /// The 8-byte author tag every group message id starts with (as 16 hex
@@ -138,16 +141,23 @@ pub(crate) fn safe_file_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .filter(|c| {
-            !matches!(c, '/' | '\\' | ':')
+            // `* ? " < > |` too: legal here, refused in a Windows file name (the desktop client saves under it).
+            !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
                 && !c.is_control()
                 && !is_invisible_char(*c)
         })
         .collect();
-    // Dots and spaces are stripped together (". .x" would otherwise leave ".x", a hidden file).
-    let cleaned = cleaned.trim_start_matches(|c: char| c == '.' || c.is_whitespace()).trim_end().to_string();
+    // Dots and spaces are stripped together (". .x" would otherwise leave ".x", a hidden file). Windows drops trailing dots and spaces.
+    let cleaned = cleaned.trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace()).to_string();
     if cleaned.is_empty() {
         return "file".to_string();
     }
+    // Windows device names (CON, NUL, COM1, ...), with any extension.
+    let stem = cleaned.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
+    let cleaned = if device { format!("_{}", cleaned) } else { cleaned };
     if cleaned.len() <= MAX_FILE_NAME_LEN {
         return cleaned;
     }
@@ -167,6 +177,10 @@ mod safe_file_name_tests {
         let n = super::safe_file_name(&format!("{}.pdf", "界".repeat(150)));
         assert!(n.len() <= 200 && n.ends_with(".pdf"));
         assert_eq!(super::safe_file_name("a.txt"), "a.txt");
+        assert_eq!(super::safe_file_name("a<b>?.txt"), "ab.txt");
+        assert_eq!(super::safe_file_name("nul.txt"), "_nul.txt");
+        assert_eq!(super::safe_file_name("COM3"), "_COM3");
+        assert_eq!(super::safe_file_name("x. ."), "x");
     }
 }
 
@@ -517,6 +531,27 @@ pub(crate) fn ciborium_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, String>
     Ok(buf)
 }
 
+/// `ciborium_bytes` for secrets: the size is counted first and the buffer
+/// allocated once, so no reallocation leaves a copy of the bytes in freed
+/// memory, and the result is wiped on drop.
+pub(crate) fn ciborium_bytes_secret<T: Serialize>(value: &T) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    ciborium::into_writer(value, &mut count).map_err(|e| e.to_string())?;
+    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(count.0));
+    ciborium::into_writer(value, &mut *buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
 /// CRITICAL: `start_network` used to generate a RANDOM, temporary libp2p identity (and therefore a new `PeerId`) with
 /// `Keypair::generate_ed25519()` on every process start. That was one root cause of "after a full restart I have to scan the QR again":
 /// a known contact's `PeerId` (see `device_to_peer_id`) became invalid on every restart, because the other side had changed its own `PeerId` too.
@@ -582,7 +617,7 @@ pub(crate) fn conn_path_rank(addr: &Multiaddr) -> u8 {
     });
     // Onion-only: a direct clearnet path is NO LONGER preferred.
     // Clearnet used to be 2 and onion 1 (the real IP was preferred for speed). Now only onion (and loopback from our own onion service)
-    // is preferred, and clearnet drops to the same lowest level as relay (0). `DialReject` means clearnet connections are never made at all.
+    // is preferred, and clearnet drops to the same lowest level as relay (0). With no TCP transport, clearnet connections are never made at all.
     // This level only guarantees that a clearnet path, if one appears anyway, never ranks above onion.
     if onion || is_loopback_multiaddr(addr) { 1 } else { 0 }
 }

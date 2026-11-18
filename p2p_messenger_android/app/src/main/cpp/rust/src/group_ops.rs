@@ -273,6 +273,16 @@ impl P2PCore {
             let u = if member_identity_id == new_member_identity_id { &full } else { &update };
             self.send_group_update_to_member(group_id, &member_identity_id, u);
         }
+        // The picture rides only an AvatarUpdate, never the Add: a full state
+        // after it gives the new member the picture. Only when the Add went
+        // out, or the queued Add would be replaced by it.
+        let add_queued = self.pending_group_syncs.contains_key(&(group_id.to_string(), new_member_identity_id.to_string()));
+        if let Some(g) = self.groups.get(group_id).filter(|g| g.avatar_jpeg.is_some() && !add_queued).cloned() {
+            match self.sign_group_resync(&g) {
+                Ok(resync) => self.send_group_update_to_member(group_id, new_member_identity_id, &resync),
+                Err(e) => warn!("Group picture for the new member not sent: {}", e),
+            }
+        }
         self.send_group_update_to_siblings(&update);
         Ok(())
     }
@@ -524,6 +534,44 @@ impl P2PCore {
         Ok(())
     }
 
+    /// A `LeaveGroupRequest` on a founder device that is not the root: kept as `glr:<group>:<member>` and acted on by `run_deferred_leaves`
+    /// unless the root's Remove arrives first. `false`: nothing to defer (not our group or not a member), the caller goes on as before.
+    pub(crate) fn defer_leave_request(&mut self, group_id: &str, member_identity_id: &str) -> bool {
+        let me = self.my_identity_id().unwrap_or_default();
+        let ours = self.groups.get(group_id).map_or(false, |g| g.founder_identity_id == me && g.is_member(member_identity_id));
+        if !ours {
+            return false;
+        }
+        let key = format!("glr:{}:{}", group_id, member_identity_id);
+        if self.meta_str(&key).is_none() {
+            self.meta_put(&key, &current_time_ms().to_string());
+        }
+        true
+    }
+
+    /// See `defer_leave_request`. Called from `group_sync_sweep`.
+    pub(crate) fn run_deferred_leaves(&mut self) {
+        let rows: Vec<(String, String)> = self.db.as_ref().and_then(|c| {
+            let mut stmt = c.prepare("SELECT k, v FROM app_meta WHERE k >= 'glr:' AND k < 'glr;'").ok()?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).ok()?;
+            Some(rows.flatten().collect())
+        }).unwrap_or_default();
+        let now = current_time_ms();
+        for (k, v) in rows {
+            if now.saturating_sub(v.parse::<u64>().unwrap_or(0)) < LEAVE_REQUEST_DEFER_MS {
+                continue;
+            }
+            self.meta_del(&k);
+            // "glr:<group>:<member>": a group id holds no ':'.
+            let Some((group_id, member)) = k["glr:".len()..].split_once(':') else { continue };
+            if self.groups.get(group_id).map_or(false, |g| g.is_member(member)) {
+                if let Err(e) = self.remove_from_group(group_id, member, false) {
+                    warn!("Deferred leave not applied (group={}): {}", group_id, e);
+                }
+            }
+        }
+    }
+
     /// Removes the group record from memory and from disk (see `delete_group` and the Delete arm of `process_group_update`).
     pub(crate) fn remove_group_locally(&mut self, group_id: &str) {
         let (version, founder) = self.groups.get(group_id).map_or((0, String::new()), |g| (g.version, g.founder_identity_id.clone()));
@@ -589,9 +637,14 @@ impl P2PCore {
     /// `edit_group_message` and `delete_group_message` (compare `send_group_update_to_member`, the same pattern for GroupUpdate).
     /// Returns `true` if the message was really sent (or at least a send attempt was made), `false` if it was only queued.
     pub(crate) fn send_group_message_to_member(&mut self, group_id: &str, member_identity_id: &str, content: &MessageContent) -> bool {
+        self.send_group_message_to_member_published(group_id, member_identity_id, content).0
+    }
+
+    /// `send_group_message_to_member`, plus whether a copy was handed to the network at once (send status "sent", not only queued).
+    pub(crate) fn send_group_message_to_member_published(&mut self, group_id: &str, member_identity_id: &str, content: &MessageContent) -> (bool, bool) {
         // A member that deleted its account is neither sent to nor queued for.
         if self.deleted_identities.contains(member_identity_id) {
-            return false;
+            return (false, false);
         }
         // Multi-device (1.7.1): send to ALL of the member's active devices separately. Otherwise a member's secondary device would never see group
         // messages. On the receiving side the group archive is keyed by `group_message_local_id`, so there is no duplication or conflict between devices.
@@ -604,10 +657,14 @@ impl P2PCore {
             // `awaiting_confirmation` retries anyway, see `publish_with_ack_tracking`). But a PERMANENT error (e.g. an encryption or ratchet error) is
             // now correctly reflected as `false`.
             let mut sent_to_any_device = false;
+            let mut published = false;
             let mut refused: Vec<String> = Vec::new();
             for peer_fp in devices {
                 match self.send_message_content(peer_fp.clone(), content, None) {
-                    Ok(_) => sent_to_any_device = true,
+                    Ok((_, status)) => {
+                        sent_to_any_device = true;
+                        published |= status == MessageSendStatus::Sent.as_str();
+                    }
                     Err(e) => {
                         error!("Group message could not be sent to a member's device ({}): {}", crate::log_id(&peer_fp), e);
                         refused.push(peer_fp);
@@ -616,7 +673,7 @@ impl P2PCore {
             }
             if sent_to_any_device {
                 self.park_device_copies(&refused, content);
-                return true;
+                return (true, published);
             }
             // Every device refused (no session, keys, persist failure): queue
             // like an unresolved member instead of dropping it.
@@ -642,13 +699,10 @@ impl P2PCore {
             // on disk than in memory, and on the next restart the message that was really dropped would be sent again.
             self.remove_oldest_persisted_pending_group_message(group_id, member_identity_id);
             let dropped = self.pending_group_messages.get_mut(&key).map(|q| q.remove(0));
-            // Not silently: the dropped text's bubble turns to "error".
-            if let Some(MessageContent::Text { group_message_local_id: Some(local_id), .. }) = dropped {
-                warn!("Group queue full (group={}): oldest message dropped", group_id);
-                self.attachment_events.push(serde_json::json!({
-                    "type": "status", "peer": member_identity_id, "group_id": group_id,
-                    "message_id": local_id, "status": "error"
-                }).to_string());
+            // Only this member's copy is lost; the bubble id is shared by every
+            // member's copy, so it is not marked failed.
+            if dropped.is_some() {
+                warn!("Group queue full (group={}, member={}): oldest copy dropped", group_id, crate::log_id(&member_identity_id));
             }
         }
         let queue = self.pending_group_messages.entry(key).or_default();
@@ -657,7 +711,7 @@ impl P2PCore {
         // This used to return `false`, and the callers (`send_group_message`/`edit_group_message`/`delete_group_message`) treated that as the error
         // "no reachable group member" and showed an error in the UI. But the content was queued both in memory and ON DISK (`pending_group_messages`),
         // and `group_sync_sweep` sends it as soon as the member's device resolves. Queueing is not a FAILURE. It is a deferred delivery.
-        true
+        (true, false)
     }
 
     /// a device of a member refused a group packet (no session yet, ...)
@@ -667,7 +721,7 @@ impl P2PCore {
     pub(crate) fn park_device_copies(&mut self, refused: &[String], content: &MessageContent) {
         let now = current_time_ms();
         for fp in refused {
-            self.persist_durable_retry(&uuid::Uuid::new_v4().to_string(), fp, content, now);
+            self.persist_durable_retry(&uuid::Uuid::new_v4().to_string(), fp, content, now, None);
         }
         // The table is otherwise read only at start or when a stale device
         // comes back: a copy for a device seen every day waited for a restart.
@@ -707,16 +761,35 @@ impl P2PCore {
                 self.meta_del(&meta_key);
             }
         } else {
+            let key = (group_id.to_string(), member_identity_id.to_string());
             if lasting {
-                if let Some(sealed) = ciborium_bytes(update).ok().and_then(|b| self.seal_local_blob(&b)) {
-                    self.meta_put(&meta_key, &hex::encode(sealed));
+                // Written once ("<first queued ms>:<sealed hex>"), not on every
+                // sweep; given up like any packet after TEXT_RETRY_GIVE_UP_MS.
+                let fresh = self.pending_group_syncs.get(&key).map_or(true, |p| p.new_version != update.new_version);
+                let since: Option<u64> = self.meta_str(&meta_key)
+                    .and_then(|v| v.split_once(':').and_then(|(t, _)| t.parse().ok()));
+                match since {
+                    Some(t) if !fresh => {
+                        if current_time_ms().saturating_sub(t) > TEXT_RETRY_GIVE_UP_MS {
+                            warn!("GroupUpdate notice for {} given up (group={})", crate::log_id(&member_identity_id), group_id);
+                            self.meta_del(&meta_key);
+                            self.pending_group_syncs.remove(&key);
+                            return;
+                        }
+                    }
+                    _ => {
+                        if let Some(sealed) = ciborium_bytes(update).ok().and_then(|b| self.seal_local_blob(&b)) {
+                            self.meta_put(&meta_key, &format!("{}:{}", current_time_ms(), hex::encode(sealed)));
+                        }
+                    }
                 }
             }
-            error!(
-                "GroupUpdate: no active device known yet for {} (group={}) — will retry periodically (see group_sync_sweep)",
-                crate::log_id(&member_identity_id), group_id
-            );
-            self.pending_group_syncs.insert((group_id.to_string(), member_identity_id.to_string()), update.clone());
+            if self.pending_group_syncs.insert(key, update.clone()).is_none() {
+                error!(
+                    "GroupUpdate: no active device known yet for {} (group={}) — will retry periodically (see group_sync_sweep)",
+                    crate::log_id(&member_identity_id), group_id
+                );
+            }
         }
     }
 
@@ -728,6 +801,7 @@ impl P2PCore {
             return;
         }
         self.last_group_sync_sweep_at = now;
+        self.run_deferred_leaves();
         // ponytail: one reload per park. A copy whose resend fails again waits for the next park, a stale device's return, or a restart.
         if self.durable_reload_at != 0 && now >= self.durable_reload_at {
             self.durable_reload_at = 0;
@@ -921,12 +995,33 @@ impl P2PCore {
     /// ponytail: one COUNT over messages per message of an unknown group. Keep a set in memory if that path gets hot.
     pub(crate) fn unknown_group_has_room(&self, group_id: &str) -> bool {
         let Some(conn) = &self.db else { return false };
+        // Rows of a group that never arrived go after a day.
+        let _ = conn.execute(
+            "DELETE FROM messages WHERE group_id IS NOT NULL AND group_id != '' AND timestamp < ?1
+               AND group_id NOT IN (SELECT group_id FROM groups)",
+            params![current_time_ms().saturating_sub(UNKNOWN_GROUP_ROWS_MAX_AGE_MS) as i64],
+        );
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE group_id = ?1)
                  OR (SELECT COUNT(DISTINCT group_id) FROM messages
                      WHERE group_id IS NOT NULL AND group_id != '' AND group_id NOT IN (SELECT group_id FROM groups)) < 16",
             params![group_id], |r| r.get::<_, bool>(0),
         ).unwrap_or(false)
+    }
+
+    /// Rows taken for a group before it was held here (`sender_may_post_to_group` lets any contact post to an unknown id): only its members' stay.
+    pub(crate) fn drop_non_member_group_rows(&mut self, group_id: &str) {
+        let Some(members) = self.groups.get(group_id).map(|g| g.member_identity_ids()) else { return };
+        let Some(conn) = &self.db else { return };
+        let rows: Vec<(i64, Option<String>)> = conn
+            .prepare("SELECT id, sender_identity_id FROM messages WHERE group_id = ?1 AND direction = 'received'")
+            .and_then(|mut st| st.query_map(params![group_id], |r| Ok((r.get(0)?, r.get(1)?))).map(|it| it.flatten().collect()))
+            .unwrap_or_default();
+        for (id, sender) in rows {
+            if !sender.as_ref().map_or(false, |s| members.contains(s)) {
+                let _ = conn.execute("DELETE FROM messages WHERE id = ?1", params![id]);
+            }
+        }
     }
 
     pub(crate) fn process_group_update(&mut self, update: &GroupUpdate) -> Result<(), String> {
@@ -1027,10 +1122,16 @@ impl P2PCore {
             b.sort();
             a == b
         };
+        // A founder transfer always wins its version: decided by the tie hash,
+        // the members that applied the transfer first refused the other change
+        // (NotFounder) and the rest kept the old founder.
+        let transfer_held = group_ref.founder_chain.iter().any(|t| t.version == update.new_version);
+        let transfer_wins = same_version && !transfer_held && matches!(update.change, GroupChange::TransferFounder(_));
         let retake = same_version
             && (matches!(update.change, GroupChange::Delete)
-                || (same_state && !matches!(update.change, GroupChange::AvatarUpdate(_) | GroupChange::TransferFounder(_)))
-                || tie > old_tie);
+                || transfer_wins
+                || (!transfer_held && same_state && !matches!(update.change, GroupChange::AvatarUpdate(_) | GroupChange::TransferFounder(_)))
+                || (!transfer_held && tie > old_tie));
         let mut check = group_ref.clone();
         if retake {
             check.version -= 1;
@@ -1219,7 +1320,7 @@ impl P2PCore {
         // Adopt the device keys the founder vouched for on member identities. This lets us set up ratchets and message members we have never paired
         // with (see `adopt_vouched_member_devices`; the security rules are there).
         self.adopt_group_update_devices(update, &update.members);
-        if !same_version || tie > old_tie {
+        if !same_version || tie > old_tie || transfer_wins {
             self.set_group_tie(&update.group_id, &tie);
         }
         // The founder removed us (see `remove_from_group`'s removal notice):
@@ -1233,6 +1334,9 @@ impl P2PCore {
         }
         if let Some(g) = self.groups.get(&update.group_id) {
             self.persist_group(g);
+        }
+        if !group_exists {
+            self.drop_non_member_group_rows(&update.group_id);
         }
         // The founder added us (again): a sibling's sync may carry the group
         // from now on. Only with the group row on disk: if persisting failed,
@@ -1507,6 +1611,13 @@ impl P2PCore {
     }
 
     pub(crate) fn send_group_message(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>) -> Result<String, String> {
+        self.send_group_message_with_status(group_id, plaintext, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, mentions).map(|(id, _)| id)
+    }
+
+    /// `send_group_message` with the send status of the bubble, as `send_message` returns it: "sent" when a copy reached the network for at
+    /// least one member (or there is nobody else), "pending" when every copy is only queued. A pending row is set "sent" by the first later
+    /// publish (`retry_unconfirmed_messages`) or "delivered" by the first Ack.
+    pub(crate) fn send_group_message_with_status(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>) -> Result<(String, String), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if !group.is_member(&own_identity_id) {
@@ -1545,8 +1656,19 @@ impl P2PCore {
         // Not sent when our own copy cannot be kept (see the 1:1 twin).
         self.archive_group_message(group_id, &own_identity_id, "sent", plaintext.as_bytes(), Some(&local_id), reply_to_id, reply_to_prev, reply_to_sender, sent_at_ms, Some(&author_proof))
             .map_err(|e| format!("Could not save message: {}", e))?;
-        for member_identity_id in group.other_members(&own_identity_id) {
-            self.send_group_message_to_member(group_id, &member_identity_id, &content);
+        let others = group.other_members(&own_identity_id);
+        let mut published = others.is_empty();
+        for member_identity_id in others {
+            published |= self.send_group_message_to_member_published(group_id, &member_identity_id, &content).1;
+        }
+        let status = if published { MessageSendStatus::Sent } else { MessageSendStatus::Pending };
+        if !published {
+            if let Some(conn) = &self.db {
+                let _ = conn.execute(
+                    "UPDATE messages SET status = 'pending' WHERE message_id = ?1 AND group_id = ?2 AND direction = 'sent' AND status = 'sent'",
+                    params![local_id, group_id],
+                );
+            }
         }
         // Multi-device (1.7): echo to my sibling devices, so my group message shows there too. My own message is not part of the fan-out, so the echo
         // does not create a duplicate record.
@@ -1555,6 +1677,6 @@ impl P2PCore {
             reply_to_message_id: echo_reply_id, reply_to_preview: echo_reply_prev,
             reply_to_sender_identity_id: echo_reply_sender,
         });
-        Ok(local_id)
+        Ok((local_id, status.as_str().to_string()))
     }
 }

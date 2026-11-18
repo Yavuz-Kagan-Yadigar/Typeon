@@ -378,7 +378,8 @@ fn a_lurking_reader_can_neither_delete_nor_fill_anothers_mail() {
     assert_eq!(s.register_mailboxes_proved(&third, &["mb_fp".to_string()], &[], &same_key, 0, 100).unwrap().0.len(), 1);
     // The lurker is the silent reader here: it has not acked seq2.
     assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "not deleted while a silent reader exists");
-    assert_eq!(s.mailbox_item_count("mb_fp"), 0, "alicinin onayladigi satir kapasiteye sayilmaz");
+    assert_eq!(s.depositor_item_count("mb_fp", &sender), 0, "a row the recipient acked does not count toward capacity");
+    assert_eq!(s.depositor_usage("mb_fp", &sender).1, 0, "nor toward the per-box bytes");
     assert_eq!(s.ack("mb_fp", seq2, &lurker).unwrap(), 1);
 }
 
@@ -834,4 +835,31 @@ fn blob_gc_spares_recently_served_files() {
     s.blob_touch("bl_1", 900);
     assert!(s.blobs_to_gc(1500, 1000).is_empty());
     assert_eq!(s.blobs_to_gc(2000, 1000), vec!["bl_1".to_string()]);
+}
+
+#[test]
+fn a_pruned_box_counter_restarts_above_old_cursors() {
+    let s = Store::open_in_memory().unwrap();
+    assert_eq!(s.deposit("mb_1", b"x", b"e", 1, 1000).unwrap(), 1);
+    assert_eq!(s.deposit("mb_1", b"z", b"e", 1, 1000).unwrap(), 2);
+    s.conn.execute("DELETE FROM mail", []).unwrap();
+    s.prune_dead_rows(0);
+    let left: i64 = s.conn.query_row("SELECT COUNT(*) FROM mail_seq", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0, "a box with no mail and no reader keeps no counter");
+    assert_eq!(s.deposit("mb_1", b"w", b"e", 1, 1000).unwrap(), 3, "never below an old cursor");
+}
+
+#[test]
+fn ack_many_keeps_the_highest_seq_and_a_repeat_is_not_written() {
+    let s = Store::open_in_memory().unwrap();
+    let sender = enroll(&s, b"send", "peerS");
+    let reader = enroll(&s, b"read", "peerR");
+    register(&s, &reader, "mb_1");
+    let (one, new) = s.deposit_written("mb_1", b"one", &sender, 1, 1000).unwrap();
+    assert!(new);
+    assert_eq!(s.deposit_written("mb_1", b"one", &sender, 2, 1000).unwrap(), (one, false), "a repeat writes nothing");
+    let two = s.deposit("mb_1", b"two", &sender, 3, 1000).unwrap();
+    let acks = vec![("mb_1".to_string(), two), ("mb_1".to_string(), one)];
+    assert_eq!(s.ack_many(&acks, &reader).unwrap(), 2, "the lower seq after the higher one does not undo it");
+    assert_eq!(s.depositor_usage("mb_1", &sender), (0, 0));
 }

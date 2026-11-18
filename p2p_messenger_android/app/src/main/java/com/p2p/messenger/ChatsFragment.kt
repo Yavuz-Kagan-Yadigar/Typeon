@@ -39,6 +39,28 @@ class ChatsFragment : Fragment() {
     companion object {
         /** Delay before the list refreshes after an event. A burst of events causes one refresh. */
         private const val EVENT_REFRESH_DEBOUNCE_MS = 1000L
+
+        /** Events that never change a chat or contact list row (progress, typing, ticks, calls). */
+        private val QUIET_EVENTS = setOf(
+            "typing", "file_progress", "noop", "ack", "status", "whiteboard", "call", "group_call_offer",
+            "address_announce", "stickers_changed",
+        )
+
+        /** True for an event the lists can ignore; also used by ContactsFragment. */
+        internal fun isQuietEvent(json: String): Boolean =
+            try { org.json.JSONObject(json).optString("type") in QUIET_EVENTS } catch (e: Exception) { false }
+    }
+
+    /** Set by `ChatListDrawer`: true while the drawer that hosts this list is closed. The list is then rebuilt
+     *  only when the drawer opens, not on every event of the open chat. */
+    var inClosedDrawer: () -> Boolean = { false }
+    private var staleWhileClosed = false
+
+    fun onDrawerOpened() {
+        if (staleWhileClosed && isResumed) {
+            staleWhileClosed = false
+            refreshList()
+        }
     }
 
     /**
@@ -72,8 +94,12 @@ class ChatsFragment : Fragment() {
      */
     /** A refresh is queued (`Handler.hasCallbacks` is API 29, minSdk is 26). */
     @Volatile private var eventRefreshQueued = false
-    private val eventRefreshRunnable = Runnable { eventRefreshQueued = false; refreshList() }
-    private val eventListener: (String) -> Unit = { _ ->
+    private val eventRefreshRunnable = Runnable {
+        eventRefreshQueued = false
+        if (inClosedDrawer()) staleWhileClosed = true else refreshList()
+    }
+    private val eventListener: (String) -> Unit = listener@{ msg ->
+        if (isQuietEvent(msg)) return@listener
         // Events arrive one by one. A burst of 50 messages would otherwise cause 50 rebuilds, so if a refresh
         // is already pending, a new one is not added.
         if (!eventRefreshQueued) {
@@ -388,7 +414,7 @@ class ChatsFragment : Fragment() {
         super.onResume()
         // The list refreshes on return to the screen and when an event arrives from the service
         // (no full rebuild every 5 seconds, see `eventListener`).
-        refreshList()
+        if (inClosedDrawer()) staleWhileClosed = true else refreshList()
         com.p2p.messenger.service.P2PService.addMessageListener(eventListener)
         // 300 ms: the service leaves power save on the same resume.
         refreshHandler.postDelayed(syncRunnable, 300)

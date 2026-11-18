@@ -91,14 +91,30 @@ internal fun ChatActivity.sendNewMessage(text: String): kotlinx.coroutines.Job {
     btnSend.isEnabled = false
     btnSend.visibility = View.INVISIBLE
     progressSending.visibility = View.VISIBLE
+    val targetPeer = peerDeviceFingerprint
 
     return lifecycleScope.launch {
         val result = withContext(Dispatchers.IO) {
             try {
-                P2PLib.sendMessage(peerDeviceFingerprint, text, null, null)
+                P2PLib.sendMessage(targetPeer, text, null, null)
             } catch (e: Throwable) {
                 "Error: ${e.message}" // a JNI throw must not kill the process
             }
+        }
+        if (peerDeviceFingerprint != targetPeer) {
+            progressSending.visibility = View.GONE
+            btnSend.visibility = View.VISIBLE
+            btnSend.isEnabled = true
+            return@launch
+        }
+        if (result.startsWith("Error:") && findViewById<android.widget.EditText>(R.id.edtMessage).text.isNullOrBlank()) {
+            // Nothing was queued: give the text back instead of a bubble that vanishes when the chat closes.
+            Toast.makeText(this@sendNewMessage, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
+            findViewById<android.widget.EditText>(R.id.edtMessage).apply { setText(text); setSelection(text.length) }
+            progressSending.visibility = View.GONE
+            btnSend.visibility = View.VISIBLE
+            btnSend.isEnabled = true
+            return@launch
         }
         val (messageId, status) = if (result.startsWith("Error:")) {
             Toast.makeText(this@sendNewMessage, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
@@ -138,6 +154,8 @@ internal fun ChatActivity.parseAttachmentStatus(status: String): SimpleChatAdapt
 }
 
 internal fun ChatActivity.handleIncomingEvent(obj: JSONObject) {
+    // The listener filtered by peer on its thread; the chat may have been rebound since.
+    if (!obj.isNull("peer") && obj.optString("peer").let { it.isNotEmpty() && it != peerDeviceFingerprint }) return
     when (obj.optString("type")) {
         "stickers_changed" -> stickerPicker.reload()
         "message" -> {
@@ -192,7 +210,6 @@ internal fun ChatActivity.handleIncomingEvent(obj: JSONObject) {
         // Emoji reactions: Rust sends a ready SUMMARY string (see `reactions_summary`); nothing is counted or summed here.
         "reaction" -> adapter.applyReactions(obj.optString("message_id"), obj.optString("reactions"))
         "status" -> adapter.applyStatus(obj.optString("message_id"), parseStatus(obj.optString("status")))
-        "history_sync" -> applyHistorySync(obj)
         "older_history" -> applyOlderHistory(obj)
         // Server or sibling restore covering several chats: reload from the archive.
         "history_backfilled" -> {

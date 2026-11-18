@@ -205,19 +205,21 @@ pub(crate) fn remove_cached_conversions(attachments_dir: &std::path::Path, famil
 /// attachments' `plain_cache` (wiped at start, like theirs) and, encrypted,
 /// in `sticker_cache`.
 pub(crate) fn sticker_plain_path_unlocked(id: &str) -> Result<String, String> {
-    let core = core_lock_read();
-    let animated = core.sticker_animated(id)?;
-    let out = core.attachments_dir()?.join("plain_cache").join(if animated { format!("anim-{id}.gif") } else { format!("sticker-{id}.png") });
+    // Paths and key under the lock; every file operation after it is released.
+    let (animated, cache, enc_path, file_key) = {
+        let core = core_lock_read();
+        let animated = core.sticker_animated(id)?;
+        (animated, core.attachments_dir()?.join("plain_cache"), core.sticker_enc_path(id)?, core.sticker_file_key(id)?)
+    };
+    let out = cache.join(if animated { format!("anim-{id}.gif") } else { format!("sticker-{id}.png") });
     if out.exists() {
         return Ok(out.to_string_lossy().to_string());
     }
     let kind = if animated { "sticker-gif" } else { "sticker-png" };
-    let file_key = core.sticker_file_key(id)?;
     if restore_conversion(&out, kind, id, &file_key) {
         return Ok(out.to_string_lossy().to_string());
     }
-    let tmp = core.decrypt_sticker_to_tmp(id)?;
-    drop(core);
+    let tmp = decrypt_sticker_file(&enc_path, &file_key, &cache, id)?;
     let conv = out.with_file_name(format!(".{}.tmp", uuid::Uuid::new_v4()));
     let converted = if animated { attachments::jxl_to_gif(&tmp, &conv) } else { attachments::jxl_to_png(&tmp, &conv) };
     let _ = std::fs::remove_file(&tmp);
@@ -232,23 +234,33 @@ pub(crate) fn sticker_plain_path_unlocked(id: &str) -> Result<String, String> {
 
 /// A sticker's first frame as PNG (fast placeholder while the GIF converts).
 pub(crate) fn sticker_first_frame_unlocked(id: &str) -> Result<String, String> {
-    let core = core_lock_read();
-    let out = core.attachments_dir()?.join("plain_cache").join(format!("first-{id}.png"));
+    let (cache, enc_path, file_key) = {
+        let core = core_lock_read();
+        (core.attachments_dir()?.join("plain_cache"), core.sticker_enc_path(id)?, core.sticker_file_key(id)?)
+    };
+    let out = cache.join(format!("first-{id}.png"));
     if out.exists() {
         return Ok(out.to_string_lossy().to_string());
     }
-    let file_key = core.sticker_file_key(id)?;
     if restore_conversion(&out, "sticker-first", id, &file_key) {
         return Ok(out.to_string_lossy().to_string());
     }
-    let tmp = core.decrypt_sticker_to_tmp(id)?;
-    drop(core);
+    let tmp = decrypt_sticker_file(&enc_path, &file_key, &cache, id)?;
     let r = attachments::convert_cached(&tmp, &out, attachments::jxl_to_png);
     let _ = std::fs::remove_file(&tmp);
     if r.is_ok() {
         keep_conversion(&out, "sticker-first", id, &file_key);
     }
     r.map(|()| out.to_string_lossy().to_string())
+}
+
+/// `P2PCore::decrypt_sticker_to_tmp` without the core lock: sticker `id` (its content hash) decrypted to a fresh
+/// temporary `.jxl` in `cache`; the caller removes it.
+fn decrypt_sticker_file(enc_path: &std::path::Path, file_key: &[u8; 32], cache: &std::path::Path, id: &str) -> Result<std::path::PathBuf, String> {
+    let _ = std::fs::create_dir_all(cache);
+    let tmp = cache.join(format!(".sticker-{}.jxl", uuid::Uuid::new_v4()));
+    attachments::decrypt_file_from_disk_with(enc_path, &tmp, file_key, id, attachments::FILE_CHUNK_SIZE_V2)?;
+    Ok(tmp)
 }
 
 /// A JPEG XL attachment's first frame as PNG (`first-<sha256>.png`).
@@ -293,6 +305,21 @@ pub(crate) fn attachment_original_path_unlocked(file_id: &str) -> Result<String,
         r?;
     }
     Ok(out.to_string_lossy().to_string())
+}
+
+/// The frames of a JPEG XL attachment (`attachments::jxl_frames_rgba`). Decrypted to its own temporary file,
+/// not to the "Save as JPEG XL" copy, which a save may be reading at the same time.
+pub(crate) fn attachment_jxl_frames_unlocked(file_id: &str) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), String> {
+    let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
+    if !decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl")) {
+        return Err("not a JPEG XL".to_string());
+    }
+    let tmp = decrypted_path.with_file_name(format!(".frames-{}.jxl", uuid::Uuid::new_v4()));
+    let chunk_size = core_lock().file_chunk_size(file_id);
+    let frames = attachments::decrypt_file_from_disk_with(&enc_path, &tmp, &file_key, &sha256_hex, chunk_size)
+        .and_then(|()| attachments::jxl_frames_rgba(&tmp));
+    let _ = std::fs::remove_file(&tmp);
+    frames
 }
 
 /// See `P2PCore::begin_attachment_decrypt`. The same lock-splitting pattern, for the full-file decryption after a download. Concurrency: two

@@ -61,9 +61,20 @@ pub struct MainUi {
     /// Lets the chat list highlight the open row and lets a re-open of the
     /// same conversation be a no-op instead of a jarring rebuild.
     pub open: RefCell<Option<Conversation>>,
+    /// The chats list's rebuild hook (weak; `chats::build` owns it). Local
+    /// actions (send, edit, delete, forward, read) emit no core event, so
+    /// they call `refresh_chats` themselves.
+    pub chats_refresh: RefCell<Option<std::rc::Weak<dyn Fn()>>>,
 }
 
 impl MainUi {
+    pub fn refresh_chats(&self) {
+        let refresh = self.chats_refresh.borrow().as_ref().and_then(|weak| weak.upgrade());
+        if let Some(refresh) = refresh {
+            refresh();
+        }
+    }
+
     pub fn open_conversation(self: &Rc<Self>, conversation: Conversation) {
         if self.open.borrow().as_ref() == Some(&conversation) {
             self.split.set_show_content(true);
@@ -82,6 +93,24 @@ impl MainUi {
         *self.app.active_conversation.borrow_mut() = None;
         self.split.set_content(Some(&placeholder_page(self)));
         self.split.set_show_content(false);
+    }
+
+    /// `close_conversation`, but only when `conversation` is the open one.
+    pub fn close_if_open(self: &Rc<Self>, conversation: &Conversation) {
+        let open = self.open.borrow().as_ref().map(Conversation::key);
+        if open == Some(conversation.key()) {
+            self.close_conversation();
+        }
+    }
+
+    /// Rebuilds the open chat page when it shows `conversation` (after its
+    /// history was cleared, say).
+    pub fn reload_if_open(self: &Rc<Self>, conversation: &Conversation) {
+        let open = self.open.borrow().clone();
+        if let Some(open) = open.filter(|open| open.key() == conversation.key()) {
+            *self.open.borrow_mut() = None;
+            self.open_conversation(open);
+        }
     }
 
     /// Toggles the chat-list sidebar between shown and collapsed.
@@ -152,6 +181,7 @@ pub fn build_main(app: &Rc<App>, host: &adw::ToastOverlay) {
         app: app.clone(),
         split: split.clone(),
         open: RefCell::new(None),
+        chats_refresh: RefCell::new(None),
     });
 
     split.set_sidebar(Some(&sidebar(&main)));
@@ -174,7 +204,7 @@ pub fn build_main(app: &Rc<App>, host: &adw::ToastOverlay) {
 
 /// Ten minutes of no user input re-locks the window. A constant, not a
 /// setting: the owner decision was "a setting only if trivial".
-const IDLE_LOCK_MS: u64 = 10 * 60 * 1000;
+const IDLE_LOCK_MS: u64 = crate::app::IDLE_LOCK_MS;
 
 /// How often the idle watcher looks. Cheap: a timestamp comparison, plus a
 /// nine-byte read of the vault header.
@@ -255,10 +285,13 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
     let activity = Rc::new(Cell::new(util::now_ms()));
     {
         let activity = activity.clone();
+        let app = app.clone();
         let controller = gtk::EventControllerLegacy::new();
         controller.set_propagation_phase(gtk::PropagationPhase::Capture);
         controller.connect_event(move |_, _| {
-            activity.set(util::now_ms());
+            let now = util::now_ms();
+            activity.set(now);
+            app.last_input.set(now);
             glib::Propagation::Proceed
         });
         window.add_controller(controller);
@@ -268,9 +301,12 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
         // have been working in another window (Settings) the whole time,
         // and that window's input never reaches this one.
         let activity = activity.clone();
+        let app = app.clone();
         window.connect_is_active_notify(move |window| {
             if window.is_active() {
-                activity.set(util::now_ms());
+                let now = util::now_ms();
+                activity.set(now);
+                app.last_input.set(now);
             }
         });
     }
@@ -278,6 +314,26 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
     // Whether the lock page is up, and the windows it put away.
     let locked = Rc::new(Cell::new(false));
     let hidden = Rc::new(RefCell::new(Vec::<gtk::Window>::new()));
+
+    // A window shown while locked (a dialog from a late async callback, a
+    // viewer) goes away at once and comes back on unlock, like the ones the
+    // watcher hid. The call window stays: `ui::call` hides the caller there.
+    {
+        let (locked, hidden, main) = (locked.clone(), hidden.clone(), main.clone());
+        app.application.connect_window_added(move |_, added| {
+            let (locked, hidden, main) = (locked.clone(), hidden.clone(), main.clone());
+            added.connect_visible_notify(move |other| {
+                if locked.get()
+                    && other.is_visible()
+                    && !is_same_window(other, &main)
+                    && !crate::ui::call::is_call_window(other)
+                {
+                    other.set_visible(false);
+                    hidden.borrow_mut().push(other.clone());
+                }
+            });
+        });
+    }
 
     // --- unlock ---
     let try_unlock: Rc<dyn Fn()> = {
@@ -332,12 +388,16 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
                         None => {
                             error.set_text("");
                             stack.set_visible_child(&host);
-                            for other in hidden.borrow_mut().drain(..) {
-                                other.set_visible(true);
-                            }
+                            // Unlocked first: the windows shown again below
+                            // must not be caught by the lock's own hook.
                             app.locked.set(false);
                             activity.set(util::now_ms());
+                            app.last_input.set(util::now_ms());
                             locked.set(false);
+                            let away = std::mem::take(&mut *hidden.borrow_mut());
+                            for other in away {
+                                other.set_visible(true);
+                            }
                         }
                     }
                 },
@@ -402,7 +462,7 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
                 .filter(|other| {
                     other.is_visible()
                         && !is_same_window(other, &main)
-                        && other.title().as_deref() != Some("Call")
+                        && !crate::ui::call::is_call_window(other)
                 })
                 .collect();
             for other in &away {
@@ -412,6 +472,9 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
             app.locked.set(true);
             locked.set(true);
             stack.set_visible_child(&lock_view);
+            // Decrypted attachment copies must not sit on disk behind the
+            // lock page, as Android's AppLock empties them too.
+            crate::app::run_in_background(|| dialogs::clear_decrypted_cache(), |()| {});
             glib::ControlFlow::Continue
         }
     };
@@ -504,7 +567,10 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
         let dot = dot.clone();
         let text = text.clone();
         move |status: core::OwnStatus| {
-            let (css_class, label) = if status.tor_enabled {
+            // Tor is the only transport: with it off the network never starts.
+            let (css_class, label) = if !status.tor_enabled {
+                ("error", "Network off (Tor disabled in Settings)")
+            } else {
                 match status.tor_status.as_str() {
                     "ready" => (
                         "success",
@@ -517,17 +583,6 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
                     "failed" => ("error", "Tor failed"),
                     _ => ("warning", "Starting Tor…"),
                 }
-            } else if status.connected_peers > 0 {
-                (
-                    "success",
-                    if status.node_mode {
-                        "Connected · node"
-                    } else {
-                        "Connected"
-                    },
-                )
-            } else {
-                ("warning", "Reconnecting…")
             };
 
             for stale in ["success", "warning", "error"] {
@@ -555,12 +610,13 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
     };
 
     refresh();
-    let _ = app;
+    let app = app.clone();
     let row_weak = row.downgrade();
     glib::timeout_add_seconds_local(2, move || {
-        // Gone -> stop; hidden/minimized -> no thread + core round-trip.
+        // Gone -> stop; hidden, minimized or in the background -> no thread
+        // + core round-trip.
         let Some(row) = row_weak.upgrade() else { return glib::ControlFlow::Break };
-        if row.is_mapped() {
+        if row.is_mapped() && app.window().is_some_and(|window| window.is_active()) {
             refresh();
         }
         glib::ControlFlow::Continue

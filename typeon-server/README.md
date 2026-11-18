@@ -88,7 +88,7 @@ this well, so there is no bespoke config file format:
 |---|---|---|
 | `TYPEON_SERVER_DIR` | `~/.local/share/typeon-server` | data directory (`--dir`) |
 | `TYPEON_SERVER_BUDGET_BYTES` | 16 GiB | total disk the server may use (mail + archive + blobs), same syntax as `--storage` |
-| `TYPEON_SERVER_MAX_DEVICES` | `64` | most enrolled devices |
+| `TYPEON_SERVER_MAX_DEVICES` | `16` | most enrolled devices; the budget is split over them (per device: blob 6/10, archive 3/10, mail 1/10, capped at the defaults). Archive and blobs stop at 90 % of the budget |
 | `TYPEON_SERVER_NODE` | `0` | also act as a Kademlia server + Circuit Relay v2 |
 | `TYPEON_SERVER_NAME` | `Typeon Server` | shown to clients on connect |
 
@@ -157,9 +157,12 @@ The onion address only appears after Arti finishes bootstrapping — usually
 - `chunk` requests have their own budget: 600 per minute per peer.
 - Relay frames skip the request limit. Each client may relay 8 MiB per 10 s;
   toward a listener that sends nothing back, only 64 KiB per 10 s.
-- Enroll, Rebind and Register proofs share one server-wide budget of 120
-  signature checks a minute. A flood of them can delay real enrollments and
-  new-mailbox proofs until the window ends. Mail is not affected.
+- Enroll and Rebind each have a server-wide budget of 120 signature checks a
+  minute. A flood of them can delay real enrollments until the window ends.
+  Register proofs have no server-wide pool, only 64 per peer per minute. Mail
+  is not affected.
+- One depositor may hold at most `max_mail_bytes / 8` in a mailbox and put at
+  most 16 MiB an hour into it.
 
 ## Android
 

@@ -183,6 +183,28 @@ impl Prefs {
         }
     }
 
+    /// Drops read marks and pins of conversations that no longer exist, so
+    /// this plaintext file does not keep deleted contacts' fingerprints and
+    /// group ids. An empty list is not trusted: a failed core read returns one.
+    pub fn prune_conversations(&mut self, contacts: &[crate::core::ContactSummary], groups: &[crate::core::GroupSummary]) {
+        let (contacts_known, groups_known) = (!contacts.is_empty(), !groups.is_empty());
+        let group_live = |key: &str| {
+            key.strip_prefix("group:").map(|id| !groups_known || groups.iter().any(|g| g.group_id == id))
+        };
+        let before = (self.read_state.len(), self.pinned.len());
+        self.read_state.retain(|key, _| {
+            group_live(key.as_str()).unwrap_or_else(|| {
+                !contacts_known || contacts.iter().any(|c| c.active_device_fingerprint.as_deref() == Some(key.as_str()))
+            })
+        });
+        self.pinned.retain(|key| {
+            group_live(key.as_str()).unwrap_or_else(|| !contacts_known || contacts.iter().any(|c| c.contact_id == *key))
+        });
+        if (self.read_state.len(), self.pinned.len()) != before {
+            self.dirty = true;
+        }
+    }
+
     /// Only ever moves forward — a sibling device's `read_state_sync` must not
     /// drag a conversation back to unread (see `ReadStatePrefs.markReadAt`).
     pub fn mark_read_at(&mut self, conversation_id: &str, timestamp_ms: u64) {

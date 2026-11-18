@@ -8,6 +8,10 @@ pub(super) fn noop() -> serde_json::Value {
 
 pub(super) static LAST_CALL_SIG: Mutex<String> = Mutex::new(String::new());
 
+/// `(device, call id, message id)` of the last Invite sent per device and call: a re-invite withdraws the
+/// previous server copy, so a device that was offline finds one Invite, not one per re-invite.
+static LAST_INVITES: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+
 impl P2PCore {
     pub(crate) fn start_call(&mut self, peer_fp: String, video: bool) -> Result<String, String> {
         if self.call.is_some() {
@@ -21,7 +25,7 @@ impl P2PCore {
         }
         let call_id = uuid::Uuid::new_v4().to_string();
         let s = CallSession::new(call_id.clone(), None, video, CallPhase::Outgoing, peer_fp, invited);
-        media_start(*s.my_key, s.my_sid);
+        media_start(&s.my_key, s.my_sid);
         self.call = Some(s);
         self.call_broadcast(CallAction::Invite);
         info!("Call started: {} video={}", &call_id[..8], video);
@@ -49,7 +53,7 @@ impl P2PCore {
             group_offers().insert(group_id, o);
             self.call = Some(s);
             self.accept_call()?;
-            info!("Joined group call {}", &id[..8.min(id.len())]);
+            info!("Joined group call {}", id.chars().take(8).collect::<String>());
             return Ok(id);
         }
         let invited = self.group_call_devices(&group_id)?;
@@ -58,7 +62,7 @@ impl P2PCore {
         }
         let call_id = uuid::Uuid::new_v4().to_string();
         let s = CallSession::new(call_id.clone(), Some(group_id), video, CallPhase::Outgoing, String::new(), invited);
-        media_start(*s.my_key, s.my_sid);
+        media_start(&s.my_key, s.my_sid);
         self.call = Some(s);
         self.call_broadcast(CallAction::Invite);
         // My other devices never get an Invite of it: no "Attend" there either.
@@ -75,7 +79,7 @@ impl P2PCore {
         s.phase = CallPhase::Active;
         s.connected_at = current_time_ms();
         s.connected = Some(Instant::now());
-        media_start(*s.my_key, s.my_sid);
+        media_start(&s.my_key, s.my_sid);
         for fp in &s.joined {
             if let Some((k, sid)) = s.keys.get(fp) {
                 media_add_remote(fp, k, sid);
@@ -158,6 +162,8 @@ impl P2PCore {
         for fp in to {
             self.send_call_signal(&fp, &s.call_id, Some(gid.clone()), s.video, CallAction::Ended, None, Vec::new());
         }
+        // Over for good: a late Accept of it gets a Hangup (see the Accept arm).
+        remember_ended(&s.call_id, ENDED);
         if group_offers().remove(&gid).is_some() {
             self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
         }
@@ -242,8 +248,23 @@ impl P2PCore {
         self.call_signal_sending = true;
         let sent = self.send_message_content(fp.to_string(), &content, None);
         self.call_signal_sending = false;
-        if let Err(e) = sent {
-            warn!("Call signal could not be sent ({:?} -> {}): {}", action, &fp[..8.min(fp.len())], e);
+        match sent {
+            Err(e) => warn!("Call signal could not be sent ({:?} -> {}): {}", action, &fp[..8.min(fp.len())], e),
+            Ok((message_id, _)) if action == CallAction::Invite => {
+                let prev = LAST_INVITES.lock().ok().and_then(|mut last| {
+                    let prev = last.iter().position(|(f, c, _)| f == fp && c == call_id).map(|i| last.remove(i).2);
+                    // ponytail: 64 entries, the oldest dropped; enough for the devices of a few calls.
+                    if last.len() >= 64 {
+                        last.remove(0);
+                    }
+                    last.push((fp.to_string(), call_id.to_string(), message_id));
+                    prev
+                });
+                if let Some(prev) = prev {
+                    self.cancel_server_deposit(&prev);
+                }
+            }
+            Ok(_) => {}
         }
     }
 
@@ -305,6 +326,14 @@ impl P2PCore {
                     let changed = group_offers().insert(gid.clone(), offer).map_or(true, |old| old.call_id != call_id);
                     if changed {
                         self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
+                    }
+                    // An Invite of the group call I am in: its sender lost me.
+                    if self.call.as_ref().map_or(false, |s| s.call_id == call_id && s.phase == CallPhase::Active && s.group_id.as_deref() == Some(gid.as_str())) {
+                        return self.rejoin_group_peer(peer_fp, media_key, stream_id);
+                    }
+                    // My other device is in it: never ring here.
+                    if sibling_calls().contains(&call_id) {
+                        return noop();
                     }
                 }
                 // The call already ended here (its offer is kept above); also a Hangup that overtook its
@@ -373,10 +402,24 @@ impl P2PCore {
                 if !keys_ok {
                     return noop();
                 }
+                if !self.call.as_ref().map_or(false, |s| s.call_id == call_id) {
+                    // Joined (from an old offer, or answered late) a call that is
+                    // over here: tell the joiner, or it sits in an empty call until
+                    // the lost-media timeout. Only when the call is known to be
+                    // over, not merely left by this device.
+                    let over = match &group_id {
+                        None => self.last_call_end.as_ref().map_or(false, |(id, _)| *id == call_id),
+                        Some(_) => call_known_over(&call_id),
+                    };
+                    if over {
+                        self.send_call_signal(peer_fp, &call_id, group_id, video, CallAction::Hangup, None, Vec::new());
+                    }
+                    return noop();
+                }
                 let group = self.call.as_ref().and_then(|s| s.group_id.clone());
                 let member = group.as_deref().map_or(false, |gid| is_member(self, gid));
                 let Some(s) = self.call.as_mut() else { return noop() };
-                if s.call_id != call_id || s.retired.contains(&stream_id) {
+                if s.retired.contains(&stream_id) {
                     return noop();
                 }
                 if !s.invited.iter().any(|f| f == peer_fp) {
@@ -427,19 +470,26 @@ impl P2PCore {
             }
             CallAction::Ended => {
                 let Some(gid) = group_id.filter(|g| is_member(self, g)) else { return noop() };
-                let mut early = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner());
-                if early.len() >= 16 {
-                    early.pop_front();
+                // Only from a device known to be in the call: the one whose
+                // Invite we hold, or one in the call that rings here. Any other
+                // member could stop every ring of a running call.
+                let (ringing, from_ringing) = self
+                    .call
+                    .as_ref()
+                    .filter(|s| s.call_id == call_id && s.phase == CallPhase::Incoming && s.group_id.as_deref() == Some(gid.as_str()))
+                    .map_or((false, false), |s| (true, s.peer_fp == peer_fp || s.joined.contains(peer_fp)));
+                let from_offer = group_offers().get(&gid).map_or(false, |o| o.call_id == call_id && o.peer_fp == peer_fp);
+                if !from_offer && !from_ringing {
+                    return noop();
                 }
-                early.push_back((call_id.clone(), ENDED.to_string()));
-                drop(early);
+                remember_ended(&call_id, ENDED);
                 let gone = group_offers().get(&gid).map_or(false, |o| o.call_id == call_id);
                 if gone {
                     group_offers().remove(&gid);
                     self.attachment_events.push(serde_json::json!({"type": "group_call_offer", "group_id": gid}).to_string());
                 }
                 // Still ringing here for the call that just ended: stop.
-                if self.call.as_ref().map_or(false, |s| s.call_id == call_id && s.phase == CallPhase::Incoming) {
+                if ringing {
                     self.call = None;
                     self.last_call_end = Some((call_id.clone(), "remote".to_string()));
                     return serde_json::json!({
@@ -493,12 +543,13 @@ impl P2PCore {
                     }
                     if self.call.take().is_none() {
                         // Invite not here yet: it must not ring later. "" = any sender.
-                        let mut early = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner());
-                        if early.len() >= 16 {
-                            early.pop_front();
-                        }
-                        early.push_back((call_id, String::new()));
+                        remember_ended(&call_id, "");
                         return noop();
+                    }
+                    // A group call keeps re-inviting: `last_call_end` alone is
+                    // replaced by the next call that ends here.
+                    if group_id.is_some() {
+                        never_ring_again(&call_id);
                     }
                     self.last_call_end = Some((call_id.clone(), "elsewhere".to_string()));
                     return serde_json::json!({
@@ -509,11 +560,7 @@ impl P2PCore {
                 let Some(s) = self.call.as_mut() else {
                     // Cancelled before its Invite got here: see the Invite arm.
                     if action == CallAction::Hangup {
-                        let mut early = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner());
-                        if early.len() >= 16 {
-                            early.pop_front();
-                        }
-                        early.push_back((call_id, peer_fp.to_string()));
+                        remember_ended(&call_id, peer_fp);
                     }
                     return noop();
                 };
@@ -579,6 +626,27 @@ impl P2PCore {
                 })
             }
         }
+    }
+
+    /// An Invite of the group call I am in, from a device in it that lost me
+    /// (it dropped me as silent, or my Accept never reached it): take its key
+    /// and answer with mine, so both sides hear each other again.
+    fn rejoin_group_peer(&mut self, peer_fp: &str, media_key: Vec<u8>, stream_id: Vec<u8>) -> serde_json::Value {
+        let Some(s) = self.call.as_mut() else { return noop() };
+        if s.retired.contains(&stream_id) {
+            return noop();
+        }
+        if !s.invited.iter().any(|f| f == peer_fp) {
+            s.invited.push(peer_fp.to_string());
+        }
+        media_add_remote(peer_fp, &media_key, &stream_id);
+        s.keys.insert(peer_fp.to_string(), (Zeroizing::new(media_key), stream_id));
+        s.joined.insert(peer_fp.to_string());
+        let (cid, gid, video) = (s.call_id.clone(), s.group_id.clone(), s.video);
+        let keys = (pair_key(&s.my_key, peer_fp).to_vec(), s.my_sid.to_vec());
+        self.server_sweep_at = 0;
+        self.send_call_signal(peer_fp, &cid, gid, video, CallAction::Accept, Some(keys), Vec::new());
+        noop()
     }
 
     /// The callee's trace of a 1:1 call it missed: a row in the chat, under
@@ -679,14 +747,31 @@ impl P2PCore {
         // Group call: a participant silent that long (phone died, no Hangup)
         // leaves, or every frame went on being sealed and sent to it for the
         // rest of the call. Its state packets alone arrive every second.
-        if let Some(s) = self.call.as_mut().filter(|s| s.phase == CallPhase::Active && s.group_id.is_some()) {
-            let lost = Duration::from_millis(MEDIA_LOST_MS);
-            let gone: Vec<String> = s.joined.iter().filter(|fp| media_rx_age(fp).map_or(false, |a| a > lost)).cloned().collect();
-            for fp in gone {
-                info!("Call: removed participant silent for {} s", MEDIA_LOST_MS / 1000);
-                s.joined.remove(&fp);
-                media_remove_remote(&fp);
+        // A device that never sent anything counts from when it was added.
+        // It gets an Invite of the call: a device still in it answers with
+        // an Accept (`rejoin_group_peer`), so a path that stalled for a while
+        // does not split the call for good.
+        // ponytail: a device whose signals arrive but whose media never does
+        // cycles drop -> Invite -> Accept every 30 s; fine at that rate.
+        let gone: Vec<String> = match self.call.as_mut().filter(|s| s.phase == CallPhase::Active && s.group_id.is_some()) {
+            Some(s) => {
+                let lost = Duration::from_millis(MEDIA_LOST_MS);
+                let gone: Vec<String> = s.joined.iter().filter(|fp| media_rx_age(fp).map_or(false, |a| a > lost)).cloned().collect();
+                for fp in &gone {
+                    info!("Call: removed participant silent for {} s", MEDIA_LOST_MS / 1000);
+                    s.joined.remove(fp);
+                    media_remove_remote(fp);
+                }
+                gone
             }
+            None => Vec::new(),
+        };
+        if !gone.is_empty() {
+            let s = self.call.take().expect("checked above");
+            for fp in &gone {
+                self.call_signal(fp, &s, CallAction::Invite);
+            }
+            self.call = Some(s);
         }
         let Some(s) = &self.call else { return };
         let now = current_time_ms();
@@ -819,9 +904,26 @@ impl P2PCore {
 /// An Invite of `call_id` from anyone no longer rings here ("" = any sender in
 /// `EARLY_HANGUP`); its "Attend" offer is still kept.
 fn never_ring_again(call_id: &str) {
+    remember_ended(call_id, "");
+}
+
+/// Entries of `EARLY_HANGUP`: the oldest goes first, a repeat is not stored
+/// twice. Large enough that the Hangups of one busy group call do not push
+/// out a call declined here.
+const ENDED_MEMORY: usize = 256;
+
+fn remember_ended(call_id: &str, sender: &str) {
     let mut early = EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner());
-    if early.len() >= 16 {
+    if early.iter().any(|(id, fp)| id == call_id && fp == sender) {
+        return;
+    }
+    if early.len() >= ENDED_MEMORY {
         early.pop_front();
     }
-    early.push_back((call_id.to_string(), String::new()));
+    early.push_back((call_id.to_string(), sender.to_string()));
+}
+
+/// The group call is over (its `Ended` arrived, or this device sent it).
+fn call_known_over(call_id: &str) -> bool {
+    EARLY_HANGUP.lock().unwrap_or_else(|p| p.into_inner()).iter().any(|(id, fp)| id == call_id && fp == ENDED)
 }

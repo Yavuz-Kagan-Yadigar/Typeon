@@ -186,6 +186,8 @@ internal fun SettingsFragment.performLogout() {
     // Disk I/O off the UI thread; the restart hops back to main.
     val app = requireContext().applicationContext
     Thread {
+        // A linked device asks the root to revoke it, or the root keeps queueing sync for a wiped device.
+        try { P2PLib.announceLeaving() } catch (e: Throwable) { com.p2p.messenger.util.Log.w("Logout", "announceLeaving: ${e.message}") }
         com.p2p.messenger.util.LocalWipe.wipe(app)
         android.os.Handler(android.os.Looper.getMainLooper()).post { AppRestarter.restart(app) }
     }.start()
@@ -254,6 +256,7 @@ internal fun SettingsFragment.exportRecoveryTo(uri: Uri, passphrase: String) {
         } catch (e: Exception) {
             null
         }
+        val trimmed = try { P2PLib.lastRecoveryTrimmed() } catch (e: Throwable) { 0 }
         val ok = try {
             if (bytes != null && bytes.isNotEmpty()) {
                 resolver.openOutputStream(uri)?.use { out -> out.write(bytes); true } ?: false
@@ -265,11 +268,12 @@ internal fun SettingsFragment.exportRecoveryTo(uri: Uri, passphrase: String) {
         }
         withContext(Dispatchers.Main) {
             if (isAdded) {
-                Toast.makeText(
-                    requireContext(),
-                    if (ok) R.string.msg_recovery_export_success else R.string.error_recovery_export_failed,
-                    Toast.LENGTH_LONG
-                ).show()
+                val text = when {
+                    !ok -> getString(R.string.error_recovery_export_failed)
+                    trimmed > 0 -> getString(R.string.msg_recovery_export_trimmed, trimmed)
+                    else -> getString(R.string.msg_recovery_export_success)
+                }
+                Toast.makeText(requireContext(), text, Toast.LENGTH_LONG).show()
             }
         }
     }

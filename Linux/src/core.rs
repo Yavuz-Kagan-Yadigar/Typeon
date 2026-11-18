@@ -94,6 +94,11 @@ pub fn announce_offline() {
     api::announce_offline()
 }
 
+/// Logout: asks the phone to revoke this device; see `api::announce_leaving`.
+pub fn announce_leaving() {
+    api::announce_leaving()
+}
+
 /// Closes the database and stops the network; see `api::shutdown`.
 pub fn shutdown() {
     api::shutdown()
@@ -109,6 +114,11 @@ pub fn create_identity(device_name: &str) -> Result<String, String> {
 
 pub fn take_pending_secret_bundle() -> Vec<u8> {
     api::get_pending_secret_bundle()
+}
+
+/// Wipes the core's copy of the secret bundle once the vault holds it.
+pub fn clear_pending_secret_bundle() {
+    api::clear_pending_secret_bundle()
 }
 
 pub fn load_secret_bundle(bundle: &[u8]) -> bool {
@@ -137,6 +147,11 @@ pub fn own_identity_id() -> Result<String, String> {
 
 pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     api::export_recovery(passphrase)
+}
+
+/// After `export_recovery`: how many newest messages the file holds when it had to be cut; 0 when complete.
+pub fn last_recovery_trimmed() -> usize {
+    api::last_recovery_trimmed()
 }
 
 // --- network ---
@@ -226,6 +241,11 @@ pub fn process_qr_packet(data: &[u8]) -> Result<PairedPeer, String> {
 /// Empty until the swarm has a listen address — poll it.
 pub fn build_device_link_request() -> Vec<u8> {
     api::build_device_link_request()
+}
+
+/// The link QR is no longer on screen: a grant arriving now is refused.
+pub fn close_device_link_window() {
+    api::close_device_link_window()
 }
 
 /// The short code this device and the approving device both show while
@@ -955,6 +975,14 @@ pub fn call_request_keyframe(slot: u8) {
 
 pub fn call_take_keyframe_request() -> bool {
     api::call_take_keyframe_request()
+}
+
+pub fn call_request_avc(slot: u8) {
+    api::call_request_avc(slot)
+}
+
+pub fn call_take_avc_request() -> bool {
+    api::call_take_avc_request()
 }
 
 /// Send queue depth, 1 = 100 ms.

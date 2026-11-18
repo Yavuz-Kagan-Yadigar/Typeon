@@ -182,6 +182,9 @@ struct Bubble {
     /// to the time — matching Android's `txtEditedLabel`, which sits beside
     /// the timestamp rather than appended onto the message text itself.
     edited: Cell<bool>,
+    /// The message as it is now (live edits, deletes, reactions, status
+    /// applied): the context menu acts on this, not on the build-time copy.
+    entry: RefCell<Entry>,
 }
 
 /// Live, mutable state for one attachment bubble, plus the widgets `file_*`
@@ -249,6 +252,10 @@ struct ChatView {
     /// Ids we have already sent a read receipt for. Survives `reload()`, which
     /// clears `bubbles` — see `insert_entry`.
     seen_sent: RefCell<HashSet<String>>,
+    /// Received while nobody was looking: their receipts (and the local read
+    /// mark) wait for `flush_deferred_reads`.
+    seen_deferred: RefCell<Vec<Entry>>,
+    read_deferred: Cell<bool>,
     /// A shading pass is already scheduled (see `schedule_shading`).
     shade_pending: Cell<bool>,
         /// See `send_seen`. Whether a debounced read boundary is pending.
@@ -329,6 +336,30 @@ impl Drop for ChatView {
 impl ChatView {
     fn app(&self) -> &Rc<App> {
         &self.main.app
+    }
+
+    /// See the `connect_destroy` in `build`.
+    fn teardown(&self) {
+        if let Some(recording) = self.recording.borrow_mut().take() {
+            recording.cancel();
+        }
+        // A page fetch still in flight must not refill the view.
+        self.load_gen.set(self.load_gen.get() + 1);
+        let bubbles: Vec<Rc<Bubble>> = self.bubbles.borrow_mut().drain().map(|(_, bubble)| bubble).collect();
+        for bubble in bubbles {
+            let voice = bubble.attachment.as_ref().and_then(|state| state.voice.as_ref());
+            if let Some(media) = voice.and_then(|voice| voice.media.borrow_mut().take()) {
+                media.set_playing(false);
+                media.clear();
+            }
+        }
+        self.order.borrow_mut().clear();
+        while let Some(child) = self.messages.first_child() {
+            self.messages.remove(&child);
+        }
+        self.search_lower.borrow_mut().clear();
+        self.search_matches.borrow_mut().clear();
+        self.seen_deferred.borrow_mut().clear();
     }
 
     fn is_group(&self) -> bool {
@@ -442,6 +473,8 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         date_pill_hide: RefCell::new(None),
         bubbles: RefCell::new(HashMap::new()),
         seen_sent: RefCell::new(HashSet::new()),
+        seen_deferred: RefCell::new(Vec::new()),
+        read_deferred: Cell::new(false),
         watermark_pending: Cell::new(false),
         shade_pending: Cell::new(false),
         order: RefCell::new(Vec::new()),
@@ -561,7 +594,10 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
     {
         let view = view.clone();
         page.connect_hidden(move |_| {
-            view.mark_read_and_sync();
+            // Not when nobody is looking (see `flush_deferred_reads`).
+            if view.is_watched() || view.seen_deferred.borrow().is_empty() {
+                view.mark_read_and_sync();
+            }
             // A newer page may already have claimed it; only clear our own.
             let mut active = view.app().active_conversation.borrow_mut();
             if active.as_deref() == Some(view.conversation.key().as_str()) {
@@ -617,6 +653,18 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         main.app.subscribe(&page_content, move |event| view.handle_event(event));
     }
 
+    // The page is gone. Many handlers on this view's widgets hold the view
+    // itself, so it may never be dropped: release the heavy part (bubbles,
+    // textures, players, a recording) here instead of in `Drop`.
+    {
+        let view = Rc::downgrade(&view);
+        page_content.connect_destroy(move |_| {
+            if let Some(view) = view.upgrade() {
+                view.teardown();
+            }
+        });
+    }
+
     // Connection/typing subtitle.
     {
         let view = view.clone();
@@ -625,8 +673,9 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
             if page_content.root().is_none() {
                 return glib::ControlFlow::Break;
             }
-            // Hidden/minimized: skip the thread + core round-trip.
-            if !page_content.is_mapped() {
+            // Hidden, minimized or in the background: skip the thread + core
+            // round-trip.
+            if !page_content.is_mapped() || !view.app().window().is_some_and(|w| w.is_active()) {
                 return glib::ControlFlow::Continue;
             }
             view.refresh_subtitle();
@@ -647,6 +696,9 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
             {
                 view.set_typing(false);
             }
+            // The user is back (focus, unlock, shown from the tray): the
+            // receipts held while away go out now.
+            view.flush_deferred_reads();
             glib::ControlFlow::Continue
         });
     }

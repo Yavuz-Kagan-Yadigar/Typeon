@@ -25,7 +25,7 @@ install, so this file is the shared copy for opencode, and for Claude on Windows
 Toolchain (no sudo):
 - `rustup target add x86_64-pc-windows-gnullvm`
 - llvm-mingw (UCRT) unpacked as `~/tools/llvm-mingw-<date>-ucrt-ubuntu-22.04-x86_64`
-- MSYS2 **CLANG64** sysroot: `python3 -I Linux/packaging/windows/fetch-sysroot.py` → `~/tools/msys2-clang64` (MSYS2 no longer ships gtk4 for MINGW64)
+- MSYS2 **CLANG64** sysroot: `python3 -I Linux/packaging/windows/fetch-sysroot.py` → `~/tools/msys2-clang64` (MSYS2 no longer ships gtk4 for MINGW64). It installs the pinned set from `Linux/packaging/windows/sysroot.lock`; refresh it with `TYPEON_MSYS2_KEYRING=<msys2.kbx> python3 -I Linux/packaging/windows/fetch-sysroot.py --update-lock`, then commit the lock.
 
 Build: `Linux/packaging/windows/build.sh [--release]`. Portable zip: `Linux/packaging/windows/package.sh` → `Linux/target/typeon-windows-<ver>.zip` (exe + DLLs, GStreamer plugins, schemas, icons, ffmpeg.exe).
 
@@ -35,7 +35,7 @@ Windows specifics:
 - Tray icon: our own `Shell_NotifyIconW` icon (`src/win.rs`, exe icon resource 1 embedded by `Linux/build.rs`): left click opens, right click → Open / Quit. Notifications are balloons on that icon (`app::post_notification`). Never call gio `send_notification`/`withdraw_notification` directly: on Windows that creates GLib's second, menu-less tray icon. Closing the window hides it to the tray; main menu → Quit also exits.
 - Autostart: Settings → Network → "Start with Windows" (HKCU Run, `--background`).
 - Custom fonts: `pango_font_map_add_font_file` (`src/win.rs`).
-- Debug log: the package ships `bin\typeon-debug.exe` (debug build, has a console). From `cmd` in `Typeon\bin`: `set RUST_LOG=info` then `typeon-debug.exe 2> log.txt`. The release `typeon.exe` has no console.
+- Debug log: the package ships `bin\typeon-debug.exe` (a release build with `--features console`: a console window, no debug assertions or debug hooks) and `gdbus.exe`. From `cmd` in `Typeon\bin`: `set RUST_LOG=info` then `typeon-debug.exe 2> log.txt`. The release `typeon.exe` has no console.
 
 Testing on Windows: write findings to `Linux/packaging/windows/TEST-NOTES.md` (what you did, what broke, exact error text). The Linux side reads it after reboot.
 

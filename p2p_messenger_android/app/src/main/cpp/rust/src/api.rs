@@ -37,7 +37,10 @@ fn ok_result(result: Result<Result<(), String>, String>) -> String {
 pub fn init_database(files_dir: &str, storage_key: &[u8]) -> bool {
     let key: [u8; 32] = match storage_key.try_into() {
         Ok(k) => k,
-        Err(_) => return false,
+        Err(_) => {
+            log::error!("init_database: storage key is {} bytes, not 32", storage_key.len());
+            return false;
+        }
     };
     let key = zeroize::Zeroizing::new(key);
     let path = files_dir.to_string();
@@ -46,7 +49,17 @@ pub fn init_database(files_dir: &str, storage_key: &[u8]) -> bool {
         let mut core = core_lock();
         core.init_db(&path, &key).map_err(|e| e.to_string())
     });
-    matches!(result, Ok(Ok(_)))
+    match result {
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => {
+            log::error!("init_database failed: {}", e);
+            false
+        }
+        Err(e) => {
+            log::error!("init_database panicked: {}", e);
+            false
+        }
+    }
 }
 
 pub fn has_stored_identity() -> bool {
@@ -64,6 +77,15 @@ pub fn create_identity(device_name: &str) -> String {
 /// Not a destructive read, see JNI `getPendingSecretBundle`.
 pub fn get_pending_secret_bundle() -> Vec<u8> {
     catch_panic(|| crate::core_lock_read().pending_secret_bundle.clone().unwrap_or_default()).unwrap_or_default()
+}
+
+/// Wipes the pending secret bundle once the caller has stored it (see `get_pending_secret_bundle`).
+pub fn clear_pending_secret_bundle() {
+    let _ = catch_panic(|| {
+        let mut core = core_lock();
+        zeroize::Zeroize::zeroize(&mut core.pending_secret_bundle);
+        core.pending_secret_bundle = None;
+    });
 }
 
 pub fn load_secret_bundle(bundle_bytes: &[u8]) -> bool {
@@ -911,9 +933,31 @@ pub fn announce_offline() {
     })
     .unwrap_or(0);
     if sent > 0 {
-        // ponytail: fixed wait, not per-response tracking; over Tor one
-        // keepalive round trip on a live circuit is well under this.
-        std::thread::sleep(std::time::Duration::from_millis(2500));
+        // Until every goodbye is answered or failed (the poll loop drives the swarm), at most 2.5 s.
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+        while std::time::Instant::now() < until {
+            if crate::session::BYE_WAIT.lock().map_or(true, |w| w.is_empty()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+/// Logout on a linked device: tells the root this device is leaving, so it
+/// revokes it, and waits up to 3 s for the ack. The caller erases regardless.
+pub fn announce_leaving() {
+    let Some(id) = catch_panic(|| {
+        let _guard = RUNTIME.enter();
+        core_lock().announce_leaving()
+    })
+    .ok().flatten() else { return };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < until {
+        if !crate::core_lock_read().awaiting_confirmation.contains_key(&id) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -927,6 +971,22 @@ pub fn shutdown() {
         core.swarm = None;
         core.tor = None;
         core.db = None;
+        // The keys that open the stored data, and the decrypted copies, do not outlive the shutdown.
+        {
+            use zeroize::Zeroize;
+            core.pending_secret_bundle.zeroize();
+            core.skipped_key_encryption_key.zeroize();
+            core.history_key.zeroize();
+            core.archive_root_key.zeroize();
+        }
+        core.pending_secret_bundle = None;
+        core.skipped_key_encryption_key = None;
+        core.history_key = None;
+        core.archive_root_key = None;
+        core.own_device_keys.clear();
+        if let Some(dir) = core.app_files_dir.as_deref() {
+            let _ = std::fs::remove_dir_all(format!("{}/attachments/plain_cache", dir));
+        }
     });
 }
 
@@ -965,6 +1025,11 @@ pub fn revoke_contact_device(contact_id: &str, device_fingerprint: &str) -> Stri
 }
 
 // --- Recovery file ---
+
+/// After `export_recovery`: the number of newest messages the file holds when it had to be cut, 0 when complete.
+pub fn last_recovery_trimmed() -> usize {
+    crate::recovery::RECOVERY_TRIMMED.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     // The password protects the long-lived secret keys, so it must not stay in plain heap memory. Our copy is erased on drop. The core's own
@@ -1139,6 +1204,16 @@ pub fn call_request_keyframe(slot: u8) {
 
 pub fn call_take_keyframe_request() -> bool {
     catch_panic(crate::call::media_take_keyframe_request).unwrap_or(false)
+}
+
+/// This device's HEVC decoder for `slot` failed: ask that sender for H.264.
+pub fn call_request_avc(slot: u8) {
+    let _ = catch_panic(move || crate::call::media_request_avc(slot));
+}
+
+/// Some receiver asked for H.264 since the last call.
+pub fn call_take_avc_request() -> bool {
+    catch_panic(crate::call::media_take_avc_request).unwrap_or(false)
 }
 
 /// Send queue depth in 100 ms units — the congestion signal.
@@ -1340,10 +1415,6 @@ pub fn sticker_first_frame(id: &str) -> String {
 pub fn attachment_jxl_frames(file_id: &str) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), String> {
     let id = file_id.to_string();
     catch_panic(move || {
-        let path = crate::attachment_original_path_unlocked(&id)?;
-        let frames = crate::attachments::jxl_frames_rgba(std::path::Path::new(&path));
-        // The original is a plain copy in plain_cache: not kept around.
-        let _ = std::fs::remove_file(&path);
-        frames
+        crate::attachment_jxl_frames_unlocked(&id)
     })?
 }

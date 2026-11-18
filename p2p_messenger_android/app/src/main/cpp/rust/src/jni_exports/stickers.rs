@@ -58,10 +58,12 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_encodeJxlAnimated<'local>(
             }
             let Ok(element) = env.get_object_array_element(&frames, i as i32) else { bad = true; break };
             let array = JByteArray::from(element);
-            let bytes = jbytearray_to_vec(&mut env, &array);
+            let bytes = jbytearray_exact(&mut env, &array, frame_len);
             let _ = env.delete_local_ref(array);
-            bad = bytes.len() as u64 != frame_len;
-            pixels.push(bytes);
+            match bytes {
+                Some(b) => pixels.push(b),
+                None => bad = true,
+            }
         }
         if bad {
             let _ = env.exception_clear();
@@ -119,10 +121,12 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_importStickerFrames<'local>
         }
         let Ok(element) = env.get_object_array_element(&frames, i as i32) else { bad = true; break };
         let array = JByteArray::from(element);
-        let bytes = jbytearray_to_vec(&mut env, &array);
+        let bytes = jbytearray_exact(&mut env, &array, frame_len);
         let _ = env.delete_local_ref(array);
-        bad = bytes.len() as u64 != frame_len;
-        pixels.push(bytes);
+        match bytes {
+            Some(b) => pixels.push(b),
+            None => bad = true,
+        }
     }
     let result = if bad {
         let _ = env.exception_clear();
@@ -179,6 +183,19 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteSticker<'local>(mut e
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         core_lock().delete_sticker(&id, true).map(|()| "OK".to_string())
+    });
+    sticker_reply(&mut env, result)
+}
+
+/// Removes several stickers (`ids_json`: JSON array of ids) with one echo to my other devices. "OK", or the
+/// first error after trying them all.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteStickers<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, ids_json: JString<'local>) -> jstring {
+    let ids_json: String = jstr(&mut env, &ids_json).unwrap_or_default();
+    let result = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        let ids: Vec<String> = serde_json::from_str(&ids_json).map_err(|e| format!("Bad id list: {e}"))?;
+        core_lock().delete_stickers(&ids, true).map(|()| "OK".to_string())
     });
     sticker_reply(&mut env, result)
 }

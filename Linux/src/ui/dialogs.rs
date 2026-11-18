@@ -133,6 +133,7 @@ pub fn chat_context_menu(
                 let main = main.clone();
                 let contact_id = contact_id.clone();
                 let name = name.clone();
+                let conversation = conversation.clone();
                 entries.push((
                     "user-trash-symbolic",
                     "Clear chat history".to_string(),
@@ -140,6 +141,7 @@ pub fn chat_context_menu(
                     Box::new(move || {
                         let main = main.clone();
                         let contact_id = contact_id.clone();
+                        let conversation = conversation.clone();
                         confirm(
                             &main.app.clone(),
                             "Clear this chat?",
@@ -153,12 +155,16 @@ pub fn chat_context_menu(
                             move || {
                                 let main = main.clone();
                                 let contact_id = contact_id.clone();
+                                let conversation = conversation.clone();
                                 // Core calls take the shared core lock the poll
                                 // thread can hold for seconds — off the GTK thread.
                                 crate::app::run_in_background(
                                     move || core::clear_chat_history(&contact_id),
                                     move |result| match result {
-                                        Ok(()) => main.app.toast("Chat history cleared."),
+                                        Ok(()) => {
+                                            main.reload_if_open(&conversation);
+                                            main.app.toast("Chat history cleared.");
+                                        }
                                         Err(error) => main.app.toast(&error),
                                     },
                                 );
@@ -171,6 +177,7 @@ pub fn chat_context_menu(
                 let main = main.clone();
                 let contact_id = contact_id.clone();
                 let name = name.clone();
+                let conversation = conversation.clone();
                 entries.push((
                     "edit-delete-symbolic",
                     "Delete contact".to_string(),
@@ -178,6 +185,7 @@ pub fn chat_context_menu(
                     Box::new(move || {
                         let main = main.clone();
                         let contact_id = contact_id.clone();
+                        let conversation = conversation.clone();
                         confirm(
                             &main.app.clone(),
                             "Delete this contact?",
@@ -191,11 +199,13 @@ pub fn chat_context_menu(
                             move || {
                                 let main = main.clone();
                                 let contact_id = contact_id.clone();
+                                let conversation = conversation.clone();
                                 crate::app::run_in_background(
                                     move || core::delete_contact(&contact_id),
                                     move |result| match result {
                                         Ok(()) => {
-                                            main.close_conversation();
+                                            main.close_if_open(&conversation);
+                                            main.refresh_chats();
                                             main.app.toast("Contact deleted.");
                                         }
                                         Err(error) => main.app.toast(&error),
@@ -211,6 +221,7 @@ pub fn chat_context_menu(
             let main = main.clone();
             let group_id = group_id.clone();
             let name = name.clone();
+            let conversation = conversation.clone();
             // The founder cannot leave — for them the only exit is deleting the
             // group for everyone (see the core's `leave_group`).
             let label = if is_founder {
@@ -225,12 +236,13 @@ pub fn chat_context_menu(
                 Box::new(move || {
                     let main = main.clone();
                     let group_id = group_id.clone();
+                    let conversation = conversation.clone();
                     let body = if is_founder {
                         format!("\"{}\" is removed for every member. This cannot be undone.", name)
                     } else {
                         format!(
                             "You leave \"{}\". The founder is told, and the group disappears from \
-                             this device.",
+                             all your linked devices.",
                             name
                         )
                     };
@@ -243,6 +255,7 @@ pub fn chat_context_menu(
                         move || {
                             let main = main.clone();
                             let group_id = group_id.clone();
+                            let conversation = conversation.clone();
                             crate::app::run_in_background(
                                 move || if is_founder {
                                     core::delete_group(&group_id)
@@ -251,7 +264,8 @@ pub fn chat_context_menu(
                                 },
                                 move |result| match result {
                                     Ok(()) => {
-                                        main.close_conversation();
+                                        main.close_if_open(&conversation);
+                                        main.refresh_chats();
                                         main.app.toast("Done.");
                                     }
                                     Err(error) => main.app.toast(&error),
@@ -688,11 +702,20 @@ pub fn pending_messages(app: &Rc<App>) {
                         let app = app.clone();
                         let message_id = message.message_id.clone();
                         cancel.connect_clicked(move |_| {
-                            let app = app.clone();
-                            let message_id = message_id.clone();
-                            crate::app::run_in_background(
-                                move || core::cancel_pending_message(&message_id),
-                                move |_| app.toast("Message abandoned."),
+                            let (app_done, message_id) = (app.clone(), message_id.clone());
+                            confirm(
+                                &app,
+                                "Give up on this message?",
+                                "It is removed from the queue and never sent.",
+                                "Give up",
+                                true,
+                                move || {
+                                    let (app, message_id) = (app_done.clone(), message_id.clone());
+                                    crate::app::run_in_background(
+                                        move || core::cancel_pending_message(&message_id),
+                                        move |_| app.toast("Message abandoned."),
+                                    );
+                                },
                             );
                         });
                     }
@@ -741,35 +764,83 @@ pub fn pending_messages(app: &Rc<App>) {
 
 // --- device-change alerts (spec 2.2, TOFU) ---
 
-/// Polls for pending "this contact is using a new device" alerts and shows one
+/// Shows pending "this contact is using a new device" alerts, one
 /// modal at a time. Tracking which fingerprint is on screen matters: without it
 /// a user who steps away accumulates a stack of identical non-dismissable
 /// dialogs, and a peer could deliberately spam the flow — which would train
 /// people to click through the one security prompt that must not be reflexive.
 pub fn watch_device_alerts(app: &Rc<App>) {
-    let showing: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    let app = app.clone();
-    let in_flight = Rc::new(std::cell::Cell::new(false));
-    glib::timeout_add_seconds_local(5, move || {
-        // The core read runs off the GTK thread (shared core lock); one at a
-        // time, and none while an alert is on screen.
-        // Nothing about contacts may show over the lock page.
-        if app.locked.get() {
-            return glib::ControlFlow::Continue;
+    let watch = Rc::new(AlertWatch {
+        app: app.clone(),
+        showing: RefCell::new(None),
+        in_flight: std::cell::Cell::new(false),
+        again: std::cell::Cell::new(false),
+        retry_armed: std::cell::Cell::new(false),
+    });
+    // Driven by the core's `device_alert` event, plus one look now for
+    // alerts left from an earlier run. No timer while nothing is pending.
+    check_device_alerts(&watch);
+    if let Some(window) = app.window() {
+        app.subscribe(&window, move |event| {
+            if event.kind == "device_alert" {
+                check_device_alerts(&watch);
+            }
+        });
+    }
+}
+
+struct AlertWatch {
+    app: Rc<App>,
+    /// The alert on screen, if any.
+    showing: RefCell<Option<String>>,
+    in_flight: std::cell::Cell<bool>,
+    /// An event came while a read was in flight: read again after it.
+    again: std::cell::Cell<bool>,
+    /// A retry timer is waiting for the idle lock to lift.
+    retry_armed: std::cell::Cell<bool>,
+}
+
+fn check_device_alerts(watch: &Rc<AlertWatch>) {
+    // Nothing about contacts may show over the lock page: look again once
+    // it is gone.
+    if watch.app.locked.get() {
+        if !watch.retry_armed.replace(true) {
+            let watch = watch.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
+                watch.retry_armed.set(false);
+                check_device_alerts(&watch);
+            });
         }
-        if showing.borrow().is_some() || in_flight.replace(true) {
-            return glib::ControlFlow::Continue;
+        return;
+    }
+    // One alert on screen at a time; the next one is read after its answer.
+    if watch.showing.borrow().is_some() {
+        return;
+    }
+    if watch.in_flight.replace(true) {
+        watch.again.set(true);
+        return;
+    }
+    // The core read runs off the GTK thread (shared core lock).
+    let watch = watch.clone();
+    crate::app::run_in_background(core::list_pending_device_alerts, move |alerts| {
+        watch.in_flight.set(false);
+        if watch.again.replace(false) {
+            check_device_alerts(&watch);
+            return;
         }
-        let (app, showing, in_flight) = (app.clone(), showing.clone(), in_flight.clone());
-        crate::app::run_in_background(core::list_pending_device_alerts, move |alerts| {
-        in_flight.set(false);
+        let app = watch.app.clone();
         let Some(alert) = alerts.into_iter().next() else { return };
         let Some(window) = app.window() else { return };
-        if showing.borrow().is_some() {
+        if watch.showing.borrow().is_some() {
+            return;
+        }
+        if app.locked.get() {
+            check_device_alerts(&watch);
             return;
         }
 
-        *showing.borrow_mut() = Some(alert.new_device_fingerprint.clone());
+        *watch.showing.borrow_mut() = Some(alert.new_device_fingerprint.clone());
 
         let body = format!(
             "{} is now messaging from a device you have not seen before.\n\nNew safety number: \
@@ -795,17 +866,13 @@ pub fn watch_device_alerts(app: &Rc<App>) {
         dialog.set_close_response("reject");
         dialog.set_response_appearance("reject", adw::ResponseAppearance::Destructive);
 
-        let app_for_response = app.clone();
-        let showing_for_response = showing.clone();
         let fingerprint = alert.new_device_fingerprint.clone();
         dialog.connect_response(None, move |_, response| {
             // A security decision must not take the core lock on the GTK
-            // thread: the same poll round the watcher above worries about
-            // would freeze exactly this dialog.
+            // thread: a poll round would freeze exactly this dialog.
             let accepting = response == "accept";
             let fingerprint = fingerprint.clone();
-            let app_for_response = app_for_response.clone();
-            let showing_for_response = showing_for_response.clone();
+            let watch = watch.clone();
             crate::app::run_in_background(
                 move || {
                     if accepting {
@@ -815,20 +882,45 @@ pub fn watch_device_alerts(app: &Rc<App>) {
                     }
                 },
                 move |()| {
-                    app_for_response.toast(if accepting {
+                    watch.app.toast(if accepting {
                         "New device accepted."
                     } else {
                         "New device rejected."
                     });
-                    app_for_response.refresh_caches();
-                    *showing_for_response.borrow_mut() = None;
+                    watch.app.refresh_caches();
+                    *watch.showing.borrow_mut() = None;
+                    // More may be queued behind this one.
+                    check_device_alerts(&watch);
                 },
             );
         });
         dialog.present();
-        });
-        glib::ControlFlow::Continue
     });
+}
+
+/// Empties `attachments/plain_cache` (decrypted copies), except the desktop's
+/// own live temp files: a voice capture (`voice-*`), a scrubbed outgoing copy
+/// (`out-*`) and the core's sticker conversion (`.sticker-*`) changed in the
+/// last 15 minutes. Deleting those would break a recording or a send in
+/// progress. Blocking: call it off the GTK thread.
+pub fn clear_decrypted_cache() {
+    let dir = crate::data_directory().join("attachments/plain_cache");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let live = ["voice-", "out-", ".sticker-"].iter().any(|prefix| name.starts_with(prefix))
+            && entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age < std::time::Duration::from_secs(15 * 60));
+        if live {
+            continue;
+        }
+        let path = entry.path();
+        let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+    }
 }
 
 /// Settings → Storage, as on Android: what this device keeps, and per chat
@@ -884,17 +976,7 @@ pub fn storage(app: &Rc<App>) {
                     let again = again.clone();
                     clear.connect_clicked(move |_| {
                         let again = again.clone();
-                        crate::app::run_in_background(
-                            || {
-                                let dir = crate::data_directory().join("attachments/plain_cache");
-                                if let Ok(entries) = std::fs::read_dir(&dir) {
-                                    for path in entries.flatten().map(|e| e.path()) {
-                                        let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
-                                    }
-                                }
-                            },
-                            move |()| again(),
-                        );
+                        crate::app::run_in_background(clear_decrypted_cache, move |()| again());
                     });
                 }
                 cache.add_suffix(&clear);
@@ -921,8 +1003,25 @@ pub fn storage(app: &Rc<App>) {
                                 let (app, chat, again) = (app2.clone(), chat.clone(), again.clone());
                                 crate::app::run_in_background(
                                     move || {
-                                        let files = if chat.kind == "group" { core::list_group_attachments_brief(&chat.id) } else { core::list_attachments_brief(&chat.id) };
-                                        let ids: Vec<String> = files.into_iter().filter(|f| f.status == "complete").map(|f| f.file_id).collect();
+                                        // Paged: one listing is capped at 500 rows. A page
+                                        // never splits a millisecond, so the oldest row's
+                                        // time is a safe cursor.
+                                        let mut ids: Vec<String> = Vec::new();
+                                        let mut cursor = u64::MAX;
+                                        loop {
+                                            let files = if chat.kind == "group" {
+                                                core::list_group_attachments_before(&chat.id, cursor, 500)
+                                            } else {
+                                                core::list_attachments_before(&chat.id, cursor, 500)
+                                            };
+                                            let Some(oldest) = files.iter().map(|f| f.created_at).min() else { break };
+                                            let full = files.len() >= 500;
+                                            ids.extend(files.into_iter().filter(|f| f.status == "complete").map(|f| f.file_id));
+                                            if !full || oldest >= cursor {
+                                                break;
+                                            }
+                                            cursor = oldest;
+                                        }
                                         core::remove_local_attachments(&ids)
                                     },
                                     move |result| {

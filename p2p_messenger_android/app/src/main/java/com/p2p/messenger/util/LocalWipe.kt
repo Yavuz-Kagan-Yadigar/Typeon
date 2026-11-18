@@ -18,6 +18,26 @@ object LocalWipe {
 
     fun wipe(context: Context) {
         val app = context.applicationContext
+        // The poll thread, arti and the service still run in this process and
+        // can write files (or re-create a Keystore key) after the delete below.
+        // The marker makes the next process start wipe again before anything opens.
+        try { marker(app).createNewFile() } catch (e: Exception) { com.p2p.messenger.util.Log.w("LocalWipe", "marker: ${e.message}") }
+        deleteAll(app)
+    }
+
+    /** Called first thing in `P2PApplication.onCreate`: finishes a wipe whose process exited. */
+    fun finishPending(context: Context) {
+        val app = context.applicationContext
+        val m = marker(app)
+        if (!m.exists()) return
+        deleteAll(app)
+        m.delete()
+    }
+
+    /** Outside filesDir, the caches and shared_prefs, so [deleteAll] keeps it. */
+    private fun marker(app: Context) = File(app.applicationInfo.dataDir, "wipe_pending")
+
+    private fun deleteAll(app: Context) {
         // Everything the app stores lives under filesDir: database, wrapped
         // keys, libp2p key, attachments, arti state, wallpaper, fonts.
         app.filesDir.listFiles()?.forEach {

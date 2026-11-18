@@ -96,6 +96,129 @@ pub(crate) struct KeepAliveState {
     pub(crate) quiet_capable: bool,
 }
 
+// --- Request size caps ---
+//
+// The library's `cbor` codec reads up to 1 MiB of every inbound request into memory before the application sees it, on up to
+// 100 streams per connection and behaviour. A peer that never finishes its requests could make us hold hundreds of MiB.
+// `Capped` keeps the cbor wire format (it calls the same codec) but stops reading a request at `MAX` bytes. Used where the
+// legitimate request is small; envelopes and server RPC need the full 1 MiB.
+
+/// Names the library's cbor codec, whose module is private.
+pub(crate) trait HasCodec {
+    type Codec;
+}
+impl<C> HasCodec for request_response::Behaviour<C>
+where
+    C: request_response::Codec + Clone + Send + 'static,
+{
+    type Codec = C;
+}
+pub(crate) type CborCodec<Req, Resp> = <request_response::cbor::Behaviour<Req, Resp> as HasCodec>::Codec;
+
+/// See above. The methods are written as `#[async_trait]` expands them (the `Codec` trait is declared with it).
+/// `RESP`: the same cap on a response (default none).
+pub(crate) struct Capped<C, const MAX: u64, const RESP: u64 = { u64::MAX }> {
+    inner: C,
+}
+impl<C: Default, const MAX: u64, const RESP: u64> Default for Capped<C, MAX, RESP> {
+    fn default() -> Self {
+        Capped { inner: C::default() }
+    }
+}
+impl<C: Clone, const MAX: u64, const RESP: u64> Clone for Capped<C, MAX, RESP> {
+    fn clone(&self) -> Self {
+        Capped { inner: self.inner.clone() }
+    }
+}
+
+type CodecFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<T>> + Send + 'a>>;
+
+impl<C, const MAX: u64, const RESP: u64> request_response::Codec for Capped<C, MAX, RESP>
+where
+    C: request_response::Codec + Send,
+    C::Protocol: Sync,
+{
+    type Protocol = C::Protocol;
+    type Request = C::Request;
+    type Response = C::Response;
+
+    fn read_request<'life0, 'life1, 'life2, 'async_trait, T>(
+        &'life0 mut self,
+        protocol: &'life1 Self::Protocol,
+        io: &'life2 mut T,
+    ) -> CodecFuture<'async_trait, Self::Request>
+    where
+        T: futures::AsyncRead + Unpin + Send + 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let mut limited = futures::AsyncReadExt::take(io, MAX);
+            self.inner.read_request(protocol, &mut limited).await
+        })
+    }
+
+    fn read_response<'life0, 'life1, 'life2, 'async_trait, T>(
+        &'life0 mut self,
+        protocol: &'life1 Self::Protocol,
+        io: &'life2 mut T,
+    ) -> CodecFuture<'async_trait, Self::Response>
+    where
+        T: futures::AsyncRead + Unpin + Send + 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let mut limited = futures::AsyncReadExt::take(io, RESP);
+            self.inner.read_response(protocol, &mut limited).await
+        })
+    }
+
+    fn write_request<'life0, 'life1, 'life2, 'async_trait, T>(
+        &'life0 mut self,
+        protocol: &'life1 Self::Protocol,
+        io: &'life2 mut T,
+        req: Self::Request,
+    ) -> CodecFuture<'async_trait, ()>
+    where
+        T: futures::AsyncWrite + Unpin + Send + 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.write_request(protocol, io, req).await })
+    }
+
+    fn write_response<'life0, 'life1, 'life2, 'async_trait, T>(
+        &'life0 mut self,
+        protocol: &'life1 Self::Protocol,
+        io: &'life2 mut T,
+        res: Self::Response,
+    ) -> CodecFuture<'async_trait, ()>
+    where
+        T: futures::AsyncWrite + Unpin + Send + 'async_trait,
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.write_response(protocol, io, res).await })
+    }
+}
+
+/// `KeepAliveRequest` is a flag.
+pub(crate) type KeepAliveCodec = Capped<CborCodec<KeepAliveRequest, KeepAliveResponse>, 1024>;
+/// `ACK_BATCH_MAX` (256) message ids of about 40 bytes.
+pub(crate) type AckCodec = Capped<CborCodec<AckBatchRequest, AckBatchResponse>, { 64 * 1024 }>;
+/// A file id and a chunk index. The answer: one chunk (at most a server blob chunk) plus framing, not the codec's 10 MiB default,
+/// so a source cannot make 40 requests in flight buffer 400 MiB.
+pub(crate) type FileChunkCodec = Capped<CborCodec<FileChunkRequest, FileChunkResponse>, 4096, { crate::server_proto::MAX_BLOB_CHUNK_BYTES as u64 + 4096 }>;
+
 // --- libp2p combined behaviour ---
 //
 // Kademlia (DHT) discovery. The Identify protocol is REQUIRED for Kademlia: it lets Kademlia learn the listen addresses of connected peers
@@ -114,9 +237,9 @@ pub(crate) struct P2PBehaviour {
     /// It is NOT detected by waiting for a write error, which could take minutes. The stock `libp2p::ping::Behaviour` is NOT used: it applies one
     /// fixed interval to ALL connections. This custom `request_response` protocol instead widens the probe interval once the connection is stable
     /// (see `KEEPALIVE_STABILIZE_MS`), which saves radio and battery.
-    pub(crate) keepalive: request_response::cbor::Behaviour<KeepAliveRequest, KeepAliveResponse>,
+    pub(crate) keepalive: request_response::Behaviour<KeepAliveCodec>,
     /// see `ACK_PROTOCOL`.
-    pub(crate) acks: request_response::cbor::Behaviour<AckBatchRequest, AckBatchResponse>,
+    pub(crate) acks: request_response::Behaviour<AckCodec>,
     /// see `ENVELOPE_PROTOCOL`.
     pub(crate) envelopes: request_response::cbor::Behaviour<EnvelopeRequest, EnvelopeResponse>,
     /// Call media streams (`call::MEDIA_PROTOCOL`, and the server relay) —
@@ -124,7 +247,7 @@ pub(crate) struct P2PBehaviour {
     pub(crate) stream: libp2p_stream::Behaviour,
     /// File attachment chunk transfer. Unlike gossipsub, it sends a request/response (RPC-like) directly to one target `PeerId`. Moving a 4 GB
     /// file over gossipsub (a pub/sub network designed for small, frequent messages) is impractical. See the attachments.rs module note.
-    pub(crate) file_chunks: request_response::cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
+    pub(crate) file_chunks: request_response::Behaviour<FileChunkCodec>,
     /// Connectivity through a relay, for reaching peers that cannot be dialed directly (different network, or behind NAT). This device can use a
     /// relay to reach them. It is always enabled on every device.
     pub(crate) relay_client: relay::client::Behaviour,

@@ -30,7 +30,7 @@ impl P2PCore {
         let rec = self.servers.iter().find(|r| r.server_id == id)?;
         let addr: Multiaddr = rec.address.split(',')
             .map(str::trim)
-            .find(|a| a.contains(".onion") || a.contains("/onion3/"))?
+            .find(|a| a.contains(".onion"))?
             .parse().ok()?;
         Some(if extract_peer_id(&addr).is_some() { addr } else { addr.with(MultiaddrProtocol::P2p(*peer)) })
     }
@@ -77,13 +77,8 @@ impl P2PCore {
         }
     }
 
-    /// Dials a peer directly (`direct_addr`, if any) and, for each known relay candidate,
-    /// through a `/p2p-circuit/` address, all at once. libp2p handles several concurrent
-    /// dials to one PeerId well: the first success wins and the rest are cancelled.
-    /// Compared with "try direct, then the relay on failure", this has lower latency
-    /// (the relay attempt starts without waiting for a failed direct timeout) and needs
-    /// no separate retry state machine. During a bulk transfer it opens extra connections
-    /// to the peers involved and closes them when done (see `BULK_PARALLEL_CONNECTIONS`).
+    /// During a bulk transfer, opens extra connections to the peers involved and closes
+    /// them when done (see `BULK_PARALLEL_CONNECTIONS`).
     ///
     /// Called from `poll_events` every turn. It has its own time gate.
     pub(crate) fn manage_bulk_connections(&mut self) {
@@ -267,6 +262,10 @@ impl P2PCore {
             .unwrap_or(attachments::FILE_CHUNK_SIZE)
     }
 
+    /// Dials a peer at `direct_addr` (if any) and, through each connected relay, at a
+    /// `/p2p-circuit/` address, all at once. Plain address dials use
+    /// `PeerCondition::Always`, so they run beside a peer-id dial already in flight;
+    /// the first connection wins.
     pub(crate) fn dial_with_relay_fallback(&mut self, target_peer_id: PeerId, direct_addr: Option<Multiaddr>) {
         let Some(swarm) = &mut self.swarm else { return };
         if let Some(addr) = direct_addr {
@@ -378,7 +377,7 @@ impl P2PCore {
         // a dial storm. Only the "known and active" filter stays here. It is intentionally NOT
         // in `ensure_connected`, so it belongs to this caller.
         let fps: Vec<String> = self.known_remote_devices.values()
-            .filter(|d| d.is_active)
+            .filter(|d| d.is_active && !self.is_blocked(&d.identity_id))
             .map(|d| d.device_fingerprint.clone())
             .collect();
         // Not forced even in the fast window. `reconnect_all_known_now` already forced one dial

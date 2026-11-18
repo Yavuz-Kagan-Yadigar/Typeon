@@ -43,7 +43,7 @@ use futures::StreamExt as _;
 use libp2p::request_response::{self, ProtocolSupport, ResponseChannel};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
-use libp2p::{identify, noise, relay, tcp, yamux, PeerId, StreamProtocol, Swarm};
+use libp2p::{identify, noise, relay, yamux, PeerId, StreamProtocol, Swarm};
 use log::{debug, error, info, warn};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -98,6 +98,18 @@ const CHUNKS_PER_MINUTE: u32 = 600;
 const MAX_BLOBS_PER_ENROLLMENT: i64 = 10_000;
 /// Minimum quota charged for a `BlobPut` chunk: its row, even when no new bytes are stored.
 const BLOB_CHUNK_MIN_CHARGE: u64 = 64;
+/// How many strides past the current file end a `BlobPut` may write. Covers the client's upload pipeline
+/// (`BLOB_WINDOW_MAX` = 40). Further out is refused, so one request cannot charge (or zero-fill) gigabytes.
+const BLOB_PUT_AHEAD_CHUNKS: u64 = 64;
+/// One depositor may hold at most `max_mail_bytes / MAIL_BOX_SHARE` in one box. A reader that never comes back
+/// then costs the depositor only this share, not its mail to every other box.
+const MAIL_BOX_SHARE: u64 = 8;
+/// What one depositor may put into one box per `DEPOSIT_WINDOW_MS`, acknowledged or not.
+const DEPOSIT_BYTES_PER_BOX_WINDOW: u64 = 16 * 1024 * 1024;
+const DEPOSIT_WINDOW_MS: u64 = 60 * 60 * 1000;
+/// Archive and blob writes stop at `budget - budget / MAIL_RESERVE_DIVISOR`. The rest stays for mail, so a full
+/// archive or blob store does not stop store-and-forward.
+const MAIL_RESERVE_DIVISOR: u64 = 10;
 
 /// Call-media relay budget per client: bytes per `RELAY_WINDOW_MS`. About 6.7 Mbit/s, several times a 480p
 /// video call, so it only stops a flood. Relay frames skip `check_rate`. A call sends about 30 frames per second,
@@ -127,6 +139,15 @@ fn mono_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+/// Milliseconds since boot, counting suspend (`CLOCK_BOOTTIME`, read from `/proc/uptime`). `Instant` stops during
+/// suspend, so against the wall clock every suspended hour looked like a clock step. Falls back to `mono_ms`.
+fn boot_ms() -> u64 {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+        .map_or_else(mono_ms, |secs| (secs * 1000.0) as u64)
+}
+
 /// A wall-clock step larger than this is not trusted at once. The TTL sweep waits `CLOCK_JUMP_HOLD_MS` first.
 /// (A clock set a month ahead once deleted all mail and blobs in one sweep.)
 const CLOCK_JUMP_MS: i64 = 24 * 60 * 60 * 1000;
@@ -136,6 +157,10 @@ const CLOCK_JUMP_HOLD_MS: u64 = 60 * 60 * 1000;
 /// so only a total cap stops a connection flood.
 const MAX_INBOUND_CONNECTIONS: u32 = 512;
 const MAX_CONNECTIONS_PER_PEER: u32 = 8;
+/// Request streams per connection and protocol, inbound and outbound together (libp2p default 100). Each inbound one
+/// buffers up to the codec cap (1 MiB) before any enrollment check. Well above the clients' upload and download
+/// windows (40 chunks each) plus the other requests and the server's own pushes.
+const MAX_STREAMS_PER_CONNECTION: usize = 64;
 /// A connected peer without an active enrollment is cut after this long. Otherwise it held one of the
 /// `MAX_INBOUND_CONNECTIONS` slots indefinitely.
 const UNENROLLED_GRACE_MS: u64 = 60_000;
@@ -162,7 +187,7 @@ const ENROLL_VERIFIES_PER_PEER: u32 = 4;
 /// `Enroll` requests (the join code is public) must not lock enrolled devices out of rebinding. `Rebind` needs
 /// a live enrollment first, so fresh PeerIds cannot drain this pool.
 const REBIND_VERIFIES_PER_MINUTE: u32 = 120;
-/// `Register` proof checks per `RATE_WINDOW_MS`, server-wide: no global cap. A `Register` needs an enrollment
+/// `Register` proof checks per `RATE_WINDOW_MS`, server-wide: no global cap (only the per-peer share below). A `Register` needs an enrollment
 /// bound to one PeerId, so the per-peer share times `max_enrollments` already bounds the CPU. A global pool
 /// once let four enrollments lock every other device out of new mailboxes.
 const REGISTER_VERIFIES_PER_MINUTE: u32 = u32::MAX;
@@ -191,7 +216,8 @@ const MAX_PUBLIC_ENROLLMENTS_PER_HOUR: i64 = 60;
 const PUBLIC_CODE_TTL_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 /// Default `ServerConfig::max_enrollments`.
 pub const DEFAULT_MAX_ENROLLMENTS: u32 = 16;
-/// An active enrollment not seen for this long is removed by `maybe_sweep`.
+/// An active enrollment not seen for this long is put to sleep by `maybe_sweep` (its reader rows go, the row stays).
+/// `Store::prune_dead_rows` deletes the row once it has been idle for `ARCHIVE_TTL_MS` and owns nothing.
 const ENROLLMENT_IDLE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
@@ -213,7 +239,8 @@ pub struct ServerConfig {
     pub limits: ServerLimits,
     /// Total disk budget the server may use (see `total_budget_exceeded`). A soft ceiling: it can
     /// overshoot by one 5-second cache window (`TOTAL_CACHE_MS`). `None` means unlimited. The default is
-    /// 64 times the per-device quotas. The Android server app derives it from the device's real free space.
+    /// `DEFAULT_MAX_ENROLLMENTS` times the per-device quotas. Set it with `apply_storage_budget`. The Android server
+    /// app derives it from the device's real free space.
     pub total_storage_budget_bytes: Option<u64>,
     /// Maximum active enrollments. A new device is refused above it.
     pub max_enrollments: u32,
@@ -279,9 +306,11 @@ pub struct ServerCore {
     /// Which mailboxes each enrollment is listening on, for pushing `Notify`. In memory only. It is a live
     /// view of connected peers, not the persistent `mailboxes` table.
     live_interest: HashMap<PeerId, HashSet<String>>,
-    /// Peers that owe a `Fetch`, with the `mono_ms` of the last `Notify` sent (0 = send one on the next tick).
-    /// One is sent per `NOTIFY_RESEND_MS`, repeated until the peer fetches. See `resend_notifies`.
-    notified: HashMap<PeerId, u64>,
+    /// Peers that owe a `Fetch`: (`mono_ms` of the last `Notify` sent, 0 = send one on the next tick; unanswered
+    /// resends). Repeated with a doubling pause until the peer fetches. See `resend_notifies`.
+    notified: HashMap<PeerId, (u64, u32)>,
+    /// (depositor, mailbox) to (window start `mono_ms`, bytes deposited). See `DEPOSIT_BYTES_PER_BOX_WINDOW`.
+    deposit_window: HashMap<(PeerId, String), (u64, u64)>,
     /// `mono_ms` of the last sweep. `None` means sweep on the first tick.
     last_sweep: Option<u64>,
     /// (wall ms, mono ms) pair the wall clock is checked against, and since when (mono ms) it has been off. See
@@ -424,32 +453,34 @@ impl ServerCore {
 
         // Tor: the server's own onion service, the ONLY way it can be reached (the listener is on loopback only).
         // If Tor cannot start, fail: a server no client can reach would otherwise look like it is running.
-        let tor = p2p_messenger::tor::TorHandle::launch(
+        let (tor, onion_listen) = p2p_messenger::tor::TorHandle::launch(
             &config.data_dir.join("arti_state").to_string_lossy(),
             &config.data_dir.join("arti_cache").to_string_lossy(),
             TOR_LIBP2P_PORT,
         )
         .map_err(|e| format!("Tor could not be started: {e}"))?;
         let node_mode = config.node_mode;
+        let listen_addr = onion_listen.listen_addr();
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
-            // Onion-only. The TCP transport is kept only for incoming onion-bridge connections. Every outgoing
-            // TCP (clearnet) dial is rejected with `DialReject`. The server never dials out on its own (store-and-
-            // forward works only when clients connect to it, and there is no Tor transport). This also stops kad,
-            // autonat or relay behaviour from dialing a peer's real IP over clearnet by accident.
-            .with_other_transport(|keypair| {
+            // Onion-only. The only transport is `OnionListen`: inbound onion streams reach the swarm in-process,
+            // with no socket any local app could connect to. It cannot dial, so the server never dials out (store-
+            // and-forward works only when clients connect to it). This also stops kad, autonat or relay behaviour
+            // from dialing a peer's real IP over clearnet by accident.
+            .with_other_transport(move |keypair| {
                 use libp2p::core::muxing::StreamMuxerBox;
                 use libp2p::core::transport::Transport as _;
                 use libp2p::core::upgrade::Version;
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
-                    p2p_messenger::tor::DialReject(
-                        tcp::tokio::Transport::new(tcp::Config::default().nodelay(true)),
-                    )
-                    .upgrade(Version::V1Lazy)
-                    .authenticate(noise::Config::new(keypair)?)
-                    .multiplex(tuned_yamux())
-                    .map(|(p, m), _| (p, StreamMuxerBox::new(m))),
+                    libp2p::core::transport::timeout::TransportTimeout::with_ingoing_timeout(
+                        onion_listen
+                            .upgrade(Version::V1Lazy)
+                            .authenticate(noise::Config::new(keypair)?)
+                            .multiplex(tuned_yamux())
+                            .map(|(p, m), _| (p, StreamMuxerBox::new(m))),
+                        Duration::from_secs(p2p_messenger::tor::INBOUND_UPGRADE_SECS),
+                    ),
                 )
             })
             .map_err(|e| e.to_string())?
@@ -458,14 +489,16 @@ impl ServerCore {
                 let server_rpc = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new(SERVER_PROTOCOL), ProtocolSupport::Full)],
                     request_response::Config::default()
-                        .with_request_timeout(Duration::from_millis(p2p_messenger::server_client_timeout_ms())),
+                        .with_request_timeout(Duration::from_millis(p2p_messenger::server_client_timeout_ms()))
+                        .with_max_concurrent_streams(MAX_STREAMS_PER_CONNECTION),
                 );
                 // 30 s, for the same reason as `file_chunks` in the core. Over Tor, the library's default of 10 s is
                 // often too short for a 256 KiB chunk.
                 let file_chunks = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), ProtocolSupport::Inbound)],
                     request_response::Config::default()
-                        .with_request_timeout(Duration::from_millis(p2p_messenger::server_client_timeout_ms())),
+                        .with_request_timeout(Duration::from_millis(p2p_messenger::server_client_timeout_ms()))
+                        .with_max_concurrent_streams(MAX_STREAMS_PER_CONNECTION),
                 );
                 let identify = identify::Behaviour::new(identify::Config::new(
                     "/p2pmessenger/1.0.0".to_string(),
@@ -493,13 +526,9 @@ impl ServerCore {
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(600)))
             .build();
 
-        // Onion-only (see `DialReject`). Bind `127.0.0.1`, not `0.0.0.0`: the listener is on loopback only. The
-        // server's onion service bridge connects incoming Tor streams to `127.0.0.1:TOR_LIBP2P_PORT`, so incoming
-        // onion traffic works. Direct clearnet connections from the LAN or the internet are NOT accepted, so the
-        // server's real IP is never exposed.
-        swarm
-            .listen_on(format!("/ip4/127.0.0.1/tcp/{}", TOR_LIBP2P_PORT).parse().map_err(|_| "bad multiaddr")?)
-            .map_err(|e| e.to_string())?;
+        // The listen address is only a label (see `tor::OnionListen`); no socket is bound, so neither the LAN nor
+        // a local app can connect, and the server's real IP is never exposed.
+        swarm.listen_on(listen_addr).map_err(|e| e.to_string())?;
 
         let relay_incoming = match swarm.behaviour().stream.new_control().accept(RELAY_PROTOCOL) {
             Ok(incoming) => Some(incoming),
@@ -519,6 +548,7 @@ impl ServerCore {
             conns: HashMap::new(),
             live_interest: HashMap::new(),
             notified: HashMap::new(),
+            deposit_window: HashMap::new(),
             last_sweep: None,
             clock_anchor: None,
             clock_off_since: None,
@@ -738,7 +768,7 @@ impl ServerCore {
                 request_response::Event::OutboundFailure { peer, .. },
             )) => {
                 if self.live_interest.contains_key(&peer) {
-                    self.notified.entry(peer).or_insert(0);
+                    self.notified.entry(peer).or_insert((0, 0));
                 }
             }
             SwarmEvent::Behaviour(ServerBehaviourEvent::FileChunks(

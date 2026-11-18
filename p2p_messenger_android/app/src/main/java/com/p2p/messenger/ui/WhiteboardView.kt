@@ -31,6 +31,17 @@ class WhiteboardView(context: Context) : View(context) {
                 if (points.size == 2) lineTo(points[0], points[1])
             }
         }
+        /** minX, minY, maxX, maxY: the eraser skips strokes far from the finger. */
+        val box: FloatArray by lazy {
+            val b = floatArrayOf(points[0], points[1], points[0], points[1])
+            for (i in 2 until points.size step 2) {
+                if (points[i] < b[0]) b[0] = points[i]
+                if (points[i] > b[2]) b[2] = points[i]
+                if (points[i + 1] < b[1]) b[1] = points[i + 1]
+                if (points[i + 1] > b[3]) b[3] = points[i + 1]
+            }
+            b
+        }
     }
 
     companion object {
@@ -119,7 +130,12 @@ class WhiteboardView(context: Context) : View(context) {
     var onErase: ((List<Stroke>) -> Unit)? = null
 
     private val paint = strokePaint()
-    private val current = ArrayList<Float>()
+    /** The live stroke: x,y pairs in a primitive buffer plus one Path that only grows. */
+    private var cur = FloatArray(256)
+    private var curN = 0
+    private val curPath = Path()
+    /** Strokes the eraser removed in this drag, reported once when the finger lifts. */
+    private val erased = ArrayList<Stroke>()
     /** The first finger is down and owns the stroke. */
     private var drawing = false
 
@@ -174,15 +190,11 @@ class WhiteboardView(context: Context) : View(context) {
         canvas.save()
         canvas.scale(width / WIDTH, height / HEIGHT)
         for (s in pending) drawStroke(canvas, s, participants, paint)
-        if (current.size >= 2) {
+        if (curN >= 2) {
             paint.color = colorOf(me, participants, shade)
             paint.strokeWidth = penWidth.toFloat()
-            val path = Path().apply {
-                moveTo(current[0], current[1])
-                for (i in 2 until current.size step 2) lineTo(current[i], current[i + 1])
-                if (current.size == 2) lineTo(current[0], current[1])
-            }
-            canvas.drawPath(path, paint)
+            // A dot: the round cap draws a single point.
+            if (curN == 2) canvas.drawPoint(cur[0], cur[1], paint) else canvas.drawPath(curPath, paint)
         }
         canvas.restore()
     }
@@ -193,7 +205,7 @@ class WhiteboardView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 // The chat-list drawer and the message list must not steal the gesture.
                 parent?.requestDisallowInterceptTouchEvent(true)
-                current.clear()
+                clearCurrent()
                 drawing = true
                 touch(event.x, event.y)
             }
@@ -202,7 +214,7 @@ class WhiteboardView(context: Context) : View(context) {
                 touch(event.x, event.y)
             }
             MotionEvent.ACTION_UP -> if (drawing) { drawing = false; finishStroke() }
-            MotionEvent.ACTION_CANCEL -> { drawing = false; current.clear() }
+            MotionEvent.ACTION_CANCEL -> { drawing = false; clearCurrent(); flushErase() }
             // A second finger or the palm: `event.x` follows pointer 0, and
             // when the first finger lifted the line jumped to the other one.
             MotionEvent.ACTION_POINTER_UP -> if (drawing && event.actionIndex == 0) { drawing = false; finishStroke() }
@@ -216,16 +228,30 @@ class WhiteboardView(context: Context) : View(context) {
         val x = (viewX * WIDTH / width).coerceIn(0f, WIDTH)
         val y = (viewY * HEIGHT / height).coerceIn(0f, HEIGHT)
         if (erasing) { eraseAt(x, y); return }
-        val n = current.size
-        if (n >= 2 && hypot(x - current[n - 2], y - current[n - 1]) < MIN_STEP) return
-        current.add(x)
-        current.add(y)
+        if (curN >= 2 && hypot(x - cur[curN - 2], y - cur[curN - 1]) < MIN_STEP) return
+        if (curN + 2 > cur.size) cur = cur.copyOf(cur.size * 2)
+        if (curN == 0) curPath.moveTo(x, y) else curPath.lineTo(x, y)
+        cur[curN++] = x
+        cur[curN++] = y
+    }
+
+    private fun clearCurrent() {
+        curN = 0
+        curPath.rewind()
+    }
+
+    private fun flushErase() {
+        if (erased.isEmpty()) return
+        val hit = ArrayList(erased)
+        erased.clear()
+        onErase?.invoke(hit)
     }
 
     private fun finishStroke() {
-        if (erasing || current.isEmpty()) return
-        val stroke = Stroke(ByteArray(0), shade, me, penWidth, current.toFloatArray())
-        current.clear()
+        flushErase()
+        if (erasing || curN == 0) return
+        val stroke = Stroke(ByteArray(0), shade, me, penWidth, cur.copyOf(curN))
+        clearCurrent()
         pending.add(stroke)
         onStroke?.invoke(stroke)
     }
@@ -236,10 +262,12 @@ class WhiteboardView(context: Context) : View(context) {
         if (hit.isEmpty()) return
         strokes.removeAll(hit.toSet())
         cacheDirty = true
-        onErase?.invoke(hit)
+        erased.addAll(hit)
     }
 
     private fun near(s: Stroke, x: Float, y: Float): Boolean {
+        val b = s.box
+        if (x < b[0] - ERASER_RADIUS || x > b[2] + ERASER_RADIUS || y < b[1] - ERASER_RADIUS || y > b[3] + ERASER_RADIUS) return false
         val p = s.points
         for (i in 0 until p.size step 2) {
             val j = if (i + 2 < p.size) i + 2 else i

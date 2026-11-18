@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// How many messages the last export kept when the file was over the limit; 0 = nothing was cut. Read by the
+/// frontends right after an export (`api::last_recovery_trimmed`, JNI `lastRecoveryTrimmed`).
+pub(crate) static RECOVERY_TRIMMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl P2PCore {
 
     // ---------------------------------------------------------------
@@ -69,14 +73,30 @@ impl P2PCore {
             /// takes the revoked device back from an old DeviceAdd.
             own_revokes: Vec<DeviceRevoke>,
         }
+        // The archive key and the whole history, wiped when the export is done.
+        impl Drop for ExportedIdentity {
+            fn drop(&mut self) {
+                use zeroize::Zeroize;
+                self.data.zeroize();
+                if let Some(k) = self.archive_root_key.as_mut() {
+                    k.zeroize();
+                }
+            }
+        }
+        // The key arrays `to_bytes` returns are wiped once copied.
+        fn wiped(bytes: &mut [u8]) -> Vec<u8> {
+            let v = bytes.to_vec();
+            zeroize::Zeroize::zeroize(bytes);
+            v
+        }
 
         let mut devices: Vec<ExportedDevice> = self.own_devices.values()
             .filter(|d| d.identity_id == identity.identity_id)
             .filter_map(|d| self.own_device_keys.get(&d.device_fingerprint).map(|k| ExportedDevice {
                 device_fingerprint: d.device_fingerprint.clone(),
-                sign_sk_ed25519: k.sign_sk_ed25519.to_bytes().to_vec(),
-                sign_sk_mldsa: k.sign_sk_mldsa.to_bytes().to_vec(),
-                kem_sk_x25519: k.kem_sk_x25519.to_bytes().to_vec(),
+                sign_sk_ed25519: wiped(&mut k.sign_sk_ed25519.to_bytes()),
+                sign_sk_mldsa: wiped(&mut k.sign_sk_mldsa.to_bytes()),
+                kem_sk_x25519: wiped(&mut k.kem_sk_x25519.to_bytes()),
                 kem_sk_mlkem: mlkem_dk_to_bytes(&k.kem_sk_mlkem),
             }))
             .collect();
@@ -89,23 +109,25 @@ impl P2PCore {
             Some(chats) => RecoveryData { sync: self.build_sync_payload(), chats },
             None => self.recovery_data(),
         };
-        let mut data_bytes = ciborium_bytes(&data)?;
+        let mut data_bytes = ciborium_bytes_secret(&data)?;
+        RECOVERY_TRIMMED.store(0, std::sync::atomic::Ordering::SeqCst);
         if data_bytes.len() > MAX_RECOVERY_FILE_BYTES - 1024 * 1024 {
             data.keep_newest(RECOVERY_TRIMMED_MESSAGES);
-            data_bytes = ciborium_bytes(&data)?;
+            RECOVERY_TRIMMED.store(RECOVERY_TRIMMED_MESSAGES, std::sync::atomic::Ordering::SeqCst);
+            data_bytes = ciborium_bytes_secret(&data)?;
             warn!("Recovery file over limit, only the newest {} messages kept", RECOVERY_TRIMMED_MESSAGES);
         }
         drop(data);
         // CBOR: as JSON every byte was a number, and a few thousand messages
         // made a file of several MB.
-        let plaintext = zeroize::Zeroizing::new(ciborium_bytes(&ExportedIdentity {
+        let plaintext = ciborium_bytes_secret(&ExportedIdentity {
             identity_id: identity.identity_id.clone(),
             devices,
             archive_root_key: self.archive_root_key_bytes(),
-            data: data_bytes,
+            data: std::mem::take(&mut *data_bytes),
             own_device_add: self.own_device_add.clone(),
             own_revokes: self.own_revokes(),
-        })?);
+        })?;
         Ok((plaintext, passphrase))
     }
 }
@@ -258,6 +280,15 @@ impl P2PCore {
             own_device_add: Option<DeviceAdd>,
             own_revokes: Vec<DeviceRevoke>,
         }
+        impl Drop for ExportedIdentity {
+            fn drop(&mut self) {
+                use zeroize::Zeroize;
+                self.data.zeroize();
+                if let Some(k) = self.archive_root_key.as_mut() {
+                    k.zeroize();
+                }
+            }
+        }
         let exported: ExportedIdentity = ciborium::from_reader(plaintext)
             .map_err(|_| "Corrupt recovery file (content)".to_string())?;
         if exported.devices.is_empty() {
@@ -277,6 +308,12 @@ impl P2PCore {
                 .map_err(|_| "Corrupt recovery file (contacts and chats)".to_string())?)
         };
 
+        // A secondary's root is the signer of its add; a first device is its own.
+        let root_of = |fp: &str| -> String {
+            exported.own_device_add.as_ref()
+                .filter(|da| da.identity_id == exported.identity_id && da.new_device_fingerprint == fp)
+                .map_or_else(|| fp.to_string(), |da| da.added_by.clone())
+        };
         let mut device_infos = Vec::new();
         let mut own_bundle_bytes: Option<Vec<u8>> = None;
         let mut primary_fp: Option<String> = None;
@@ -332,9 +369,10 @@ impl P2PCore {
                 let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
                 // see `generate_identity` — one identity per database.
                 tx.execute("DELETE FROM identities WHERE id != ?1", params![exported.identity_id]).map_err(|e| e.to_string())?;
+                // The identity's first device, as `adopt_device_link` stores it (a restored secondary is not it).
                 tx.execute(
                     "INSERT OR REPLACE INTO identities (id, primary_device) VALUES (?1, ?2)",
-                    params![exported.identity_id, computed_fp],
+                    params![exported.identity_id, root_of(&computed_fp)],
                 ).map_err(|e| e.to_string())?;
                 tx.execute(
                     "INSERT OR REPLACE INTO own_devices
@@ -351,13 +389,13 @@ impl P2PCore {
                 tx.commit().map_err(|e| e.to_string())?;
             }
 
-            let bundle_bytes = ciborium_bytes(&SecretKeyBundle {
+            let bundle_bytes = std::mem::take(&mut *ciborium_bytes_secret(&SecretKeyBundle {
                 device_fingerprint: computed_fp.clone(),
                 sign_sk_ed25519: dev.sign_sk_ed25519.clone(),
                 sign_sk_mldsa: dev.sign_sk_mldsa.clone(),
                 kem_sk_x25519: dev.kem_sk_x25519.clone(),
                 kem_sk_mlkem: dev.kem_sk_mlkem.clone(),
-            })?;
+            })?);
             if own_bundle_bytes.is_none() {
                 own_bundle_bytes = Some(bundle_bytes);
                 primary_fp = Some(computed_fp.clone());
@@ -383,14 +421,14 @@ impl P2PCore {
             });
         }
 
+        // Only the add of the device restored here, for this identity.
+        let restored_fp = primary_fp.clone();
         self.identity = Some(identity::Identity {
             identity_id: exported.identity_id.clone(),
             devices: device_infos,
-            primary_device: primary_fp,
+            primary_device: primary_fp.as_deref().map(|fp| root_of(fp)),
         });
 
-        // Only the add of the device restored here, for this identity.
-        let restored_fp = self.identity.as_ref().and_then(|i| i.primary_device.clone());
         if let Some(da) = exported.own_device_add.as_ref()
             .filter(|da| da.identity_id == exported.identity_id && restored_fp.as_deref() == Some(da.new_device_fingerprint.as_str()))
         {
@@ -410,7 +448,7 @@ impl P2PCore {
         if let Some(data) = recovery_data {
             self.apply_recovery_data(data);
         }
-        Ok((exported.identity_id, own_bundle_bytes.unwrap_or_default()))
+        Ok((exported.identity_id.clone(), own_bundle_bytes.unwrap_or_default()))
     }
 
     /// What a recovery file carries besides the keys: the sibling sync
@@ -456,6 +494,8 @@ impl P2PCore {
     pub(crate) fn apply_recovery_data(&mut self, data: RecoveryData) {
         self.import_sync_payload(&data.sync);
         let own_id = self.my_identity_id().unwrap_or_default();
+        // The rows in one transaction: one commit (and fsync) per row made a big restore take minutes under the core lock.
+        let in_tx = self.db.as_ref().map_or(false, |c| c.is_autocommit() && c.execute_batch("BEGIN").is_ok());
         for (gid, key, rows) in data.chats {
             for m in rows {
                 let mid = m.message_id.as_deref();
@@ -484,6 +524,14 @@ impl P2PCore {
                     author_proof: m.author_proof.clone(), reactions: Vec::new(),
                 };
                 self.apply_synced_message_flags(gid.as_deref(), &key, &synced);
+            }
+        }
+        if in_tx {
+            if let Some(c) = &self.db {
+                if let Err(e) = c.execute_batch("COMMIT") {
+                    error!("Recovery: chat rows could not be committed: {}", e);
+                    let _ = c.execute_batch("ROLLBACK");
+                }
             }
         }
     }

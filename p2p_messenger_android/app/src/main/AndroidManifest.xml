@@ -42,6 +42,7 @@
          keeps the CPU awake while a transfer runs. It is not enough alone (see the battery
          optimization exemption button in SettingsFragment), but both are needed together. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
         <!-- Found in an audit: after a reboot the app stayed completely dead, and no messages
          arrived until the user opened it by hand. See service/BootReceiver.kt for why the
          hourly WorkManager fallback is not enough on Android 12+. -->
@@ -102,10 +103,12 @@
              image editor is open, because the edit and the camera shot exist only there. -->
         <activity
             android:name=".ui.ChatActivity"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.GroupChatActivity"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:windowSoftInputMode="adjustResize" />
         <activity android:name=".ui.QrScanActivity" />
@@ -164,6 +167,7 @@
         </receiver>
 
         <receiver android:name=".service.UpdateReceiver" android:exported="false" />
+        <receiver android:name=".service.DozeWakeReceiver" android:exported="false" />
 
         <service
             android:name=".service.P2PService"

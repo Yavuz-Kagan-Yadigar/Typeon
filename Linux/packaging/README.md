@@ -53,10 +53,16 @@ ostree --repo=repo log app/com.p2p.messenger.Typeon/x86_64/master | head -4
 
 | Permission | Reason |
 |---|---|
-| `--share=network` | libp2p/gossipsub + Tor. The app has no function without a network. |
+| `--share=network` | libp2p + Tor. The app has no function without a network. |
+| `--share=ipc` | X11 shared memory for the fallback-x11 window. |
+| `--socket=wayland` / `--socket=fallback-x11` | GTK4 window. |
+| `--device=all` | Camera for video calls. Flatpak has no camera-only device type (there is no v4l2 type), so this also exposes other device nodes. |
+| `--socket=pulseaudio` | Voice message recording and playback, call audio. |
 | `--talk-name=org.freedesktop.secrets` | **Required.** The vault key lives in the system keyring, and the app does not start without a keyring (see `src/keyring.rs`). KDE Wallet and GNOME Keyring both provide this name. |
-| `--socket=wayland` / `--socket=fallback-x11` / `--device=dri` | GTK4 window. |
-| `--socket=pulseaudio` | Voice message recording and playback. |
+| `--talk-name=org.kde.secretservicecompat` / `org.kde.kwalletd6` / `org.kde.kwalletd5` / `org.gnome.keyring` | The real keyring backend names (see trap 1 below). |
+| `--talk-name=org.freedesktop.Flatpak` | Self-update through `flatpak-spawn --host`. This lets the app run host commands: a sandbox hole. |
+
+The build runs `cargo build --release --locked`.
 
 Broad filesystem access is **deliberately absent**. File open and save go through the
 portal via `gtk::FileDialog`, so nothing outside the sandbox needs to be reachable.

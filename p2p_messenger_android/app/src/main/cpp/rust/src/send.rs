@@ -39,8 +39,8 @@ impl P2PCore {
         // same id. See `forget_server_deposit`. The server remembers only the message_id, not the ciphertext. If that memory is not cleared, the
         // fresh copy is never deposited on the server, which is the only reachable place while the peer is offline.
         // Only a refresh carries `original_sent_at_override`. A fresh 1:1 text also pins its id (`send_message`), but is not a refresh.
+        let is_refresh = message_id_override.is_some() && original_sent_at_override.is_some();
         if let (Some(mid), Some(_)) = (&message_id_override, original_sent_at_override) {
-            self.forget_server_deposit(mid);
             // A refresh means the peer has confirmed nothing for 25 minutes. That includes the chance that our handshake never arrived at all
             // (see `maybe_redo_handshake`).
             let prev = self.regen_skip_id.replace(mid.clone());
@@ -93,10 +93,10 @@ impl P2PCore {
         // A previous, unconfirmed rotation (`pending_rotation_ct`, see ratchet.rs) is attached to every outgoing packet. The receiver applies it idempotently (see `apply_rotation`). `try_publish_raw` sends these packets on the OLD topic the peer still listens on.
         // A responder leaves the handshake chain before it sends anything, Ack included (see `respond` in ratchet.rs). That chain depends only on the HandshakeInit, so repeating the announcement is safe.
         let fresh_responder = self.ratchets.get(&peer_device_fingerprint).map_or(false, |s| s.is_fresh_responder());
-        // a peer that only reads sends `Seen` (and `ReadStateSync`,
-        // in the list above); it takes its rotation turn on them too, or it
-        // never heals. The announcement repeats on every packet until confirmed.
-        let rotation_turn = needs_delivery_confirmation || matches!(content, MessageContent::Seen { .. });
+        // Any packet takes the rotation turn, Ack included: the announcement repeats on every packet until the peer answers on the new
+        // chain, so losing one packet loses nothing. A device that only receives (and sends only Acks) held the turn forever and the
+        // session never rotated. Typing and call signalling stay small and fast.
+        let rotation_turn = !matches!(content, MessageContent::TypingIndicator { .. } | MessageContent::Call { .. });
         let fresh_rotation_ct = if rotation_turn || fresh_responder {
             self.maybe_rotate_ratchet(&peer_device_fingerprint)?
         } else {
@@ -157,11 +157,17 @@ impl P2PCore {
         }
         // `encrypt_next` advances ck_send/send_message_number on every call. The state is persisted on every message so the disk copy does not go
         // stale. (If a rotation happened, `maybe_rotate_ratchet` already wrote it above. This second write is harmless and idempotent.)
-        if !self.persist_ratchet_state(&peer_device_fingerprint) {
+        if !self.persist_ratchet_state(&peer_device_fingerprint, true) {
             self.ratchets.insert(peer_device_fingerprint.clone(), snapshot);
             return Err("Session state could not be written, packet not sent".to_string());
         }
         drop(snapshot);
+        if is_refresh {
+            // The new copy replaces the old one: withdraw the old server copy (the server keeps every distinct copy until its TTL, and the
+            // peer would fetch them all), and forget the "already deposited" mark so the new one is deposited.
+            self.cancel_server_deposit(&message_id);
+            self.forget_server_deposit(&message_id);
+        }
 
         if let MessageContent::HistorySyncRequest { group_id, before_timestamp, after_timestamp, .. } = content {
             let now = current_time_ms();
@@ -237,7 +243,8 @@ impl P2PCore {
         //
         // Ack and Seen are sent once. If the publish fails transiently, `pending_envelopes` retries. A lost Ack is covered by the sender's retry plus `reack_if_already_handled`. The reliable path for "seen" is `ReadStateSync`.
         //
-        // When `MAX_UNCONFIRMED_AGE_MS` passes, these types do not give up. They are re-encrypted fresh and retried up to `TEXT_RETRY_GIVE_UP_MS`. See the `PendingConfirmation.regen_content` docs.
+        // These types are retried up to `TEXT_RETRY_GIVE_UP_MS`. They are re-encrypted only when the chain generation changed or the peer asks
+        // (`ResendRequest`). See the `PendingConfirmation.regen_content` docs.
         //
         // Multi-device control messages are in this list too. They are re-encrypted with a fresh ratchet step under the same `message_id` (see `message_id_override`). Retrying the old ciphertext fails once the ratchet has rotated past the receiver's skipped-key cache. The receiver dedups on `message_id`, so nothing is archived twice. They survive up to `TEXT_RETRY_GIVE_UP_MS`.
         //
@@ -777,6 +784,25 @@ impl P2PCore {
         let acked = |e: &NetworkEnvelope| matches!(e, NetworkEnvelope::Message(m) if m.header.message_id == target_message_id);
         self.envelopes_inflight.retain(|_, (_, e, _, _)| !acked(e));
         self.pending_envelopes.retain(|q| !acked(&q.envelope));
+        // The new device acks its grant only once it adopted the identity.
+        if let Some(MessageContent::DeviceLinkGrant { device_add, .. }) = &regen_content {
+            self.finish_device_link(peer_fp, device_add);
+        }
+        // My 1:1 file offer (sent under its file id) acked by the peer: delivered, kept on the row for a reload.
+        if let Some(MessageContent::FileOffer { group_id: None, file_id, .. }) = &regen_content {
+            let from_peer = self.known_remote_devices.get(peer_fp)
+                .map_or(true, |d| self.my_identity_id().as_deref() != Some(d.identity_id.as_str()));
+            let changed = from_peer && file_id == target_message_id && self.db.as_ref().map_or(false, |c| c.execute(
+                "UPDATE files SET send_status = 'delivered' WHERE file_id = ?1 AND direction = 'sent' AND COALESCE(send_status, '') != 'delivered'",
+                params![file_id],
+            ).map_or(false, |n| n > 0));
+            if changed {
+                self.attachment_events.push(serde_json::json!({
+                    "type": "status", "peer": self.canonical_peer_key(peer_fp), "message_id": file_id,
+                    "status": MessageSendStatus::Delivered.as_str(),
+                }).to_string());
+            }
+        }
         // A text acked by a device of the peer (not one of our siblings) counts as delivered. The bubble id is the conversation-wide id shared by the
         // copies to every device.
         if let Some(MessageContent::Text { group_id, group_message_local_id, .. }) = &regen_content {

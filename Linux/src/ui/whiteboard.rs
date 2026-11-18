@@ -651,8 +651,8 @@ impl Inner {
                         }
                     }
                 }
-                if result.is_err() {
-                    me.app.toast("This page is full");
+                if let Err(error) = &result {
+                    me.app.toast(&format!("Could not draw: {}", error));
                     me.style_history();
                 }
                 if reload {
@@ -720,6 +720,16 @@ impl Inner {
     /// cannot come back under its old id (every device remembers the erase),
     /// so it is drawn again as a new stroke — in my colour.
     fn flip(self: &Rc<Self>, undo: bool) {
+        // A stroke whose add has not been answered has no id to erase yet:
+        // undoing it now would send an empty erase and the stroke would come
+        // back when the add returns. It can be undone a moment later.
+        {
+            let st = self.state.borrow();
+            let back = if undo { st.undo.back() } else { st.redo.back() };
+            if back.is_some_and(|step| step.live && step.ids.is_empty()) {
+                return;
+            }
+        }
         let copy = {
             let mut st = self.state.borrow_mut();
             let popped = if undo { st.undo.pop_back() } else { st.redo.pop_back() };
@@ -933,7 +943,7 @@ impl Inner {
             let st = self.state.borrow();
             (st.strokes.clone(), st.names.len().max(2), st.page)
         };
-        let dialog = gtk::FileDialog::builder()
+        let dialog = gtk::FileDialog::builder().modal(false)
             .title("Save whiteboard page")
             .initial_name(format!("whiteboard-{}.pdf", page as u32 + 1))
             .build();

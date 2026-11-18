@@ -90,6 +90,19 @@ import com.p2p.messenger.ui.GroupChatActivity.ContactLookup
 
 // GroupChatActivity: incoming core events, sending text, seen and typing.
 
+/** The reply of `P2PLib.sendGroupMessage`, `{"message_id":..,"status":"sent"|"pending"}`, as (id, status); null if it is not that. */
+internal fun parseGroupSendResult(result: String): Pair<String, SimpleChatAdapter.Status>? = try {
+    val obj = JSONObject(result)
+    val id = obj.optString("message_id")
+    if (id.isEmpty()) null else id to when (obj.optString("status")) {
+        "pending" -> SimpleChatAdapter.Status.PENDING
+        "error" -> SimpleChatAdapter.Status.ERROR
+        else -> SimpleChatAdapter.Status.SENT
+    }
+} catch (e: Exception) {
+    null
+}
+
 internal fun GroupChatActivity.sendNewMessage(text: String): kotlinx.coroutines.Job {
     btnSend.isEnabled = false
     btnSend.visibility = View.INVISIBLE
@@ -111,19 +124,26 @@ internal fun GroupChatActivity.sendNewMessage(text: String): kotlinx.coroutines.
         // button above regardless, but don't drop the result bubble into
         // the wrong group's message list.
         if (groupId != targetGroupId) return@launch
-        val ok = !result.startsWith("Error:")
+        val sent = if (result.startsWith("Error:")) null else parseGroupSendResult(result)
+        val ok = sent != null
+        if (!ok && findViewById<android.widget.EditText>(R.id.edtMessage).text.isNullOrBlank()) {
+            // Nothing was queued: give the text back instead of a bubble that vanishes when the chat closes.
+            Toast.makeText(this@sendNewMessage, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
+            findViewById<android.widget.EditText>(R.id.edtMessage).apply { setText(text); setSelection(text.length) }
+            return@launch
+        }
         if (!ok) {
             Toast.makeText(this@sendNewMessage, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
         }
         // Use the `group_message_local_id` returned by Rust as the `messageId` of our own bubble (not a random UUID),
         // so the returned 'seen' notices match the right bubble.
-        val localId = if (ok) result else UUID.randomUUID().toString()
+        val localId = sent?.first ?: UUID.randomUUID().toString()
         adapter.addMessage(
             SimpleChatAdapter.Item(
                 messageId = localId,
                 text = text,
                 isMine = true,
-                status = if (ok) SimpleChatAdapter.Status.SENT else SimpleChatAdapter.Status.ERROR,
+                status = sent?.second ?: SimpleChatAdapter.Status.ERROR,
                 senderIdentityId = ownIdentityId
             )
         )
@@ -185,7 +205,7 @@ internal fun GroupChatActivity.handleIncomingGroupMessage(obj: JSONObject) {
             isMine = false,
             sentAtMs = sentAtMs,
             senderName = senderName,
-            senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+            senderAvatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
             senderIdentityId = senderIdentityId,
             replyToMessageId = replyToMessageId,
             replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null },
@@ -196,11 +216,7 @@ internal fun GroupChatActivity.handleIncomingGroupMessage(obj: JSONObject) {
     )
     maybePlayTyphoonEffect()
     onNewIncomingItemAdded()
-    // Seen: sent automatically for a live group message that arrives while the screen is open (same reasoning as the 1:1 ChatActivity).
-    // `peer` is the fingerprint of the 1:1 channel (the sender) this copy arrived on.
-    if (AppLock.isUnlocked()) netPack.execute {
-        try { P2PLib.sendSeenReceipt(obj.optString("peer"), messageId, localId) } catch (e: Exception) { /* yoksay */ }
-    }
+    // Seen is only the read boundary (ReadStateSync), as in 1:1: a per-message Seen would carry the same information.
     // Reliable path: the read boundary is written to disk even if an individual Seen is lost.
     scheduleGroupReadWatermark()
 }
@@ -220,7 +236,7 @@ internal fun GroupChatActivity.handleIncomingSeen(obj: JSONObject) {
     val senderIdentityId = obj.optString("sender_identity_id")
     val sender = resolveContactByIdentity(senderIdentityId)
     val viewer = SimpleChatAdapter.SeenByViewer(
-        avatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+        avatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
         displayName = sender?.displayName ?: senderIdentityId.take(8)
     )
     val viewers = seenByPerMessage.getOrPut(localId) { mutableMapOf() }
@@ -238,7 +254,7 @@ internal fun GroupChatActivity.handleIncomingSeenBulk(obj: JSONObject) {
     if (senderIdentityId.isEmpty()) return
     val sender = resolveContactByIdentity(senderIdentityId)
     val viewer = SimpleChatAdapter.SeenByViewer(
-        avatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+        avatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
         displayName = sender?.displayName ?: senderIdentityId.take(8)
     )
     for (i in 0 until arr.length()) {

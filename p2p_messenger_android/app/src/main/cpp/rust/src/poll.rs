@@ -397,6 +397,16 @@ impl P2PCore {
                         // arm. Forcing a close here caused needless disconnect and reconnect loops on healthy connections. So it is only logged. It does not
                         // count toward the failure counter, and the connection is NOT closed.
                         libp2p::swarm::SwarmEvent::Behaviour(P2PBehaviourEvent::Keepalive(rr_event)) => {
+                            let answered = match &rr_event {
+                                request_response::Event::Message { message: request_response::Message::Response { request_id, .. }, .. }
+                                | request_response::Event::OutboundFailure { request_id, .. } => Some(*request_id),
+                                _ => None,
+                            };
+                            if let Some(id) = answered {
+                                if let Ok(mut wait) = crate::session::BYE_WAIT.lock() {
+                                    wait.retain(|r| *r != id);
+                                }
+                            }
                             match rr_event {
                                 request_response::Event::Message { peer, message: request_response::Message::Request { request, channel, .. }, .. } => {
                                     if request.bye {
@@ -894,7 +904,7 @@ impl P2PCore {
                         drop(channel);
                         continue;
                     }
-                    let response = self.serve_chunk_request(peer, &request);
+                    let response = self.serve_chunk_request_budgeted(peer, &request);
                     pending_chunk_responses.push((channel, response));
                 }
                 FileChunkEventLocal::Response { request_id, response } => {
@@ -985,9 +995,11 @@ impl P2PCore {
                                 self.awaiting_confirmation.remove(&id);
                                 self.remove_durable_retry(&id);
                                 self.set_message_status(&id, MessageSendStatus::Failed);
-                                self.attachment_events.push(serde_json::json!({
-                                    "type": "status", "peer": self.canonical_peer_key(&fp), "message_id": id, "status": "error"
-                                }).to_string());
+                                if !self.sent_row_delivered(&id) {
+                                    self.attachment_events.push(serde_json::json!({
+                                        "type": "status", "peer": self.canonical_peer_key(&fp), "message_id": id, "status": "error"
+                                    }).to_string());
+                                }
                             }
                         }
                         Ok(()) => {}
@@ -1126,6 +1138,16 @@ impl P2PCore {
         }
         self.tor_was_ready = tor_ready_now;
 
+        // Once a minute: contacts from a scanned code that never proved their device (`sweep_unproved_contacts`).
+        {
+            static LAST_SWEEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let now = mono_ms();
+            if now.saturating_sub(LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed)) >= 60_000 {
+                LAST_SWEEP.store(now, std::sync::atomic::Ordering::Relaxed);
+                self.sweep_unproved_contacts();
+            }
+        }
+
         // See `pending_envelopes`. Any envelope that could not be sent in the first seconds after a connection (handshake, identity exchange, message, edit,
         // delete, group update, ...) is retried here on every poll turn. `try_publish_raw` is used (the raw version that does NOT queue), because otherwise
         // `publish_envelope` would queue the same entry again on every failed attempt, and the timeout would never fire. For a `Message` envelope, the
@@ -1191,10 +1213,12 @@ impl P2PCore {
                                     continue;
                                 }
                                 self.set_message_status(&m.header.message_id, MessageSendStatus::Failed);
-                                self.attachment_events.push(serde_json::json!({
-                                    "type": "status", "peer": self.canonical_peer_key(&peer_fp),
-                                    "message_id": m.header.message_id, "status": "error"
-                                }).to_string());
+                                if !self.sent_row_delivered(&m.header.message_id) {
+                                    self.attachment_events.push(serde_json::json!({
+                                        "type": "status", "peer": self.canonical_peer_key(&peer_fp),
+                                        "message_id": m.header.message_id, "status": "error"
+                                    }).to_string());
+                                }
                             }
                             // Envelopes without a `message_id`, such as Handshake and IdentityExchange, are abandoned the same way. An unbounded queue for a device
                             // that is unreachable forever is not wanted.

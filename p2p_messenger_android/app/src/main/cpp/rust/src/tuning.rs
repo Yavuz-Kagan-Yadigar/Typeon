@@ -137,8 +137,9 @@ pub(crate) const SWARM_CONNECTION_TIMEOUT_SECS: u64 = 60;
 pub(crate) const ENVELOPE_PROTOCOL: &str = "/p2pmessenger/envelope/1.0.0";
 /// Largest serialized envelope any path carries.
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
-/// Revokes one `IdentityExchange` or `SyncPayload` carries (about 4.7 KB each, so about 300 KB at most). See `own_revokes_to_send`.
-pub(crate) const REVOKES_PER_PACKET: usize = 64;
+/// Revokes one `IdentityExchange` or `SyncPayload` carries (about 4.7 KB each, so about 150 KB at most). See `own_revokes_to_send`.
+/// Equal to the receiver's cap (the 32 owner-revoke tombstones of a contact): more were sent but never applied.
+pub(crate) const REVOKES_PER_PACKET: usize = 32;
 
 /// Swarm events one `poll_events` turn handles in its main drain.
 pub(crate) const MAX_SWARM_EVENTS_PER_TURN: u32 = 256;
@@ -318,6 +319,13 @@ pub(crate) const SIBLING_BACKFILL_PER_CONVERSATION: u32 = 30;
 pub(crate) const SIBLING_ROSTER_SYNC_INTERVAL_MS: u64 = 60 * 60 * 1000;
 /// Maximum total records in one `SiblingHistoryResponse`. It must stay well below the gossip 1 MB limit (see `max_transmit_size` in `start_network`).
 pub(crate) const SIBLING_BACKFILL_MAX_ENTRIES: usize = 300;
+/// `sync_roster_to` skips roster parts a sibling already got; once this long after the last full send, every part goes again.
+pub(crate) const ROSTER_RESEND_ALL_MS: u64 = 24 * 60 * 60 * 1000;
+/// `journal_sibling_op`: rows kept, and their age limit.
+pub(crate) const SIBLING_JOURNAL_MAX_ROWS: usize = 5000;
+pub(crate) const SIBLING_JOURNAL_MAX_AGE_MS: u64 = 90 * 24 * 60 * 60 * 1000;
+/// `replay_sibling_journal`: operations sent again per backfill answer.
+pub(crate) const SIBLING_JOURNAL_REPLAY_MAX: usize = 200;
 
 /// Delivery limit (`MessageTooLarge`, see `PublishFailure`): the total text payload of one `HistorySyncResponse` or `SiblingHistoryResponse` must not
 /// exceed this many bytes. A row-count limit alone was not enough, because individual message texts can be arbitrarily long. 300 long messages
@@ -404,8 +412,8 @@ pub(crate) const MAX_EARLY_EDITS_DELETES_PER_TARGET: usize = 8;
 /// Memory protection.
 pub(crate) const MAX_PENDING_GROUP_MESSAGES_PER_MEMBER: usize = 200;
 
-/// Deliberate deviation (Tor): with Tor on, libp2p listens on a FIXED TCP port. The onion service bridge (`bridge_incoming_stream`) forwards incoming
-/// Tor streams to `127.0.0.1:<this port>`, so the port must be fixed and known in advance. With Tor off, a random port (0) is used.
+/// The onion service's virtual port: the port in our `/dns/<host>.onion/tcp/<port>` address. No local socket uses it; inbound streams
+/// reach the swarm in-process (`tor::OnionListen`).
 pub(crate) const TOR_LIBP2P_PORT: u16 = 42611;
 
 /// A `HandshakeInit` whose `timestamp` differs from the current time by more than this many milliseconds (ahead or behind) is rejected. This stops
@@ -529,3 +537,15 @@ pub(crate) const DOWNLOAD_GIVE_UP_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 /// value as `TEXT_RETRY_GIVE_UP_MS` (7 days). The reasoning: a `FileOffer` is itself retried for that long, so it is reasonable for a file to still be on
 /// disk when a recipient gets the offer late, within that window.
 pub(crate) const FILE_RETENTION_GRACE_MS: u64 = TEXT_RETRY_GIVE_UP_MS;
+
+/// Rows stored for a group id this device never got (`unknown_group_has_room`) are dropped after this long.
+pub(crate) const UNKNOWN_GROUP_ROWS_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// A non-root founder device waits this long before it acts on a `LeaveGroupRequest`: the root's `Remove` usually reaches it first.
+pub(crate) const LEAVE_REQUEST_DEFER_MS: u64 = 2 * 60 * 1000;
+
+/// Automatic restarts of one failed download (`resume_incomplete_downloads_for`) before it waits for a tap. Progress resets the count.
+pub(crate) const MAX_AUTO_RESUMES: i64 = 3;
+
+/// Chunk bytes one peer may fetch of one file per day, as a multiple of the file size (`serve_chunk_request_budgeted`).
+pub(crate) const CHUNK_SERVE_FILE_MULTIPLE: u64 = 3;

@@ -100,6 +100,9 @@ use windows_sys::Win32::UI::Shell::NOTIFYICONDATAW;
 pub enum TrayAction {
     Open,
     Quit,
+    /// Windows logoff or shutdown (`WM_ENDSESSION`). Delivered synchronously:
+    /// the process may be killed as soon as the window procedure returns.
+    EndSession,
 }
 
 const TRAY_CALLBACK: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
@@ -189,8 +192,8 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, wparam: usize, lpa
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DefWindowProcW, DestroyMenu, GetCursorPos, PostMessageW,
-        SetForegroundWindow, TrackPopupMenu, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONUP,
-        WM_NULL, WM_RBUTTONUP,
+        SetForegroundWindow, TrackPopupMenu, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ENDSESSION,
+        WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
     };
     if message == TRAY_CALLBACK {
         // Legacy (pre-NOTIFYICON_VERSION_4) mode: lparam is the mouse message.
@@ -215,6 +218,15 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, wparam: usize, lpa
                 }
             }
             _ => {}
+        }
+        return 0;
+    }
+    if message == WM_ENDSESSION {
+        if wparam != 0 {
+            let handler = TRAY_HANDLER.with(|h| h.borrow().clone());
+            if let Some(handler) = handler {
+                handler(TrayAction::EndSession);
+            }
         }
         return 0;
     }

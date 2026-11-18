@@ -48,6 +48,10 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
     }
 
     let Some(parent) = app.window() else { return };
+    // A late async open must not show content over the lock page.
+    if app.locked.get() {
+        return;
+    }
 
     let header = adw::HeaderBar::new();
     let external = gtk::Button::builder()
@@ -96,29 +100,40 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
         header.pack_end(&copy);
     }
 
-    let content: gtk::Widget = if util::is_image(mime) {
-        image_pane(path)
+    let (content, media): (gtk::Widget, Option<gtk::MediaFile>) = if util::is_image(mime) {
+        (image_pane(path), None)
     } else {
-        playback_pane(app, path, util::is_video(mime))
+        let (pane, media) = playback_pane(app, path, util::is_video(mime));
+        (pane, Some(media))
     };
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
 
-    adw::Window::builder()
+    let window = adw::Window::builder()
         .transient_for(&parent)
         .title(title)
         .default_width(900)
         .default_height(640)
         .content(&toolbar)
-        .build()
-        .present();
+        .build();
+    // Closing the viewer stops the sound and releases the pipeline; the
+    // stream's handlers and the transport bar hold each other, so nothing
+    // else would.
+    if let Some(media) = media {
+        window.connect_close_request(move |_| {
+            media.set_playing(false);
+            media.clear();
+            glib::Propagation::Proceed
+        });
+    }
+    window.present();
 }
 
 /// Image size if the file is a common format within the pixel limit. Reads the
 /// header only; used by both the viewer and the Copy button.
-fn image_ok(path: &str) -> Option<(i32, i32)> {
+pub(crate) fn image_ok(path: &str) -> Option<(i32, i32)> {
     gdk_pixbuf::Pixbuf::file_info(path).and_then(|(format, width, height)| {
         let known = matches!(format.name().as_deref(), Some("jpeg" | "png" | "gif" | "webp"));
         (known && width as i64 * height as i64 <= MAX_IMAGE_PIXELS).then_some((width, height))
@@ -164,7 +179,19 @@ fn image_pane(path: &str) -> gtk::Widget {
             .upcast();
     };
 
-    let picture = gtk::Picture::for_filename(path);
+    // Decoded off the GTK thread (up to 64 MP); the picture fills in when ready.
+    let picture = gtk::Picture::new();
+    {
+        let (picture, path) = (picture.downgrade(), path.to_string());
+        crate::app::run_in_background(
+            move || gtk::gdk::Texture::from_filename(&path).ok(),
+            move |texture| {
+                if let (Some(picture), Some(texture)) = (picture.upgrade(), texture) {
+                    picture.set_paintable(Some(&texture));
+                }
+            },
+        );
+    }
     picture.set_can_shrink(true);
     // Fit, never crop: a viewer that silently cuts the edges off a photo is
     // worse than one that letterboxes it.
@@ -236,7 +263,7 @@ fn image_pane(path: &str) -> gtk::Widget {
 /// playback-rate API to hook into (checked against the GTK 4 headers), and
 /// reaching it would mean bypassing this widget for a hand-rolled GStreamer
 /// pipeline — a much larger change than this viewer warrants.
-fn playback_pane(app: &Rc<App>, path: &str, is_video: bool) -> gtk::Widget {
+fn playback_pane(app: &Rc<App>, path: &str, is_video: bool) -> (gtk::Widget, gtk::MediaFile) {
     let media = gtk::MediaFile::for_filename(path);
 
     let stack = gtk::Stack::new();
@@ -316,7 +343,7 @@ fn playback_pane(app: &Rc<App>, path: &str, is_video: bool) -> gtk::Widget {
         stack.set_visible_child_name("missing");
     }
 
-    stack.upcast()
+    (stack.upcast(), media)
 }
 
 /// Five seconds, in the microseconds `GtkMediaStream` measures time in.
@@ -510,7 +537,7 @@ pub fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
     } else {
         suggested_name.as_str()
     };
-    let dialog = gtk::FileDialog::builder()
+    let dialog = gtk::FileDialog::builder().modal(false)
         .title("Save a copy")
         .initial_name(suggested_name)
         .build();

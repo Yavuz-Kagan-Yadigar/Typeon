@@ -10,8 +10,8 @@
 //! unmaintained (RUSTSEC-2024-0381) and implemented the round-3 draft Kyber, which is not
 //! byte-compatible with the final FIPS 203 ML-KEM. It now uses the actively maintained
 //! RustCrypto `ml-kem` crate (FIPS 203 ML-KEM-1024). Its `Decapsulate` and `Encapsulate` traits
-//! come from the `kem` crate (see Cargo.toml). Encapsulation always takes a `CryptoRngCore`,
-//! and `rand::rngs::OsRng` (rand 0.8) satisfies it, so the same RNG serves x25519-dalek too.
+//! come from the `kem` crate (see Cargo.toml). ml-kem draws its randomness from getrandom
+//! itself; `OsRng` is passed only to x25519-dalek.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -37,7 +37,11 @@ pub fn mlkem_generate() -> (MlKem1024DecapsulationKey, MlKem1024EncapsulationKey
 /// seed and is written back in that form.
 pub fn mlkem_dk_to_bytes(dk: &MlKem1024DecapsulationKey) -> Vec<u8> {
     match dk.to_seed() {
-        Some(seed) => seed.to_vec(),
+        Some(mut seed) => {
+            let bytes = seed.to_vec();
+            seed.as_mut_slice().zeroize();
+            bytes
+        }
         #[allow(deprecated)]
         None => ml_kem::ExpandedKeyEncoding::to_expanded_bytes(dk).to_vec(),
     }
@@ -96,15 +100,42 @@ pub struct RatchetPublicKeys {
 
 /// The receive chain a rotation replaced. The peer keeps sending on it until it has seen the
 /// rotation. Packets from the two chains can arrive in any order, so the old chain stays usable
-/// (`decrypt` tries it second) until the next rotation replaces it.
-// ponytail: kept for a full rotation period. To shorten it, cut the chain at the peer's
-// `prev_chain_length` once its first packet on the new chain arrives.
+/// (`decrypt` tries it second) until the next rotation replaces it, or until the peer's first packet
+/// on the new chain says how long the old one was (`close_old_recv`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OldRecvChain {
     #[serde(with = "serde_bytes")]
     ck: Vec<u8>,
     next: u32,
+    #[serde(with = "key_map")]
     skipped: HashMap<u32, [u8; 32]>,
+}
+
+/// The keys as CBOR byte strings (33 bytes each), not as arrays of 32 integers (up to 64 bytes each): the state with up
+/// to 1000 old-chain keys is rewritten after every packet. `ByteBuf` reads either form.
+mod key_map {
+    use super::*;
+    use serde::ser::SerializeMap;
+
+    pub fn serialize<S: serde::Serializer>(keys: &HashMap<u32, [u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        let mut map = s.serialize_map(Some(keys.len()))?;
+        for (number, key) in keys {
+            map.serialize_entry(number, serde_bytes::Bytes::new(key))?;
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<HashMap<u32, [u8; 32]>, D::Error> {
+        let raw: HashMap<u32, serde_bytes::ByteBuf> = Deserialize::deserialize(d)?;
+        let mut keys = HashMap::with_capacity(raw.len());
+        for (number, buf) in raw {
+            let mut bytes = buf.into_vec();
+            let key = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| <D::Error as serde::de::Error>::custom("skipped key must be 32 bytes"));
+            bytes.zeroize();
+            keys.insert(number, key?);
+        }
+        Ok(keys)
+    }
 }
 
 impl Drop for OldRecvChain {
@@ -849,6 +880,61 @@ impl DeviceRatchetState {
         Ok((ciphertext, message_number, self.prev_chain_length))
     }
 
+    /// Call after a packet opened on the current receive chain (not `SkippedKeyChanges::old_chain`), with its header's
+    /// `prev_chain_length`: the peer sent exactly that many packets on the chain the last rotation replaced, and sends
+    /// no more there. Keys up to that length are derived (bounded like `chain_decrypt`) and the old chain key is
+    /// dropped, so a later leak of the state cannot derive any other key of that chain. Idempotent.
+    pub fn close_old_recv(&mut self, prev_chain_length: u32) {
+        let Some(old) = &mut self.old_recv else { return };
+        if old.ck.is_empty() {
+            return;
+        }
+        let end = prev_chain_length.min(old.next.saturating_add(MAX_SKIP_AHEAD));
+        let mut cursor = old.ck.clone();
+        let mut ok = true;
+        for number in old.next..end {
+            if end - number > MAX_SKIPPED_KEYS as u32 {
+                match chain_key_step(&cursor) {
+                    Ok(mut next_chain_key) => {
+                        set_secret(&mut cursor, next_chain_key.to_vec());
+                        next_chain_key.zeroize();
+                    }
+                    Err(_) => { ok = false; break; }
+                }
+                continue;
+            }
+            match chain_step(&cursor) {
+                Ok((key, mut next_chain_key)) => {
+                    old.skipped.insert(number, key);
+                    set_secret(&mut cursor, next_chain_key.to_vec());
+                    next_chain_key.zeroize();
+                }
+                Err(_) => { ok = false; break; }
+            }
+        }
+        cursor.zeroize();
+        if !ok {
+            return;
+        }
+        let excess = old.skipped.len().saturating_sub(MAX_SKIPPED_KEYS);
+        if excess > 0 {
+            let mut numbers: Vec<u32> = old.skipped.keys().copied().collect();
+            numbers.sort_unstable();
+            for oldest in numbers.into_iter().take(excess) {
+                if let Some(mut key) = old.skipped.remove(&oldest) {
+                    key.zeroize();
+                }
+            }
+        }
+        // Closed: only the stored keys open packets now. Every other number reads as spent (`KeyNotFound`).
+        old.ck.zeroize();
+        old.ck = Vec::new();
+        old.next = u32::MAX;
+        if old.skipped.is_empty() {
+            self.old_recv = None;
+        }
+    }
+
     /// Drops the chain the last rotation replaced once it is `OLD_RECV_MAX_AGE_MS` old. Called on receive, on send
     /// and on load, so a session that stops receiving does not keep the old keys forever.
     pub fn expire_old_recv(&mut self, now_ms: u64) {
@@ -882,6 +968,8 @@ impl DeviceRatchetState {
         aad: &[u8],
     ) -> Result<(Vec<u8>, SkippedKeyChanges), RatchetError> {
         self.expire_old_recv(now_ms);
+        // A new peer key was derived and the packet did not open on its chain: the sessions diverged, whatever the current chain says.
+        let mut rotation_failed = false;
         if let Some((new_peer_keys, kyber_ct)) = rotation {
             // Checked before the copy: the announcement is repeated on every packet until we answer on the new chain.
             if new_peer_keys.x25519_pubkey != self.peer_x25519_pubkey.as_bytes() {
@@ -901,6 +989,7 @@ impl DeviceRatchetState {
                             return Ok((plaintext, changes));
                         }
                         Err(_) => {
+                            rotation_failed = true;
                             ck_recv.zeroize();
                             skipped.values_mut().for_each(|key| key.zeroize());
                         }
@@ -920,12 +1009,16 @@ impl DeviceRatchetState {
                 }
                 // A consumed packet of the old chain: a duplicate, not a diverged session. The current chain's
                 // DecryptFailed counted it toward the 3-strike reset.
-                Err(RatchetError::KeyNotFound(n)) if message_number < old_next => return Err(RatchetError::KeyNotFound(n)),
+                // Not when the packet announced a rotation we could not follow: that is a diverged session.
+                Err(RatchetError::KeyNotFound(n)) if message_number < old_next && !rotation_failed => return Err(RatchetError::KeyNotFound(n)),
                 Err(_) => {}
             }
         }
         // The error of the current chain. The caller tells a duplicate (`RatchetError::KeyNotFound`) from a
         // diverged session by it.
+        if rotation_failed && matches!(current_err, RatchetError::KeyNotFound(_)) {
+            return Err(RatchetError::DecryptFailed);
+        }
         Err(current_err)
     }
 }
@@ -1204,7 +1297,7 @@ mod tests {
         // Out of order on the old chain too: the skipped key lives in `old_recv`.
         assert!(b.decrypt(&late_a1, n_a1, None, T0, b"").unwrap().1.old_chain);
         assert_eq!(b.decrypt(&late_a0, n_a0, None, T0, b"").unwrap().0, b"a0");
-        assert!(b.decrypt(&late_a0, n_a0, None, T0, b"").is_err(), "a replay must not decrypt twice");
+        assert!(matches!(b.decrypt(&late_a0, n_a0, None, T0, b""), Err(RatchetError::KeyNotFound(_))), "a replay must not decrypt twice, and reads as a duplicate");
 
         // The repeated announcement is a no-op, and the new chains work in both directions.
         let (ciphertext, number, _) = b.encrypt_next(b"b2", b"").unwrap();
@@ -1263,11 +1356,16 @@ mod tests {
         let (_, changes) = b.decrypt(ciphertext, *number, None, T0, b"").unwrap();
         assert_eq!(changes.used, vec![400]);
         assert_eq!(b.skipped_keys.len(), MAX_SKIPPED_KEYS);
-        assert!(b.decrypt(&sent[400].0, 400, None, T0, b"").is_err(), "evicted");
+        assert!(matches!(b.decrypt(&sent[400].0, 400, None, T0, b""), Err(RatchetError::KeyNotFound(400))), "evicted");
         assert_eq!(b.decrypt(&sent[401].0, 401, None, T0, b"").unwrap().0, b"m");
 
-        // A jump past the work limit changes nothing.
-        assert!(b.decrypt(b"garbage", 1403 + MAX_SKIP_AHEAD + 1, None, T0, b"").is_err());
+        // A jump past the work limit is refused before any key is derived, and changes nothing. The limit itself is what
+        // refuses it (a garbage tag alone would also fail, with DecryptFailed).
+        assert!(matches!(
+            b.decrypt(b"garbage", 1403 + MAX_SKIP_AHEAD + 1, None, T0, b""),
+            Err(RatchetError::TooManySkipped { gap, limit: MAX_SKIP_AHEAD }) if gap == MAX_SKIP_AHEAD + 1
+        ));
+        assert!(matches!(b.decrypt(b"garbage", 1403 + MAX_SKIP_AHEAD, None, T0, b""), Err(RatchetError::DecryptFailed)));
         assert_eq!(b.recv_message_number, 1403);
     }
 
@@ -1381,7 +1479,53 @@ mod tests {
     fn counters_do_not_wrap() {
         let (mut a, mut b) = session();
         a.send_message_number = u32::MAX;
-        assert!(a.encrypt_next(b"x", b"").is_err());
-        assert!(b.decrypt(b"x", u32::MAX, None, T0, b"").is_err());
+        assert!(matches!(a.encrypt_next(b"x", b""), Err(RatchetError::ChainExhausted)));
+        b.recv_message_number = u32::MAX;
+        assert!(matches!(b.decrypt(b"x", u32::MAX, None, T0, b""), Err(RatchetError::ChainExhausted)));
+    }
+
+    /// The first packet on the new chain closes the old one at the peer's `prev_chain_length`: the missing
+    /// packets of the old chain still open, the old chain key is gone (CRY-4).
+    #[test]
+    fn old_chain_is_closed_at_prev_chain_length() {
+        let (mut b, mut a) = session();
+        let (keys0, ct0, hello, n_hello) = rotate_and_send(&mut a, b"hello");
+        b.decrypt(&hello, n_hello, Some((&keys0, &ct0)), T0, b"").unwrap();
+        let (late_a0, n_a0, _) = a.encrypt_next(b"a0", b"").unwrap();
+        let (late_a1, n_a1, _) = a.encrypt_next(b"a1", b"").unwrap();
+        let (keys, kyber_ct, rotated, n_rot) = rotate_and_send(&mut b, b"b1");
+        a.decrypt(&rotated, n_rot, Some((&keys, &kyber_ct)), T0, b"").unwrap();
+        let (a2, n_a2, prev) = a.encrypt_next(b"a2", b"").unwrap();
+        assert_eq!(prev, 3, "hello, a0 and a1 were sent on the old chain");
+        let (plain, changes) = b.decrypt(&a2, n_a2, None, T0, b"").unwrap();
+        assert_eq!(plain, b"a2");
+        assert!(!changes.old_chain);
+        b.close_old_recv(prev);
+        assert!(b.old_recv.as_ref().unwrap().ck.is_empty());
+        b.close_old_recv(prev);
+        // The kept keys survive a store and reload (byte-string encoding of `OldRecvChain.skipped`).
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&b.to_persistable(), &mut bytes).unwrap();
+        let loaded: SerializableRatchetState = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let mut b = DeviceRatchetState::from_persistable(loaded, HashMap::new()).unwrap();
+        assert_eq!(b.old_recv.as_ref().unwrap().skipped.len(), 2);
+        assert_eq!(b.decrypt(&late_a1, n_a1, None, T0, b"").unwrap().0, b"a1");
+        assert_eq!(b.decrypt(&late_a0, n_a0, None, T0, b"").unwrap().0, b"a0");
+        assert!(matches!(b.decrypt(&late_a0, n_a0, None, T0, b""), Err(RatchetError::KeyNotFound(_))));
+    }
+
+    /// A packet whose rotation announcement does not open on the derived chain reads as a diverged session
+    /// (`DecryptFailed`), even when its number is below our receive counter (CRY-1).
+    #[test]
+    fn failed_rotation_below_the_counter_is_not_a_duplicate() {
+        let (mut a, mut b) = session();
+        for _ in 0..5 {
+            let (c, n, _) = a.encrypt_next(b"m", b"").unwrap();
+            b.decrypt(&c, n, None, T0, b"").unwrap();
+        }
+        let (_, mut stranger) = session();
+        let (keys, kyber_ct, ciphertext, _) = rotate_and_send(&mut stranger, b"x");
+        assert!(matches!(b.decrypt(&ciphertext, 1, Some((&keys, &kyber_ct)), T0, b""), Err(RatchetError::DecryptFailed)));
+        assert!(matches!(b.decrypt(&ciphertext, 1, None, T0, b""), Err(RatchetError::KeyNotFound(1))));
     }
 }

@@ -109,6 +109,9 @@ pub struct App {
     /// window shows a lock page, so an open conversation is NOT being
     /// looked at and a new message must still raise a notification.
     pub locked: Cell<bool>,
+    /// Time of the last input event in the main window (see
+    /// `ui::window::idle_lock`). Read receipts wait while it is stale.
+    pub last_input: Cell<u64>,
 
     pub window: RefCell<Option<adw::ApplicationWindow>>,
     pub toasts: RefCell<Option<adw::ToastOverlay>>,
@@ -143,6 +146,7 @@ impl App {
             core_panic_reported: Cell::new(false),
             active_conversation: RefCell::new(None),
             locked: Cell::new(false),
+            last_input: Cell::new(util::now_ms()),
             window: RefCell::new(None),
             toasts: RefCell::new(None),
             contacts: RefCell::new(Vec::new()),
@@ -310,9 +314,9 @@ impl App {
                 // the process exits).
                 stop_poll_loop();
                 let profile = self.data_dir.to_string_lossy().to_string();
-                if let Err(error) = crate::keyring::delete_key(&profile) {
-                    eprintln!("typeon: could not remove the vault key after remote unlink: {error}");
-                }
+                // A D-Bus round trip (or a wallet unlock prompt): not on the
+                // GTK thread. Started now, joined before the erase below.
+                let key_deleted = std::thread::spawn(move || crate::keyring::delete_key(&profile));
                                 // Deleting the directory is on the same main-thread path as closing the app. `stop_poll_loop` only sets a flag (the poll thread may
                                 // be asleep for up to 1 s), and the Rust core (swarm, tokio tasks, the OPEN SQLite connection) keeps running. If the directory is
                                 // deleted right away and the app stays open until the user presses OK, the core would keep writing into a deleted directory. The vault
@@ -323,14 +327,18 @@ impl App {
                     // Recursive delete is unbounded blocking: off the GTK thread.
                     run_in_background(
                         move || {
+                            match key_deleted.join() {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => eprintln!("typeon: could not remove the vault key after remote unlink: {error}"),
+                                Err(_) => eprintln!("typeon: vault key removal panicked after remote unlink"),
+                            }
                             // Close the DB and stop the swarm first, so no
                             // file is written while the tree is removed.
                             crate::core::shutdown();
-                            std::fs::remove_dir_all(&data_dir).or_else(|_| {
-                                // A file closed during shutdown can land mid-walk.
-                                std::thread::sleep(std::time::Duration::from_millis(200));
-                                std::fs::remove_dir_all(&data_dir)
-                            })
+                            // Plaintext copies first, file by file: one open
+                            // file (Windows) must not keep the rest on disk.
+                            crate::sweep_plain_cache(&data_dir);
+                            crate::erase_data_dir(&data_dir)
                         },
                         move |result| {
                             if let Err(error) = result {
@@ -513,11 +521,8 @@ impl App {
         /// Notifications shown even while the chat is open. Security alerts (see `device_alert`) must be visible no matter where the user is.
     fn notify_always(self: &Rc<Self>, id: &str, title: &str, body: &str) {
         // Same setting as message notifications: no names on a lock screen.
-        // The body carries a peer-chosen name, so it is markup-escaped too.
         let hide = self.prefs.borrow().hide_notification_content;
-        // Windows balloons are plain text: no markup to escape there.
-        let escaped = if cfg!(windows) { body.to_string() } else { glib::markup_escape_text(body).to_string() };
-        let (title, body) = if hide { ("Typeon", "Security notice") } else { (title, escaped.as_str()) };
+        let (title, body) = if hide { ("Typeon", "Security notice") } else { (title, body) };
         post_notification(&self.application, id, title, body, gio::NotificationPriority::High);
     }
 
@@ -568,6 +573,7 @@ impl App {
         run_in_background(
             || (core::list_contacts(), core::list_groups()),
             move |(contacts, groups)| {
+                app.prefs.borrow_mut().prune_conversations(&contacts, &groups);
                 *app.contacts.borrow_mut() = contacts;
                 *app.groups.borrow_mut() = groups;
             },
@@ -631,7 +637,27 @@ impl App {
     pub fn window(&self) -> Option<adw::ApplicationWindow> {
         self.window.borrow().clone()
     }
+
+    /// The user is looking at the main window: shown, focused, not
+    /// minimised, not behind the idle lock and not idle. Read receipts are
+    /// only sent while this holds.
+    pub fn is_watching(&self) -> bool {
+        if self.locked.get() || util::now_ms().saturating_sub(self.last_input.get()) >= IDLE_LOCK_MS {
+            return false;
+        }
+        self.window().is_some_and(|window| {
+            let minimized = window
+                .surface()
+                .and_downcast::<gtk::gdk::Toplevel>()
+                .is_some_and(|toplevel| toplevel.state().contains(gtk::gdk::ToplevelState::MINIMIZED));
+            window.is_visible() && window.is_active() && !minimized
+        })
+    }
 }
+
+/// No input for this long counts as away: the idle lock engages (passphrase
+/// vault) and read receipts wait.
+pub const IDLE_LOCK_MS: u64 = 10 * 60 * 1000;
 
 /// Starts the once-a-second poll on a worker thread and pumps its output into
 /// the main loop. Also drives the periodic name-cache refresh.
@@ -671,7 +697,11 @@ pub fn start_poll_loop(app: &Rc<App>) {
 
     let refresher = app.clone();
     glib::timeout_add_seconds_local(15, move || {
-        refresher.refresh_caches();
+        // Name changes arrive as events (see `apply_side_effects`); in the
+        // background this full re-read (avatars included) is skipped.
+        if !POWER_SAVING.load(std::sync::atomic::Ordering::Relaxed) {
+            refresher.refresh_caches();
+        }
         // Read-state marking is deferred (see `Prefs::flush`); this is where it
         // actually reaches disk.
         refresher.prefs.borrow_mut().flush();
@@ -798,7 +828,10 @@ pub fn post_notification(
     #[cfg(not(windows))]
     {
         let notification = gio::Notification::new(title);
-        notification.set_body(Some(body));
+        // Servers with body-markup / body-hyperlinks / body-images render the
+        // body: peer text must not become links or remote image fetches.
+        // (Windows balloons are plain text.)
+        notification.set_body(Some(glib::markup_escape_text(body).as_str()));
         notification.set_priority(priority);
         application.send_notification(Some(id), &notification);
     }

@@ -217,7 +217,7 @@ pub(super) fn group_picture(view: &Rc<ChatView>) {
     };
     let Some(window) = view.app().window() else { return };
 
-    let dialog = gtk::FileDialog::builder().title("Choose a group picture").build();
+    let dialog = gtk::FileDialog::builder().modal(false).title("Choose a group picture").build();
     let view = view.clone();
     let group_id = group_id.clone();
     dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {

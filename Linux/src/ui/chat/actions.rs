@@ -201,15 +201,24 @@ impl ChatView {
     /// Sends a copy of `entry` (text, or the file with its caption) to a chat
     /// picked from a list, marked "Forwarded" like Android does.
     pub(super) fn forward(self: &Rc<Self>, entry: &Entry) {
+        // The lists take the core lock: read off the GTK thread.
+        let (view, entry) = (self.clone(), entry.clone());
+        app::run_in_background(
+            || (core::list_contacts(), core::list_groups()),
+            move |(contacts, groups)| view.forward_to(&entry, contacts, groups),
+        );
+    }
+
+    fn forward_to(self: &Rc<Self>, entry: &Entry, contacts: Vec<core::ContactSummary>, groups: Vec<core::GroupSummary>) {
         let Some(window) = self.app().window() else { return };
-        let mut targets: Vec<(String, Conversation)> = core::list_contacts()
+        let mut targets: Vec<(String, Conversation)> = contacts
             .into_iter()
             .filter_map(|c| {
                 let fp = c.active_device_fingerprint.clone()?;
                 Some((c.display_name.clone(), Conversation::Direct { fingerprint: fp, contact_id: c.contact_id, identity_id: c.identity_id, name: c.display_name }))
             })
             .collect();
-        targets.extend(core::list_groups().into_iter().map(|g| (format!("👥 {}", g.name), Conversation::Group { group_id: g.group_id, name: g.name })));
+        targets.extend(groups.into_iter().map(|g| (format!("👥 {}", g.name), Conversation::Group { group_id: g.group_id, name: g.name })));
         targets.sort_by_key(|(name, _)| name.to_lowercase());
 
         let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();
@@ -227,11 +236,12 @@ impl ChatView {
         dialog.add_response("cancel", "Cancel");
         dialog.set_close_response("cancel");
 
-        let (app, entry, dialog_ref) = (self.app().clone(), entry.clone(), dialog.clone());
+        let (app, entry, dialog_ref, view) = (self.app().clone(), entry.clone(), dialog.clone(), self.clone());
         list.connect_row_activated(move |_, row| {
             dialog_ref.close();
             let Some((_, target)) = targets.get(row.index() as usize).cloned() else { return };
-            let (app, entry) = (app.clone(), entry.clone());
+            let (app, entry, view) = (app.clone(), entry.clone(), view.clone());
+            let target_key = target.key();
             app::run_in_background(
                 {
                     let entry = entry.clone();
@@ -263,7 +273,14 @@ impl ChatView {
                     }
                 },
                 move |result| match result {
-                    Ok(()) => app.toast("Forwarded"),
+                    Ok(()) => {
+                        app.toast("Forwarded");
+                        // No core event for a local send: show it in the open chat and the list.
+                        if target_key == view.conversation.key() {
+                            view.reload();
+                        }
+                        view.main.refresh_chats();
+                    }
                     Err(error) => app.toast(&format!("Could not forward: {}", error)),
                 },
             );
@@ -358,12 +375,18 @@ impl ChatView {
         } else {
             None
         };
+        self.set_reply(entry.id.clone(), preview, sender);
+        self.composer.grab_focus();
+    }
+
+    /// Shows the reply bar for (id, preview, sender) — also used to put a
+    /// reply back after a failed send.
+    pub(super) fn set_reply(&self, id: String, preview: String, sender: Option<String>) {
         self.reply_label
             .set_label(&format!("Replying to: {}", util::preview_text(&preview, 80)));
         self.reply_bar.set_reveal_child(true);
         self.reply_island.add_css_class("active");
-        *self.reply_to.borrow_mut() = Some((entry.id.clone(), preview, sender));
-        self.composer.grab_focus();
+        *self.reply_to.borrow_mut() = Some((id, preview, sender));
     }
 
     pub(super) fn clear_reply(&self) {
@@ -424,10 +447,45 @@ impl ChatView {
             .and_then(|contact| contact.active_device_fingerprint.clone())
     }
 
+    /// The user is looking at this chat: page on screen, window shown,
+    /// focused, not minimised, not locked, not idle.
+    pub(super) fn is_watched(&self) -> bool {
+        self.messages.is_mapped() && self.app().is_watching()
+    }
+
+    /// Per incoming message: marks the chat read now, or once the user is
+    /// back (see `flush_deferred_reads`).
+    pub(super) fn mark_read_if_watched(&self) {
+        if self.is_watched() {
+            self.mark_read();
+        } else {
+            self.read_deferred.set(true);
+        }
+    }
+
+    /// Sends the receipts and the read mark held while nobody was looking,
+    /// once someone is. Cheap when nothing waits; called from a 2 s timer.
+    pub(super) fn flush_deferred_reads(self: &Rc<Self>) {
+        if !self.read_deferred.get() && self.seen_deferred.borrow().is_empty() {
+            return;
+        }
+        if !self.is_watched() {
+            return;
+        }
+        let entries = std::mem::take(&mut *self.seen_deferred.borrow_mut());
+        for entry in &entries {
+            self.send_seen(entry);
+        }
+        if self.read_deferred.replace(false) {
+            self.mark_read();
+        }
+    }
+
     /// Local only. Cheap enough to call per incoming message.
     pub(super) fn mark_read(&self) {
         let key = self.conversation.key();
         self.app().prefs.borrow_mut().mark_read_now(&key);
+        self.main.refresh_chats();
     }
 
     /// Local, *and* tells my other devices so this chat is not left unread on

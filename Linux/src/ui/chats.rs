@@ -26,6 +26,9 @@ struct Row {
     pin_key: String,
     subtitle: String,
     timestamp: u64,
+    /// The newest item came from someone else: only then can the chat be
+    /// unread (my own message, sent from the phone, is not).
+    incoming: bool,
     unread: bool,
     pinned: bool,
     avatar_hex: Option<String>,
@@ -108,7 +111,8 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                 // late would put stale rows on screen.
                 let mine = generation.get() + 1;
                 generation.set(mine);
-                crate::app::run_in_background(collect_rows, move |mut rows| {
+                let own_identity = main.app.own_identity_id.borrow().clone();
+                crate::app::run_in_background(move || collect_rows(&own_identity), move |mut rows| {
                     if generation.get() != mine {
                         return;
                     }
@@ -122,6 +126,13 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                         })
                         .collect();
 
+                    // The rebuild must not throw the reader back to the top.
+                    let adjustment = list
+                        .parent()
+                        .and_then(|viewport| viewport.parent())
+                        .and_downcast::<gtk::ScrolledWindow>()
+                        .map(|scroller| scroller.vadjustment());
+                    let offset = adjustment.as_ref().map(|a| a.value());
                     while let Some(child) = list.first_child() {
                         list.remove(&child);
                     }
@@ -139,11 +150,15 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                         list.append(&build_row(&main, row, self_refresh.clone()));
                     }
                     stack.set_visible_child_name(if visible.is_empty() { "empty" } else { "list" });
+                    if let (Some(adjustment), Some(offset)) = (adjustment, offset) {
+                        glib::idle_add_local_once(move || adjustment.set_value(offset));
+                    }
                 });
             });
         })
     };
     *refresh_cell.borrow_mut() = Some(refresh.clone());
+    *main.chats_refresh.borrow_mut() = Some(Rc::downgrade(&refresh));
 
     {
         let refresh = refresh.clone();
@@ -201,6 +216,8 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                     | "device_linked"
                     | "history_backfilled"
                     | "sync"
+                    | "read_state_sync"
+                    | "call"
             ) {
                 refresh();
             }
@@ -213,19 +230,20 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
 /// Core reads only — runs off the GTK thread (the core lock is shared with the
 /// poll thread, and this is 2-4 queries per conversation). `unread`/`pinned`
 /// come from prefs, which live on the main thread; `apply_prefs` fills them.
-fn collect_rows() -> Vec<Row> {
+fn collect_rows(own_identity: &str) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
 
     for contact in core::list_contacts() {
         let fingerprint = contact.active_device_fingerprint.clone().unwrap_or_default();
         let ready = !fingerprint.is_empty();
         let newest = if ready { newest_direct(&fingerprint) } else { None };
-        let (subtitle, timestamp) = match newest {
-            Some((text, at)) => (text, at),
-            None if ready => ("No messages yet".to_string(), 0),
-            None => ("Pairing… waiting for the other device".to_string(), 0),
+        let (subtitle, timestamp, incoming) = match newest {
+            Some((text, at, incoming)) => (text, at, incoming),
+            None if ready => ("No messages yet".to_string(), 0, false),
+            None => ("Pairing… waiting for the other device".to_string(), 0, false),
         };
         rows.push(Row {
+            incoming,
             unread: false,
             pinned: false,
             pin_key: contact.contact_id.clone(),
@@ -245,10 +263,10 @@ fn collect_rows() -> Vec<Row> {
 
     for group in core::list_groups() {
         let read_key = format!("group:{}", group.group_id);
-        let newest = newest_group(&group.group_id);
+        let newest = newest_group(&group.group_id, own_identity);
         let member_count = group.member_identity_ids.len();
-        let (subtitle, timestamp) = match newest {
-            Some((text, at)) => (text, at),
+        let (subtitle, timestamp, incoming) = match newest {
+            Some((text, at, incoming)) => (text, at, incoming),
             None => (
                 format!(
                     "{} member{}",
@@ -256,9 +274,11 @@ fn collect_rows() -> Vec<Row> {
                     if member_count == 1 { "" } else { "s" }
                 ),
                 0,
+                false,
             ),
         };
         rows.push(Row {
+            incoming,
             unread: false,
             pinned: false,
             pin_key: read_key.clone(),
@@ -284,7 +304,7 @@ fn apply_prefs(main: &Rc<MainUi>, rows: &mut Vec<Row>) {
             Conversation::Direct { fingerprint, .. } => fingerprint.clone(),
             Conversation::Group { group_id, .. } => format!("group:{}", group_id),
         };
-        row.unread = row.timestamp > 0 && row.timestamp > prefs.last_read_at(&key);
+        row.unread = row.incoming && row.timestamp > 0 && row.timestamp > prefs.last_read_at(&key);
         row.pinned = prefs.is_pinned(&row.pin_key);
     }
 
@@ -303,8 +323,9 @@ fn apply_prefs(main: &Rc<MainUi>, rows: &mut Vec<Row>) {
 /// sender's `sent_at_ms`: unread state is compared against a locally recorded
 /// "when I last looked", so a peer with a fast clock must not be able to make
 /// old messages look new.
-fn newest_direct(fingerprint: &str) -> Option<(String, u64)> {
-    let mut newest: Option<(String, u64)> = None;
+/// The bool: the newest item was received, not sent by me.
+fn newest_direct(fingerprint: &str) -> Option<(String, u64, bool)> {
+    let mut newest: Option<(String, u64, bool)> = None;
 
     if let Some(message) = core::message_history(fingerprint, 1).into_iter().next_back() {
         let text = if message.is_deleted {
@@ -312,35 +333,38 @@ fn newest_direct(fingerprint: &str) -> Option<(String, u64)> {
         } else {
             util::preview_text(&message.text, 64)
         };
-        let text = if message.direction == "sent" {
+        let sent = message.direction == "sent";
+        let text = if sent {
             format!("You: {}", text)
         } else {
             text
         };
-        newest = Some((text, message.timestamp));
+        newest = Some((text, message.timestamp, !sent));
     }
 
-    if let Some(attachment) = core::list_attachments_brief(fingerprint)
+    // Only the newest file, not the whole (up to 500-row) listing.
+    if let Some(attachment) = core::list_attachments_before(fingerprint, u64::MAX, 1)
         .into_iter()
         .max_by_key(|a| a.created_at)
     {
-        let later = newest.as_ref().map(|(_, at)| attachment.created_at > *at).unwrap_or(true);
+        let later = newest.as_ref().map(|(_, at, _)| attachment.created_at > *at).unwrap_or(true);
         if later {
             let label = util::attachment_label(&attachment.mime_type, &attachment.file_name, attachment.sticker);
-            let label = if attachment.direction == "sent" {
+            let sent = attachment.direction == "sent";
+            let label = if sent {
                 format!("You: {}", label)
             } else {
                 label
             };
-            newest = Some((label, attachment.created_at));
+            newest = Some((label, attachment.created_at, !sent));
         }
     }
 
     newest
 }
 
-fn newest_group(group_id: &str) -> Option<(String, u64)> {
-    let mut newest: Option<(String, u64)> = None;
+fn newest_group(group_id: &str, own_identity: &str) -> Option<(String, u64, bool)> {
+    let mut newest: Option<(String, u64, bool)> = None;
 
     if let Some(message) = core::group_message_history(group_id, 1).into_iter().next_back() {
         let text = if message.is_deleted {
@@ -348,18 +372,21 @@ fn newest_group(group_id: &str) -> Option<(String, u64)> {
         } else {
             util::preview_text(&message.text, 64)
         };
-        newest = Some((text, message.timestamp));
+        let mine = message.direction == "sent"
+            || message.sender_identity_id.as_deref().is_some_and(|id| !id.is_empty() && id == own_identity);
+        newest = Some((text, message.timestamp, !mine));
     }
 
-    if let Some(attachment) = core::list_group_attachments_brief(group_id)
+    if let Some(attachment) = core::list_group_attachments_before(group_id, u64::MAX, 1)
         .into_iter()
         .max_by_key(|a| a.created_at)
     {
-        let later = newest.as_ref().map(|(_, at)| attachment.created_at > *at).unwrap_or(true);
+        let later = newest.as_ref().map(|(_, at, _)| attachment.created_at > *at).unwrap_or(true);
         if later {
             newest = Some((
                 util::attachment_label(&attachment.mime_type, &attachment.file_name, attachment.sticker),
                 attachment.created_at,
+                attachment.direction != "sent",
             ));
         }
     }

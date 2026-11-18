@@ -308,22 +308,29 @@ internal fun SettingsFragment.buildServerRow(obj: org.json.JSONObject): View {
         text = getString(R.string.action_remove_server)
         setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
         setOnClickListener {
-            // `removeServer` JNI — off the main thread.
-            lifecycleScope.launch(Dispatchers.IO) {
-                val res = try {
-                    P2PLib.removeServer(serverId)
-                } catch (e: Exception) {
-                    "Error: ${e.message}"
-                }
-                withContext(Dispatchers.Main) {
-                    if (res.startsWith("Error:")) {
-                        Toast.makeText(ctx, com.p2p.messenger.util.coreErrorText(ctx, res), Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(ctx, R.string.msg_server_removed, Toast.LENGTH_SHORT).show()
+            // Rejoining needs the operator's join code again: ask first.
+            AlertDialog.Builder(ctx)
+                .setMessage(getString(R.string.confirm_remove_server, name))
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.action_remove_server) { _, _ ->
+                    // `removeServer` JNI — off the main thread.
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        val res = try {
+                            P2PLib.removeServer(serverId)
+                        } catch (e: Exception) {
+                            "Error: ${e.message}"
+                        }
+                        withContext(Dispatchers.Main) {
+                            if (res.startsWith("Error:")) {
+                                Toast.makeText(ctx, com.p2p.messenger.util.coreErrorText(ctx, res), Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(ctx, R.string.msg_server_removed, Toast.LENGTH_SHORT).show()
+                            }
+                            refreshServers()
+                        }
                     }
-                    refreshServers()
                 }
-            }
+                .show()
         }
     })
 

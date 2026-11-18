@@ -3,7 +3,7 @@
 //! to this being a desktop: changing the vault passphrase, and exporting a
 //! recovery file for *this* device's keys.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -71,22 +71,63 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
         .build();
     {
         let app = app.clone();
+        // Set while the switch is put back after a cancelled "off".
+        let reverting = Rc::new(std::cell::Cell::new(false));
         tor.connect_active_notify(move |row| {
-            let enabled = row.is_active();
-            let mut prefs = app.prefs.borrow_mut();
-            prefs.tor_enabled = enabled;
-            prefs.save();
-            drop(prefs);
-            // the notice is a toast, like the Android client's — the
-            // transport can only be added when the network starts, so the
-            // change lands at the next launch.
-            // One toast: a second one replaces the first. Tor is the only
-            // transport, so off means no network at all.
-            app.toast(if enabled {
-                "Tor setting applies after a restart."
-            } else {
-                "Tor setting applies after a restart. With Tor off the network will not start."
+            if reverting.replace(false) {
+                return;
+            }
+            let save = {
+                let app = app.clone();
+                move |enabled: bool| {
+                    let mut prefs = app.prefs.borrow_mut();
+                    prefs.tor_enabled = enabled;
+                    prefs.save();
+                    drop(prefs);
+                    // the notice is a toast, like the Android client's — the
+                    // transport can only be added when the network starts, so the
+                    // change lands at the next launch.
+                    // One toast: a second one replaces the first. Tor is the only
+                    // transport, so off means no network at all.
+                    app.toast(if enabled {
+                        "Tor setting applies after a restart."
+                    } else {
+                        "Tor setting applies after a restart. With Tor off the network will not start."
+                    });
+                }
+            };
+            if row.is_active() {
+                save(true);
+                return;
+            }
+            // Off cuts this device off the network: ask first.
+            let parent = row
+                .root()
+                .and_downcast::<gtk::Window>()
+                .or_else(|| app.window().map(|window| window.upcast()));
+            let dialog = adw::MessageDialog::new(
+                parent.as_ref(),
+                Some("Turn Tor off?"),
+                Some(
+                    "Tor is Typeon's only transport. With it off the network does not start after \
+                     the next restart: nothing is sent or received until you turn it back on.",
+                ),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("off", "Turn off");
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            dialog.set_response_appearance("off", adw::ResponseAppearance::Destructive);
+            let (row, reverting) = (row.clone(), reverting.clone());
+            dialog.connect_response(None, move |_, response| {
+                if response == "off" {
+                    save(false);
+                } else {
+                    reverting.set(true);
+                    row.set_active(true);
+                }
             });
+            dialog.present();
         });
     }
     connectivity.add(&tor);
@@ -433,15 +474,26 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
         let app = app.clone();
         let id = entry.server_id.clone();
         remove_button.connect_clicked(move |_| {
-            let (app, id) = (app.clone(), id.clone());
-            app::run_in_background(
-                move || core::remove_server(&id),
-                move |result| match result {
-                    Ok(()) => {
-                        app.toast("Server removed.");
-                        present_page(&app, Some("Network"));
-                    }
-                    Err(e) => app.toast(&format!("Failed: {}", e)),
+            let (app_done, id) = (app.clone(), id.clone());
+            dialogs::confirm(
+                &app,
+                "Remove this server?",
+                "Store-and-forward through it stops on this device. Using it again needs a new \
+                 join code from the server.",
+                "Remove",
+                true,
+                move || {
+                    let (app, id) = (app_done.clone(), id.clone());
+                    app::run_in_background(
+                        move || core::remove_server(&id),
+                        move |result| match result {
+                            Ok(()) => {
+                                app.toast("Server removed.");
+                                present_page(&app, Some("Network"));
+                            }
+                            Err(e) => app.toast(&format!("Failed: {}", e)),
+                        },
+                    );
                 },
             );
         });
@@ -759,7 +811,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
 
 fn pick_wallpaper(app: &Rc<App>, row: &adw::ActionRow) {
     let Some(window) = app.window() else { return };
-    let dialog = gtk::FileDialog::builder()
+    let dialog = gtk::FileDialog::builder().modal(false)
         .title("Choose a chat wallpaper")
         .build();
     let app = app.clone();
@@ -781,7 +833,7 @@ fn pick_wallpaper(app: &Rc<App>, row: &adw::ActionRow) {
 /// Open a file picker for `.ttf`/`.otf` font files.
 fn pick_font(app: &Rc<App>, font_row: &adw::ComboRow) {
     let Some(window) = app.window() else { return };
-    let dialog = gtk::FileDialog::builder()
+    let dialog = gtk::FileDialog::builder().modal(false)
         .title("Choose a font file")
         .build();
 
@@ -1090,8 +1142,9 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     let recovery = adw::ActionRow::builder()
         .title("Export a recovery file")
         .subtitle(
-            "A passphrase-protected backup of this device's keys. It restores this device — it \
-             does not move your account.",
+            "A passphrase-protected file with every long-term key of this device. This computer \
+             cannot restore from it: if it is lost, link it to your phone again. Keep the file \
+             as safe as the keys themselves, or do not make one.",
         )
         .activatable(true)
         .build();
@@ -1143,11 +1196,13 @@ fn confirm_delete_account(app: &Rc<App>) {
     let app = app.clone();
     app::run_in_background(
         || {
-            core::own_identity_id().ok().is_some_and(|id| {
-                core::list_linked_devices()
-                    .iter()
-                    .any(|d| d.is_this_device && d.device_fingerprint == id)
-            })
+            // A desktop is only ever a linked device (owner rule).
+            !core::is_secondary_device()
+                && core::own_identity_id().ok().is_some_and(|id| {
+                    core::list_linked_devices()
+                        .iter()
+                        .any(|d| d.is_this_device && d.device_fingerprint == id)
+                })
         },
         move |root| {
             if !root {
@@ -1192,6 +1247,13 @@ fn confirm_delete_account(app: &Rc<App>) {
 }
 
 pub fn erase_profile_and_quit(app: &Rc<App>) {
+    // The phone revokes this device, or it keeps syncing to a dead one. Bounded
+    // (about 3 s) and before the poll loop stops, which drives the send.
+    let app = app.clone();
+    app::run_in_background(core::announce_leaving, move |()| erase_now(&app));
+}
+
+fn erase_now(app: &Rc<App>) {
     // Stop the poll thread before erasing the files it works on, exactly like
     // the `self_revoked` path in `app.rs`: it would otherwise keep polling a
     // deleted database until the process exits.
@@ -1206,19 +1268,17 @@ pub fn erase_profile_and_quit(app: &Rc<App>) {
         move || {
             let keyring_result = crate::keyring::delete_key(&data_dir.to_string_lossy());
             // Close the DB and stop the swarm first, so nothing writes while
-            // the tree is removed; retry once if a file closed mid-walk.
+            // the tree is removed (`erase_data_dir` retries files closed mid-walk).
             crate::core::shutdown();
-            let removed = std::fs::remove_dir_all(&data_dir).or_else(|_| {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                std::fs::remove_dir_all(&data_dir)
-            });
+            let removed = crate::erase_data_dir(&data_dir);
             (keyring_result, removed)
         },
         move |(keyring_result, removed)| {
             if let Err(error) = keyring_result {
                 eprintln!("typeon: could not remove the vault key: {error}");
             }
-            if let Err(error) = removed {
+            // The phone's revoke can arrive meanwhile and erase it first (`self_revoked`).
+            if let Err(error) = removed.or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
                 app.toast(&format!("Could not erase the data directory: {error}"));
                 return;
             }
@@ -1245,7 +1305,7 @@ fn confirm_logout(app: &Rc<App>) {
 
 fn pick_profile_picture(app: &Rc<App>) {
     let Some(window) = app.window() else { return };
-    let dialog = gtk::FileDialog::builder().title("Choose a profile picture").build();
+    let dialog = gtk::FileDialog::builder().modal(false).title("Choose a profile picture").build();
     let app = app.clone();
     dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
         let Ok(file) = result else { return };
@@ -1365,11 +1425,14 @@ fn export_recovery(app: &Rc<App>) {
         // Argon2id is deliberately slow — off the main thread it goes. The
         // passphrase is zeroized as soon as the export bytes exist.
         app::run_in_background(
-            move || core::export_recovery(&passphrase),
-            move |bytes| {
+            move || (core::export_recovery(&passphrase), core::last_recovery_trimmed()),
+            move |(bytes, trimmed)| {
                 if bytes.is_empty() {
                     app.toast("Export failed.");
                     return;
+                }
+                if trimmed > 0 {
+                    app.toast(&format!("The history was too large: only the newest {trimmed} messages are in this file."));
                 }
                 save_recovery_bytes(&app, bytes);
             },
@@ -1380,7 +1443,7 @@ fn export_recovery(app: &Rc<App>) {
 
 fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
     let Some(window) = app.window() else { return };
-    let dialog = gtk::FileDialog::builder()
+    let dialog = gtk::FileDialog::builder().modal(false)
         .title("Save recovery file")
         .initial_name("typeon-recovery.bin")
         .build();
@@ -1514,6 +1577,21 @@ pub fn apply_theme(app: &Rc<App>) {
     };
 
     let dark = manager.is_dark();
+    // The colours are baked for one scheme; if libadwaita flips `is-dark`
+    // later (system theme change, portal answering late) rebuild them.
+    thread_local! {
+        static LAST_DARK: Cell<bool> = const { Cell::new(false) };
+        static WATCHING: Cell<bool> = const { Cell::new(false) };
+    }
+    LAST_DARK.with(|d| d.set(dark));
+    if !WATCHING.with(|w| w.replace(true)) {
+        let app = app.clone();
+        manager.connect_dark_notify(move |m| {
+            if m.is_dark() != LAST_DARK.with(|d| d.get()) {
+                apply_theme(&app);
+            }
+        });
+    }
     let appearance =
         crate::theme::Appearance::from_prefs(&app.prefs.borrow(), dark, base_font_pt(), custom_font_family);
     let css = crate::theme::stylesheet(&appearance);

@@ -5,8 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.os.*
 import com.p2p.messenger.util.Log
 import androidx.core.app.NotificationCompat
@@ -15,15 +13,6 @@ import com.p2p.messenger.R
 import com.p2p.messenger.util.NotificationHelper
 import com.p2p.messenger.util.ReadStatePrefs
 import org.json.JSONObject
-
-/** See `P2PService.bindToWifiIfAvailable`. The transport type alone is not enough: the network must also be verified to reach the internet.
- *  Otherwise a device could join a WiFi without internet and be cut off from its working mobile data. */
-private fun NetworkCapabilities?.isValidatedWifi(): Boolean {
-    if (this == null) return false
-    return hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-        hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-        hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-}
 
 class P2PService : Service() {
 
@@ -34,7 +23,6 @@ class P2PService : Service() {
         const val PREFS_NAME = "p2p_settings"
         const val KEY_NODE_MODE = "node_mode_enabled"
         /** Tor onion service preference, persisted. */
-        const val KEY_TOR_ENABLED = "tor_enabled"
         /** Byte limit for history and attachment storage in node mode (see Rust `history_storage_limit_bytes`). */
         const val KEY_HISTORY_STORAGE_LIMIT = "history_storage_limit_bytes"
         const val DEFAULT_HISTORY_STORAGE_LIMIT_BYTES = 2L * 1024 * 1024 * 1024
@@ -102,6 +90,12 @@ class P2PService : Service() {
          *  While the service instance runs, that queued call is cancelled and a new turn is triggered at once, so the delay resets as soon as a screen opens. */
         @Volatile
         private var wakePollNow: (() -> Unit)? = null
+
+        /** The Doze alarm's turn, run by [DozeWakeReceiver] on the main thread while the service runs. */
+        @Volatile
+        private var dozeWake: (() -> Unit)? = null
+
+        fun onDozeAlarm() { dozeWake?.invoke() }
 
         fun addMessageListener(listener: (String) -> Unit) {
             listeners.add(listener)
@@ -191,23 +185,12 @@ class P2PService : Service() {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_NODE_MODE, enabled).apply()
                         // If a network is already running, update it live too.
-            P2PLib.setNodeMode(enabled)
+            settingsJni.execute { P2PLib.setNodeMode(enabled) }
         }
 
-        /** Tor onion service: a persistent preference, like node mode. Unlike `setNodeMode`, there is NO live toggle: the Tor transport can only be added in
-         *  `startNetwork`, so a change takes effect when the network layer restarts (see tor.rs and network.rs start_network).
-         *
-         *  The default is ON, so two devices behind CGNAT can reach each other with no settings changed (see tor.rs and SECURITY.md, 'Tor onion'). This default applies
-         *  ONLY when the key was never written (first install). If the user turns it off in Settings, that choice is stored and is not turned back on at the next start. */
-        fun isTorEnabled(context: Context): Boolean {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            return prefs.getBoolean(KEY_TOR_ENABLED, true)
-        }
-
-        fun setTorEnabled(context: Context, enabled: Boolean) {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit().putBoolean(KEY_TOR_ENABLED, enabled).apply()
-        }
+        /** Settings JNI calls take the core lock, which a poll turn can hold for seconds: never on the
+         *  main thread. One thread keeps them in order, so the last value wins. */
+        private val settingsJni = java.util.concurrent.Executors.newSingleThreadExecutor()
 
         /** The history and attachment storage limit slider in Settings. It matters only while node mode is on (see Rust `enforce_history_storage_limit`),
          *  but the preference is always stored. */
@@ -220,7 +203,7 @@ class P2PService : Service() {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putLong(KEY_HISTORY_STORAGE_LIMIT, bytes).apply()
                         // If a network is already running, update it live too (if the limit was lowered, the oldest files are deleted at once).
-            P2PLib.setHistoryStorageLimitBytes(bytes)
+            settingsJni.execute { P2PLib.setHistoryStorageLimitBytes(bytes) }
         }
     }
 
@@ -260,9 +243,7 @@ class P2PService : Service() {
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     /** The timeout the held lock was taken with (0 = none). */
     @Volatile private var heldWakeTimeoutMs = 0L
-    private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
-    /** See `observeNetworkChangesForReconnect`: a separate callback from `wifiNetworkCallback` (WiFi only, used only to bind the process). This one follows ANY
-     *  default-network change. */
+    /** See `observeNetworkChangesForReconnect`: follows ANY default-network change. */
     private var defaultNetworkCallback: ConnectivityManager.NetworkCallback? = null
     // This service runs `P2PLib.pollNetwork()` (JNI: message decryption, ratchet cryptography, DB archiving, gossipsub and file-offer event handling) every second, indefinitely.
     // It is scheduled on its own `HandlerThread`, not on the UI thread's `Handler`. On the UI thread, any poll turn longer than a few hundred milliseconds (a large
@@ -480,12 +461,12 @@ class P2PService : Service() {
         dozeAlarmSet = true
         try {
             val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-            val intent = Intent(this, P2PService::class.java).setAction(ACTION_WAKE_POLL)
-            // `getService` = `Context.startService()`: since Android 8 a
-            // background app may NOT start a service that way — the alarm
-            // fired, the start was refused and the wake-up chain died
-            // silently. `getForegroundService` is the sanctioned way.
-            val pending = android.app.PendingIntent.getForegroundService(
+            // A broadcast, not a service start: an inexact alarm does not
+            // exempt a background foreground-service start on Android 12+
+            // (only an exact one or the battery exemption does), and a refused
+            // start ended the wake-up chain silently. The service already runs.
+            val intent = Intent(this, DozeWakeReceiver::class.java)
+            val pending = android.app.PendingIntent.getBroadcast(
                 this, 0, intent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
@@ -499,6 +480,24 @@ class P2PService : Service() {
         }
     }
 
+    /** One turn now, from the Doze alarm (see `scheduleDozeWakeup`). */
+    private fun onDozeWake() {
+        // Timed, and the empty-poll counter is NOT reset: an indefinite
+        // lock plus twelve fresh empty turns kept the CPU awake 40-70 s
+        // per alarm, a fifth of the night. The turn itself releases the
+        // lock as soon as it finds the core still idle.
+        acquireWakeLock(20_000L)
+        lastBusyCheckAt = 0L
+        // The poll thread sits in the native wait (up to 30 s): end it,
+        // or the lock runs out before the turn and the CPU sleeps again.
+        try { P2PLib.wakePoll() } catch (e: Throwable) { }
+        // Armed again here: if the turn still does not run, the next alarm
+        // does, and the chain of Doze wake-ups cannot stop.
+        scheduleDozeWakeup()
+        handler.removeCallbacks(pollRunnable)
+        handler.post(pollRunnable)
+    }
+
     private fun cancelDozeWakeup() {
         // Runs every awake turn: without the flag that was two binder calls
         // per turn for an alarm that is almost never set.
@@ -506,8 +505,8 @@ class P2PService : Service() {
         dozeAlarmSet = false
         try {
             val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-            val intent = Intent(this, P2PService::class.java).setAction(ACTION_WAKE_POLL)
-            val pending = android.app.PendingIntent.getForegroundService(
+            val intent = Intent(this, DozeWakeReceiver::class.java)
+            val pending = android.app.PendingIntent.getBroadcast(
                 this, 0, intent,
                 android.app.PendingIntent.FLAG_NO_CREATE or android.app.PendingIntent.FLAG_IMMUTABLE
             )
@@ -756,20 +755,7 @@ class P2PService : Service() {
 
                 // If we came from the Doze wake-up alarm, the service is already running. The only thing to do is run one turn at once (see `scheduleDozeWakeup`).
         if (intent?.action == ACTION_WAKE_POLL && isRunning) {
-            // Timed, and the empty-poll counter is NOT reset: an indefinite
-            // lock plus twelve fresh empty turns kept the CPU awake 40-70 s
-            // per alarm, a fifth of the night. The turn itself releases the
-            // lock as soon as it finds the core still idle.
-            acquireWakeLock(20_000L)
-            lastBusyCheckAt = 0L
-            // The poll thread sits in the native wait (up to 30 s): end it,
-            // or the lock runs out before the turn and the CPU sleeps again.
-            try { P2PLib.wakePoll() } catch (e: Throwable) { }
-            // Armed again here: if the turn still does not run, the next alarm
-            // does, and the chain of Doze wake-ups cannot stop.
-            scheduleDozeWakeup()
-            handler.removeCallbacks(pollRunnable)
-            handler.post(pollRunnable)
+            onDozeWake()
             return START_STICKY
         }
         if (!isRunning) {
@@ -779,9 +765,6 @@ class P2PService : Service() {
             // an indefinite one taken by every other start (retry worker, call
             // end, boot receiver) stayed held until the blocking wait returned.
             acquireWakeLock()
-                    // See `bindToWifiIfAvailable`: libp2p sockets (especially the UPnP search) must bind to the right interface (WiFi) before the network starts,
-                    // so this runs just before it.
-            bindToWifiIfAvailable()
                     // Power save: the screen state is the strongest signal for the poll stage (see the note in the companion object).
             observeScreenState()
             BatteryLog.start(this)
@@ -805,6 +788,7 @@ class P2PService : Service() {
                 handler.removeCallbacks(pollRunnable)
                 handler.post(pollRunnable)
             }
+            dozeWake = { if (isRunning) onDozeWake() }
             handler.post(pollRunnable)
         }
 
@@ -864,8 +848,8 @@ class P2PService : Service() {
                 return
             }
             val nodeMode = isNodeModeEnabled(applicationContext)
-            val torEnabled = isTorEnabled(applicationContext)
-            if (P2PLib.startNetwork(nodeMode, torEnabled).startsWith("Error")) {
+            // Tor is mandatory: the core refuses to start without it.
+            if (P2PLib.startNetwork(nodeMode, true).startsWith("Error")) {
                 retryStart { startNet() }
             } else {
                 startNetRetryDelayMs = START_NET_RETRY_INITIAL_MS
@@ -885,6 +869,7 @@ class P2PService : Service() {
         releaseWakeLock()
         BatteryLog.stop()
         wakePollNow = null
+        dozeWake = null
         listenerRemoved = null
         handler.removeCallbacks(pollRunnable)
         cancelDozeWakeup()
@@ -896,14 +881,6 @@ class P2PService : Service() {
         }
         screenReceiver = null
         pollThread.quitSafely()
-        wifiNetworkCallback?.let {
-            try {
-                (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it)
-            } catch (e: Exception) {
-                                // If it is not registered yet (for example WiFi was never connected), silently ignore.
-            }
-        }
-        wifiNetworkCallback = null
         defaultNetworkCallback?.let {
             try {
                 (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it)
@@ -958,7 +935,7 @@ class P2PService : Service() {
     }
 
     /**
-     * Unlike the WiFi-only callback of `bindToWifiIfAvailable`, this follows ANY default-network change (Wi-Fi to cellular, or the network disappearing and coming
+     * This follows ANY default-network change (Wi-Fi to cellular, or the network disappearing and coming
      * back), and tells the Rust side (see `P2PLib.notifyNetworkChanged` and session.rs `reconnect_all_known_now`). Every libp2p connection set up over the OLD
      * network is now an invalid socket on the new interface (the local IP changed). Instead of waiting for the periodic scan (up to 15 s) or a ping (up to about
      * 25 s, interval plus timeout) to notice, a full reconnect turn is triggered at once.
@@ -969,17 +946,9 @@ class P2PService : Service() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                                // The Tor status can show 'connected' over a dead WiFi. The WiFi callback's own `onLost` is not always called: in some intermediate states Android
-                                // still counts WiFi as up (for example the signal weakens and the default route silently moves to mobile data, or OEM-specific 'WiFi asleep'
-                                // states). The process could then stay bound to a WiFi that is unusable, forever (`bindProcessToNetwork`). Tor, having been 'Ready' over that
-                                // WiFi, keeps showing green, but NEW sockets (including building a circuit to someone's `.onion`) would silently try to leave through that dead interface.
-                                // The default-network change notification (this callback) is Android's general, reliable signal. So the binding is also refreshed on EVERY such
-                                // event, according to the current state, without waiting for the WiFi-specific callback's own events.
-                refreshWifiBinding(cm)
                 notifyNetworkChangedInBackground()
             }
             override fun onLost(network: Network) {
-                refreshWifiBinding(cm)
                                 // Reconnect ONLY when a new default network arrives (`onAvailable`). Dial and Tor attempts made while there is no network fail at once with
                                 // 'Network is unreachable', which breaks the arti guard and circuit state and delays recovery on the new network.
             }
@@ -990,20 +959,6 @@ class P2PService : Service() {
         } catch (e: Exception) {
                         // If registration fails (for example on a very old or unusual device), it passes silently. The periodic `reconnect_sweep` and `ping` still reach
                         // the same result, only more slowly.
-        }
-    }
-
-    /**
-     * The same logic as `bindToWifiIfAvailable` and `wifiNetworkCallback`: if a verified WiFi is available right now, bind the process to it; otherwise release
-     * any binding. It is kept in one place, so the initial setup and the default-network change notification make the SAME decision.
-     */
-    private fun refreshWifiBinding(cm: ConnectivityManager) {
-        val active = cm.activeNetwork
-        val activeCaps = active?.let { cm.getNetworkCapabilities(it) }
-        if (activeCaps.isValidatedWifi()) {
-            cm.bindProcessToNetwork(active)
-        } else {
-            cm.bindProcessToNetwork(null)
         }
     }
 
@@ -1047,48 +1002,6 @@ class P2PService : Service() {
         }
     }
 
-    /**
-     * The UPnP search reported 'gateway not found' on a real device, even with UPnP enabled on the router. The likely root cause: Android phones usually keep
-     * mobile data on in the background even while connected to WiFi. The UPnP search socket in the Rust layer (igd_next crate) binds to `0.0.0.0`, so the choice
-     * of interface is left to the OS routing table. That can send the request over mobile data by mistake, so the router never sees it, and the 'not found'
-     * result has nothing to do with the WiFi UPnP. The same confusion could in theory affect libp2p's other sockets too.
-     *
-     * `ConnectivityManager.bindProcessToNetwork` forces ALL new sockets opened in this process (including the Rust-side ones, since they run in the same process)
-     * onto the named network. WiFi is used when it is available, and the binding is released when WiFi disappears, so mobile data is the natural fallback
-     * (for example for a user with no WiFi at all).
-     */
-    private fun bindToWifiIfAvailable() {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                // Checking the WiFi transport ONLY is not enough. A device can have WiFi on and connected to a known network, while that network has no real internet
-                // access (for example an idle home network, or a guest network behind a captive portal). If we bind on the transport alone, a device working over mobile
-                // data at that moment could be forced onto an internet-less WiFi and left completely offline. Both NET_CAPABILITY_INTERNET and
-                // NET_CAPABILITY_VALIDATED are required (the system confirmed that 'this network can reach the internet'). See `refreshWifiBinding`, which uses the same logic.
-        refreshWifiBinding(cm)
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            .build()
-                // Both bodies must NOT call `bindProcessToNetwork` unconditionally. That raced the `refreshWifiBinding` decision of `defaultNetworkCallback`: with
-                // cellular as the default and a WiFi appearing, the whole process (Tor included) was bound to WiFi, or an `onLost` could undo a valid binding. The result
-                // depended on which callback arrived last. There is now a single decision point.
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                refreshWifiBinding(cm)
-            }
-            override fun onLost(network: Network) {
-                refreshWifiBinding(cm)
-            }
-        }
-        wifiNetworkCallback = callback
-        try {
-            cm.registerNetworkCallback(request, callback)
-        } catch (e: Exception) {
-                        // If registration fails (for example on a very old or unusual device), it passes silently. The process then uses the system default routing,
-                        // which is no worse than before.
-        }
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotificationChannel() {
@@ -1100,4 +1013,9 @@ class P2PService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
     }
+}
+
+/** Target of the Doze wake alarm; not exported. */
+class DozeWakeReceiver : android.content.BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) = P2PService.onDozeAlarm()
 }

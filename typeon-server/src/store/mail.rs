@@ -189,16 +189,25 @@ impl Store {
     }
 
     /// Same as `mailbox_item_count`, for one depositor's rows only. Capacity is per depositor: one sender (who cannot
-    /// read the box) filling it stops nobody else's mail. Walks `idx_mail_hash` (mailbox, depositor), not the whole box.
+    /// read the box) filling it stops nobody else's mail.
     pub fn depositor_item_count(&self, mailbox_id: &str, depositor: &[u8]) -> i64 {
+        self.depositor_usage(mailbox_id, depositor).0
+    }
+
+    /// (rows, bytes) of one depositor in one box that no other reader has acknowledged yet. A row that only a silent
+    /// reader still holds does not count, or that reader would fill the sender's capacity. Walks
+    /// `idx_mail_box_depositor`, not the `sealed` blobs.
+    pub fn depositor_usage(&self, mailbox_id: &str, depositor: &[u8]) -> (i64, i64) {
         self.conn
             .query_row(
-                // Every row still stored: one reader's ack does not delete a row while another reader has not acked it.
-                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2",
+                "SELECT COUNT(*), COALESCE(SUM(m.byte_len), 0) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2
+                   AND NOT EXISTS (SELECT 1 FROM mail_acks a
+                                   WHERE a.mailbox_id = m.mailbox_id AND a.owner != m.depositor
+                                     AND a.through_seq >= m.seq)",
                 params![mailbox_id, depositor],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .unwrap_or(i64::MAX)
+            .unwrap_or((i64::MAX, i64::MAX))
     }
 
         /// If the SAME bytes from the same depositor are already in this box, no new row is opened. The existing `seq` is
@@ -211,7 +220,13 @@ impl Store {
         ///
         /// Dropping the repeat is safe: the recipient already de-duplicates by `message_id`, and an identical second copy
         /// carries no information.
+    #[cfg(test)]
     pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
+        self.deposit_written(mailbox_id, sealed, depositor, now, ttl_ms).map(|(seq, _)| seq)
+    }
+
+    /// `deposit`, plus whether a new row was written (`false` for a repeat). Only a new row is charged to the disk total.
+    pub fn deposit_written(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<(u64, bool), String> {
         // Matched by hash, from the index. Comparing `sealed` itself read every same-length blob of this depositor in the
         // box on each deposit.
         let hash = Sha256::digest(sealed);
@@ -226,7 +241,7 @@ impl Store {
                 "UPDATE mail SET expires_at_ms = ?1 WHERE mailbox_id = ?2 AND seq = ?3",
                 params![now + ttl_ms, mailbox_id, existing],
             );
-            return Ok(existing as u64);
+            return Ok((existing as u64, false));
         }
         // Row and charge together. A swallowed charge would under-count the quota.
         let charge = mail_row_bytes(mailbox_id, sealed) as i64;
@@ -259,7 +274,7 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(seq)
+        Ok((seq, true))
     }
 
     /// Fetches the items after the cursor. Stops before `max_bytes` or `max_items` is exceeded. The rest comes in the
@@ -276,7 +291,7 @@ impl Store {
 
         // Only a reader that REGISTERED the box can read it.
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m
+            "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m INDEXED BY idx_mail_reader
              WHERE m.mailbox_id = ?1 AND m.seq > ?2 AND m.depositor != ?3
                AND EXISTS (SELECT 1 FROM mailbox_readers r
                            WHERE r.mailbox_id = m.mailbox_id AND r.owner = ?3)
@@ -317,7 +332,7 @@ impl Store {
     pub fn unacked_for(&self, mailbox_id: &str, reader: &[u8]) -> i64 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor != ?2
+                "SELECT COUNT(*) FROM (SELECT 1 FROM mail m INDEXED BY idx_mail_reader WHERE m.mailbox_id = ?1 AND m.depositor != ?2
                    AND m.seq > COALESCE((SELECT a.through_seq FROM mail_acks a
                                          WHERE a.mailbox_id = ?1 AND a.owner = ?2), 0)
                    LIMIT 2)",
@@ -363,6 +378,23 @@ impl Store {
         self.delete_fully_acked(mailbox_id)
     }
 
+    /// One `Ack` request: the highest `seq` per box only (each moved cursor runs `delete_fully_acked`), in one
+    /// transaction (one commit, not one per entry). Any failure fails the whole request, so the client acks again.
+    pub fn ack_many(&self, acks: &[(String, u64)], acker: &[u8]) -> Result<usize, String> {
+        let mut top: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for (mailbox, seq) in acks {
+            let e = top.entry(mailbox.as_str()).or_insert(0);
+            *e = (*e).max(*seq);
+        }
+        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let mut deleted = 0;
+        for (mailbox, seq) in top {
+            deleted += self.ack(mailbox, seq, acker)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(deleted)
+    }
+
     /// Deletes the rows that every registered reader OTHER than the depositor has acknowledged (and at least one of them
     /// really has). A reader that has not acknowledged (for example a stranger registered to the box) keeps the row until
     /// the TTL, but cannot delete someone else's mail.
@@ -389,6 +421,8 @@ impl Store {
     /// condition is critical: you can delete only what you deposited, never someone else's.
     pub fn cancel_own_deposits(&self, mailbox_id: &str, seqs: &[u64], depositor: &[u8]) -> usize {
         let mut removed = 0usize;
+        // One commit for the whole request, not one fsync per `seq`.
+        let tx = self.conn.unchecked_transaction().ok();
         for seq in seqs {
             removed += self
                 .conn
@@ -397,6 +431,11 @@ impl Store {
                     params![mailbox_id, (*seq).min(i64::MAX as u64) as i64, depositor],
                 )
                 .unwrap_or(0);
+        }
+        if let Some(tx) = tx {
+            if tx.commit().is_err() {
+                return 0;
+            }
         }
         removed
     }
@@ -442,6 +481,39 @@ impl Store {
             "UPDATE enrollments SET bytes_mail =
                 COALESCE((SELECT SUM(byte_len) FROM mail WHERE mail.depositor = enrollments.enrollment_id), 0);",
         );
+    }
+
+    /// Drops metadata nobody needs any more: `mail_seq` rows of boxes with no mail and no reader, and enrollments
+    /// idle since `idle_before` that own nothing. A pruned box's counter folds into `mail_seq_base`, so a box written
+    /// again later starts above every cursor a client may still hold for it. Revoked rows stay (their key is blocked
+    /// through them).
+    pub fn prune_dead_rows(&self, idle_before: i64) {
+        let dead = "SELECT s.mailbox_id FROM mail_seq s
+                    WHERE NOT EXISTS (SELECT 1 FROM mail m WHERE m.mailbox_id = s.mailbox_id)
+                      AND NOT EXISTS (SELECT 1 FROM mailbox_readers r WHERE r.mailbox_id = s.mailbox_id)";
+        let Ok(tx) = self.conn.unchecked_transaction() else { return };
+        let top: Option<i64> = self
+            .conn
+            .query_row(&format!("SELECT MAX(last) FROM mail_seq WHERE mailbox_id IN ({dead})"), [], |r| r.get::<_, Option<i64>>(0))
+            .ok()
+            .flatten();
+        if let Some(top) = top {
+            let _ = self.conn.execute(
+                "INSERT OR REPLACE INTO meta (k, v) VALUES ('mail_seq_base',
+                     MAX(COALESCE((SELECT v FROM meta WHERE k = 'mail_seq_base'), 0), ?1))",
+                params![top],
+            );
+            let _ = self.conn.execute(&format!("DELETE FROM mail_seq WHERE mailbox_id IN ({dead})"), []);
+        }
+        let _ = self.conn.execute(
+            "DELETE FROM enrollments WHERE state = 'active' AND last_seen_at < ?1
+               AND NOT EXISTS (SELECT 1 FROM mail WHERE mail.depositor = enrollments.enrollment_id)
+               AND NOT EXISTS (SELECT 1 FROM archive WHERE archive.owner = enrollments.enrollment_id)
+               AND NOT EXISTS (SELECT 1 FROM blobs WHERE blobs.owner = enrollments.enrollment_id)
+               AND NOT EXISTS (SELECT 1 FROM mailbox_readers WHERE mailbox_readers.owner = enrollments.enrollment_id)",
+            params![idle_before],
+        );
+        let _ = tx.commit();
     }
 
 }

@@ -285,6 +285,8 @@ object P2PLib {
     external fun hasStickerOrigin(origin: String): Boolean
     /** Deletes a sticker from its own store. "OK" or "Error: ...". */
     external fun deleteSticker(id: String): String
+    /** Deletes several stickers ([idsJson]: JSON array of ids), one sync echo. "OK" or "Error: ...". */
+    external fun deleteStickers(idsJson: String): String
     external fun setStickerFavorite(id: String, favorite: Boolean): String
     /** Sends a sticker to a contact's device. Returns the attachment's `file_id`, or "Error: ...". */
     external fun sendSticker(peerFp: String, stickerId: String, replyToMessageId: String, replyToPreview: String): String
@@ -349,6 +351,10 @@ object P2PLib {
 
     // --- Section 1.8: recovery file ---
     external fun exportRecovery(passphrase: String): ByteArray
+    /** After [exportRecovery]: how many newest messages the file holds when it had to be cut; 0 when complete. */
+    external fun lastRecoveryTrimmed(): Int
+    /** A linked device logging out asks the root device to revoke it; waits up to 3 s. No-op on the root. */
+    external fun announceLeaving()
 
     /** Counterpart of `exportRecovery`, with the SAME pattern as `createIdentity`: on success it returns identity_id and holds the secret bundle, which is then
      *  fetched with [getPendingSecretBundle], encrypted with the Keystore and written to disk (see IdentityManager.persistNewIdentity).

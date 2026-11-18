@@ -114,3 +114,24 @@ fn non_message_envelopes_have_a_stable_dedup_key() {
     );
     assert!(deposit_dedup_key(&env, bytes).starts_with("raw:"));
 }
+
+#[test]
+fn a_mailbox_that_keeps_failing_loses_its_grace_until_a_hold_clears() {
+    let mut core = P2PCore::new();
+    core.server_rt.insert("s".into(), ServerRuntime::default());
+    let t0 = 1_000_000;
+    // First failing item: held for the grace period, then passed (strike 1, 2).
+    assert!(core.hold_server_item("s", "mb", 1, t0));
+    assert!(!core.hold_server_item("s", "mb", 1, t0 + SERVER_HOLD_GRACE_MS));
+    assert!(core.hold_server_item("s", "mb", 2, t0 + SERVER_HOLD_GRACE_MS));
+    assert!(!core.hold_server_item("s", "mb", 2, t0 + 2 * SERVER_HOLD_GRACE_MS));
+    // Two strikes: the next failure is passed at once.
+    assert!(!core.hold_server_item("s", "mb", 3, t0 + 2 * SERVER_HOLD_GRACE_MS));
+    // Another mailbox keeps its grace.
+    assert!(core.hold_server_item("s", "other", 1, t0));
+    // A hold the cursor went past (the item was processed) resets the strikes.
+    core.server_rt.get_mut("s").unwrap().held.insert("mb".into(), (4, t0));
+    core.server_cursors.insert(("s".into(), "mb".into()), 4);
+    core.commit_server_fetches();
+    assert!(core.hold_server_item("s", "mb", 5, t0 + 3 * SERVER_HOLD_GRACE_MS));
+}

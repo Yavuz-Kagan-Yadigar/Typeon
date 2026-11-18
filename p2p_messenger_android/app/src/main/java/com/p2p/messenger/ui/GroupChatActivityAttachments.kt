@@ -389,6 +389,7 @@ internal fun GroupChatActivity.onGroupAttachmentLongClicked(item: SimpleChatAdap
         if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
         if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
         if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
+        if (item.isMine && item.status != SimpleChatAdapter.Status.SENT) add(getString(R.string.action_resend_message))
         if (item.isMine) add(getString(R.string.action_delete_message))
         add(getString(R.string.action_select))
     }
@@ -397,6 +398,7 @@ internal fun GroupChatActivity.onGroupAttachmentLongClicked(item: SimpleChatAdap
             when (options[which]) {
                 getString(R.string.action_forward) -> com.p2p.messenger.util.Forward.start(this, item)
                 getString(R.string.action_select) -> selection.start(item)
+                getString(R.string.action_resend_message) -> resendGroupNow()
                 getString(R.string.action_open_with) -> openGroupAttachmentWithChooser(attachment)
                 getString(R.string.action_save_to_downloads) -> saveGroupAttachmentToDownloads(attachment)
                 getString(R.string.action_save_as_jxl) -> saveGroupAttachmentToDownloads(attachment, original = true)
@@ -546,7 +548,7 @@ internal fun GroupChatActivity.handleIncomingGroupFileOffer(obj: JSONObject) {
             text = "",
             isMine = obj.optString("type") == "sibling_file",
             senderName = sender?.displayName ?: senderIdentityId.take(8),
-            senderAvatarJpeg = sender?.avatarHex?.let { hexToBytes(it) },
+            senderAvatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
             attachment = SimpleChatAdapter.AttachmentInfo(
                 fileId = obj.optString("file_id"),
                 fileName = obj.optString("file_name"),

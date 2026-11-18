@@ -52,7 +52,7 @@ impl P2PCore {
             // The old topic is not dropped right away (the sender may still publish there). It is dropped at the next rotation.
             // Skipped keys of the old chain move into the state (`old_recv`). New keys derived by this decryption are written to the table
             // below. State first: the table rows are written only once the state holding them is on disk.
-            if !self.persist_ratchet_state(&packet.header.sender_device_fingerprint) {
+            if !self.persist_ratchet_state_replacing_skipped(&packet.header.sender_device_fingerprint) {
                 if let Some(s) = snapshot.take() {
                     self.ratchets.insert(packet.header.sender_device_fingerprint.clone(), s);
                 }
@@ -61,7 +61,6 @@ impl P2PCore {
             // The rotated state is on disk now: a later failure must not roll
             // memory back behind it.
             snapshot = None;
-            self.clear_persisted_skipped_keys(&packet.header.sender_device_fingerprint);
             // Pending packets encrypted under the old chain are resent at once on the fresh chain, except the one this packet answers:
             // that one is closed below, and resending it would make the peer answer it a second time.
             let answered = decrypted.as_ref().ok().and_then(|(p, _)| answered_pending_id(p.as_slice()));
@@ -107,6 +106,13 @@ impl P2PCore {
                 if !matches!(e, ratchet::RatchetError::KeyNotFound(_)) && packet.header.sent_at_ms >= session_since {
                     self.note_undecryptable(&packet.header.sender_device_fingerprint);
                 }
+                // A spent key and no record of the packet: it was taken once without an Ack (or lost in a crash before it was stored).
+                // The sender re-encrypts it on request; it ignores ids it no longer holds. A packet older than any retry is not asked for.
+                if matches!(e, ratchet::RatchetError::KeyNotFound(_))
+                    && current_time_ms().saturating_sub(packet.header.sent_at_ms) < TEXT_RETRY_GIVE_UP_MS
+                {
+                    self.ask_resend(&packet.header.sender_device_fingerprint, &packet.header.message_id);
+                }
                 return Err(e.to_string());
             }
         };
@@ -120,6 +126,10 @@ impl P2PCore {
         // If we triggered the rotation (`pending_rotation_ct`, ratchet.rs), a packet that decrypts on the NEW chain from the peer proves the
         // peer applied the rotation, so the announcement no longer needs to be added to every packet. A packet of the chain before the rotation
         // (`old_chain`) proves nothing: the peer sent it before it knew.
+        // The peer has left the chain the last rotation replaced: keep only the keys of its packets still missing there.
+        if !skipped_changes.old_chain {
+            state.close_old_recv(packet.header.prev_chain_length);
+        }
         if !skipped_changes.old_chain && state.pending_rotation_ct.take().is_some() {
             info!(
                 "Rotation applied by peer (peer={}) — stopping announcement repeats",
@@ -128,19 +138,24 @@ impl P2PCore {
         }
         // Write skipped-key changes to disk (encrypted with the Keystore). Before the ratchet state: a crash in between must not leave the
         // advanced counter on disk without the keys it skipped.
-        let mut saved = true;
-        for (msg_num, key) in &skipped_changes.added {
-            if let Err(e) = self.persist_skipped_key(&packet.header.sender_device_fingerprint, *msg_num, key) {
-                error!("Could not write skipped key to disk: {}", e);
-                saved = false;
-                break;
-            }
-        }
         // `decrypt` advances ck_recv/recv_message_number on every call, so keep the disk copy current. If the write fails, memory is rolled
-        // back and the packet fails: the retry must still find the key it needs.
-        if saved {
-            saved = self.persist_ratchet_state(&packet.header.sender_device_fingerprint);
-        }
+        // back and the packet fails: the retry must still find the key it needs. One transaction: up to 1000 new keys were one
+        // autocommit insert each.
+        let fp = packet.header.sender_device_fingerprint.clone();
+        let saved = if skipped_changes.added.is_empty() {
+            // Receive side only (a rotation took the synced path above): no fsync per packet.
+            self.persist_ratchet_state(&fp, false)
+        } else {
+            self.in_synced_transaction(false, |core| {
+                for (msg_num, key) in &skipped_changes.added {
+                    if let Err(e) = core.persist_skipped_key(&fp, *msg_num, key) {
+                        error!("Could not write skipped key to disk: {}", e);
+                        return false;
+                    }
+                }
+                core.persist_ratchet_state(&fp, false)
+            })
+        };
         if !saved {
             if let Some(s) = snapshot.take() {
                 self.ratchets.insert(packet.header.sender_device_fingerprint.clone(), s);
@@ -174,7 +189,12 @@ impl P2PCore {
         // The send time as the author sent it, for the revoke check of a group
         // author proof: clamped to now, a future stamp from a device revoked
         // later than now read as "sent before the revoke".
-        let signed_sent_at_ms = match &content { MessageContent::Text { sent_at_ms, .. } => *sent_at_ms, _ => 0 };
+        // A file offer has no send time of its own: the header's (signed) is the order key of its bubble.
+        let signed_sent_at_ms = match &content {
+            MessageContent::Text { sent_at_ms, .. } => *sent_at_ms,
+            MessageContent::FileOffer { .. } | MessageContent::SiblingEcho { .. } => packet.header.sent_at_ms,
+            _ => 0,
+        };
         clamp_received_times(&mut content, current_time_ms());
         self.dispatch_received_content(source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms)
     }
@@ -229,6 +249,15 @@ impl P2PCore {
         let result = self.dispatch_received_content_inner(source, peer_fp, sender_identity_id, message_id, content, signed_sent_at_ms);
         self.replay_unknown_group_held();
         result
+    }
+
+    /// See `MessageContent::ResendRequest`: `message_id` from `peer_fp` was decrypted but not taken, so its key is spent and a
+    /// byte-identical retry cannot decrypt again. Fire-and-forget, like an Ack.
+    pub(crate) fn ask_resend(&mut self, peer_fp: &str, message_id: &str) {
+        let content = MessageContent::ResendRequest { target_message_id: message_id.to_string() };
+        if let Err(e) = self.send_message_content(peer_fp.to_string(), &content, None) {
+            warn!("Resend request could not be sent: {}", e);
+        }
     }
 
     /// Replays the held content of every group that is known now (see
@@ -287,6 +316,7 @@ impl P2PCore {
                         // No event either: the UI would show a message that is
                         // gone on reload, and show it again when the retry lands.
                         error!("Could not archive message, Ack deferred (sender will retry): {}", e);
+                        self.ask_resend(&peer_fp, &message_id);
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
                     }
                 }
@@ -319,6 +349,7 @@ impl P2PCore {
                         "Group message REJECTED: sender is not a member of this group (group={}, sender={})",
                         gid, crate::log_id(&sender_identity_id)
                     );
+                    self.ask_resend(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 // The id must carry the sender's author tag (`group_msg_tag`):
@@ -374,6 +405,7 @@ impl P2PCore {
                     }
                 } else {
                     error!("Could not archive group message, Ack deferred (sender will retry)");
+                    self.ask_resend(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 serde_json::json!({
@@ -420,6 +452,7 @@ impl P2PCore {
                             "Group reaction REJECTED: sender is not a member of this group (group={}, sender={})",
                             gid, crate::log_id(&sender_identity_id)
                         );
+                        self.ask_resend(&peer_fp, &message_id);
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
                     }
                 }
@@ -432,6 +465,7 @@ impl P2PCore {
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 if !self.apply_reaction(&target_message_id, &sender_identity_id, &emoji, reacted_at_ms) {
+                    self.ask_resend(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 self.send_ack(&peer_fp, &message_id);
@@ -471,6 +505,7 @@ impl P2PCore {
                     self.history_answered_at.retain(|_, t| now.saturating_sub(*t) < 2_000);
                 }
                 if self.history_answered_at.get(&peer_fp).map_or(false, |t| now.saturating_sub(*t) < 2_000) {
+                    self.ask_resend(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 // and at most HISTORY_SYNC_BYTES_PER_WINDOW of rows per
@@ -481,6 +516,7 @@ impl P2PCore {
                     self.history_sent_bytes.retain(|_, (start, _)| now.saturating_sub(*start) < HISTORY_SYNC_WINDOW_MS);
                 }
                 if self.history_sent_bytes.get(&peer_fp).map_or(false, |(start, sent)| now.saturating_sub(*start) < HISTORY_SYNC_WINDOW_MS && *sent >= HISTORY_SYNC_BYTES_PER_WINDOW) {
+                    self.ask_resend(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
                 self.history_answered_at.insert(peer_fp.clone(), now);
@@ -666,17 +702,6 @@ impl P2PCore {
                                 if m.is_deleted {
                                     m.text.clear();
                                 }
-                                let signed_text = if m.is_deleted { GROUP_TOMBSTONE } else { m.text.as_str() };
-                                let signed = m.message_id.as_deref().map_or(false, |mid| {
-                                    self.group_author_proof_valid(gid, mid, &author, signed_text, if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp }, m.author_proof.as_deref())
-                                });
-                                if !signed {
-                                    m.author_proof = None;
-                                    if m.direction != "sent" {
-                                        warn!("Group history row skipped: author signature missing or invalid (group={}, author={})", gid, crate::log_id(&author));
-                                        return None;
-                                    }
-                                }
                                 // A row without an id cannot be deduped: it was
                                 // never archived, but shown again on every page.
                                 let Some(mid) = m.message_id.clone() else { return None };
@@ -688,7 +713,33 @@ impl P2PCore {
                                     warn!("Group history row skipped: identity not bound to author (group={}, author={})", gid, crate::log_id(&author));
                                     return None;
                                 }
-                                if !self.message_exists_in_chat(&mid, Some(gid.as_str()), "") {
+                                let signed_at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
+                                // A row held already is not verified again (every member's answer brings the same rows): it is shown as
+                                // stored. Only a tombstone is checked, so a deletion the author signed replaces a stored original.
+                                if self.message_exists_in_chat(&mid, Some(gid.as_str()), "") {
+                                    let local = self.group_row_text(gid, &mid);
+                                    if m.is_deleted && local.as_ref().map_or(false, |(_, deleted, _)| !*deleted)
+                                        && self.group_author_proof_valid(gid, &mid, &author, GROUP_TOMBSTONE, signed_at, m.author_proof.as_deref())
+                                    {
+                                        self.apply_delete_to_archive(Some(gid.as_str()), "", &mid);
+                                        self.adopt_group_author_proof(gid, &mid, m.author_proof.as_deref());
+                                    }
+                                    let (text, deleted, edited) = self.group_row_text(gid, &mid)?;
+                                    return Some(serde_json::json!({
+                                        "direction": our_direction, "text": text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms,
+                                        "sender_identity_id": actual_sender, "reactions": self.reactions_summary(&mid), "message_id": mid, "is_deleted": deleted, "is_edited": edited
+                                    }));
+                                }
+                                let signed_text = if m.is_deleted { GROUP_TOMBSTONE } else { m.text.as_str() };
+                                let signed = self.group_author_proof_valid(gid, &mid, &author, signed_text, signed_at, m.author_proof.as_deref());
+                                if !signed {
+                                    m.author_proof = None;
+                                    if m.direction != "sent" {
+                                        warn!("Group history row skipped: author signature missing or invalid (group={}, author={})", gid, crate::log_id(&author));
+                                        return None;
+                                    }
+                                }
+                                {
                                     // NOTE: `SyncedMessage` (see packet.rs) does not carry reply info yet. Old messages that arrive via history
                                     // sync are archived without a reply preview for now (a known, accepted scope limit).
                                     // Not shown when it is not on disk: it would vanish on reload.
@@ -838,6 +889,7 @@ impl P2PCore {
                             "Group file offer REJECTED: sender is not a member of this group (group={}, sender={})",
                             gid, crate::log_id(&sender_identity_id)
                         );
+                        self.ask_resend(&peer_fp, &message_id);
                         return Ok(serde_json::json!({"type": "noop"}).to_string());
                     }
                     // The file id is the group message id: it must carry the
@@ -857,13 +909,15 @@ impl P2PCore {
                     &peer_fp, &sender_identity_id, group_id, &file_id, &file_name, &mime_type,
                     total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size, &chunk_hashes,
                     &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
-                    reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
+                    reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(), signed_sent_at_ms,
                 );
                 // "noop" with no row = the row could not be written (key or DB
                 // not ready): no Ack, the sender offers again. Every other
                 // outcome is final (stored, duplicate, rejected).
                 if ev["type"] != "noop" || self.file_row_exists(&file_id) {
                     self.send_ack(&peer_fp, &message_id);
+                } else {
+                    self.ask_resend(&peer_fp, &message_id);
                 }
                 ev
             }
@@ -878,6 +932,10 @@ impl P2PCore {
                     Some(ev) => ev,
                     None => return Ok(serde_json::json!({"type": "noop"}).to_string()),
                 }
+            }
+            MessageContent::ResendRequest { target_message_id } => {
+                self.regen_on_request(&peer_fp, &target_message_id);
+                serde_json::json!({"type": "noop"})
             }
             MessageContent::Seen { target_message_id, group_message_local_id } => {
                 // See packet.rs `Seen`. This is a read receipt, not delivery (Ack). It is not acked itself (same endless-loop reasoning as Ack).
@@ -996,12 +1054,15 @@ impl P2PCore {
                 })
             }
             MessageContent::GroupUpdate(update) => {
-                // now arrives over the ratchet-encrypted channel (see the packet.rs note). The OUTER packet (`MessagePacket`) already has a
-                // hybrid-verified sender (`sender_identity_id`/`peer_fp`), and this does NOT require that sender to equal `update.signed_by`. For
-                // example a non-founder member may also relay this packet pairwise (there is no relay in this code base yet). The real authority
-                // check is the group's own `update.signature`/`signature_pq` verification inside `process_group_update` (also hybrid) and the
-                // `signed_by == founder` rule. The outer packet signature only guarantees transport integrity.
+                // Only from its signer or one of my own devices. Every member keeps every founder-signed update it got, and could
+                // replay an old one to a device that holds neither the group nor its `removed_groups` row (re-creating a group we
+                // left with its old members, rolling back the picture, resetting a member's join time). Acked: final.
                 let group_id = update.group_id.clone();
+                if sender_identity_id != update.signed_by && self.my_identity_id().as_deref() != Some(sender_identity_id.as_str()) {
+                    warn!("GroupUpdate refused: not sent by its signer (group={}, sender={})", group_id, crate::log_id(&sender_identity_id));
+                    self.send_ack(&peer_fp, &message_id);
+                    return Ok(serde_json::json!({"type": "noop"}).to_string());
+                }
                 match self.process_group_update(&update) {
                     Ok(()) => {
                         self.send_ack(&peer_fp, &message_id);
@@ -1015,6 +1076,8 @@ impl P2PCore {
                         // sender resent the same update for 7 days.
                         if e != "Unknown signer device" {
                             self.send_ack(&peer_fp, &message_id);
+                        } else {
+                            self.ask_resend(&peer_fp, &message_id);
                         }
                         serde_json::json!({"type": "group_update_failed", "peer": peer_fp, "group_id": group_id, "error": e})
                     }
@@ -1049,6 +1112,12 @@ impl P2PCore {
                 // EVERY case: the leaving member's request has at least reached US, so `awaiting_confirmation` can stop retrying (even if we cannot
                 // process it, e.g. we are not this group's founder, retrying would not help).
                 self.send_ack(&peer_fp, &message_id);
+                // The request goes to every founder device. Only the root acts at once; another founder device waits for the
+                // root's Remove (`group_sync_sweep` acts if it does not come), so one leave is not fanned out once per device.
+                let on_root = self.get_active_own_device_fingerprint().ok() == self.my_identity_id();
+                if !on_root && self.defer_leave_request(&group_id, &sender_identity_id) {
+                    return Ok(serde_json::json!({"type": "noop"}).to_string());
+                }
                 if let Err(e) = self.remove_from_group(&group_id, &sender_identity_id, false) {
                     error!("Could not process LeaveGroupRequest (group={}, leaving={}): {}", group_id, crate::log_id(&sender_identity_id), e);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -1088,9 +1157,13 @@ impl P2PCore {
                     Err(e) => {
                         error!("DeviceLinkGrant not accepted: {}", e);
                         // Past the link window no retry can be adopted (a new
-                        // QR has a new nonce): acked, or it came for 7 days.
-                        if current_time_ms() > self.link_request_open_until {
-                            self.send_ack(&peer_fp, &message_id);
+                        // QR has a new nonce). Not acked: the primary takes
+                        // the Ack as "linked" (`finish_device_link`), and a
+                        // refused grant acked made this device a ghost sibling
+                        // that every contact fanned out to. The grant's
+                        // retries end at the 7-day limit.
+                        if current_time_ms() <= self.link_request_open_until {
+                            self.ask_resend(&peer_fp, &message_id);
                         }
                         serde_json::json!({"type": "noop"})
                     }
@@ -1141,7 +1214,10 @@ impl P2PCore {
                             }
                         }
                     }
-                    let learned = self.import_sync_payload(&sync);
+                    // See `import_sync_payload_from`: on the root, a secondary's payload does not rewrite groups.
+                    let trusted = my_id_now.as_deref() == Some(peer_fp.as_str())
+                        || self.get_active_own_device_fingerprint().ok() != my_id_now;
+                    let learned = self.import_sync_payload_from(&sync, trusted);
                     // Introduce ourselves to newly learned contacts (so they know this device too), handing them our keys reliably.
                     let own_dev = self.own_synced_device();
                     let own_da = self.own_device_add.clone();
@@ -1251,8 +1327,13 @@ impl P2PCore {
                                 (None, Some(ck)) => self.message_exists_in_chat(&mid, None, ck),
                                 _ => false,
                             };
-                            // A group left on this device gets no new rows.
-                            if dup || group_id.as_ref().map_or(false, |gid| !self.groups.contains_key(gid)) {
+                            // A group left on this device gets no new rows. A group not held yet (its DeviceSync may still be on the way)
+                            // is not acked: the sibling sends it again.
+                            let unknown_group = group_id.as_ref().filter(|gid| !self.groups.contains_key(*gid));
+                            if dup || unknown_group.map_or(false, |gid| self.group_removed_locally(gid)) {
+                                serde_json::json!({"type": "noop"})
+                            } else if unknown_group.is_some() {
+                                ack = false;
                                 serde_json::json!({"type": "noop"})
                             } else if let Some(gid) = &group_id {
                                 ack = self.archive_group_message(gid, &own_id, "sent", text.as_bytes(), Some(&mid),
@@ -1335,7 +1416,7 @@ impl P2PCore {
                                         &peer_fp, &own_id, group_id.clone(), &file_id, &file_name, &mime_type,
                                         total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size, &chunk_hashes,
                                         &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
-                                        reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(),
+                                        reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(), signed_sent_at_ms,
                                     );
                                     if ev["type"] == "file_offer" {
                                         // The row is my outgoing offer. In a group the source sibling stays as is. In 1:1 the column is the chat key (so the
@@ -1413,33 +1494,52 @@ impl P2PCore {
                                 let ids: Vec<String> = self.sticker_ids().into_iter().filter(|id| !have.contains(id)).collect();
                                 info!("Sticker request from sibling {}: sending {}", crate::log_id(&peer_fp), ids.len());
                                 let to = peer_fp.clone();
-                                std::thread::spawn(move || {
+                                // Cleared by a drop guard, so a panic in the thread does not leave the sibling marked busy until restart.
+                                struct Clear(String);
+                                impl Drop for Clear {
+                                    fn drop(&mut self) {
+                                        if let Ok(mut s) = SENDING_TO.lock() {
+                                            s.retain(|f| f != &self.0);
+                                        }
+                                    }
+                                }
+                                let clear = Clear(to.clone());
+                                let spawned = std::thread::Builder::new().spawn(move || {
+                                    let _clear = clear;
                                     let _guard = crate::RUNTIME.enter();
                                     for id in ids {
                                         crate::core_lock().send_sticker_to_sibling(&to, &id);
                                     }
-                                    if let Ok(mut s) = SENDING_TO.lock() {
-                                        s.retain(|f| f != &to);
-                                    }
                                 });
+                                if let Err(e) = spawned {
+                                    // The closure, and the guard in it, is dropped with the error.
+                                    warn!("Sticker sender thread could not start: {}", e);
+                                }
                             } else if let Ok(mut s) = SENDING_TO.lock() {
                                 s.retain(|f| f != &peer_fp);
                             }
                             serde_json::json!({"type": "noop"})
                         }
-                        SiblingEchoBody::StickerRemoved { id } => match self.delete_sticker(&id, false) {
-                            Ok(()) => serde_json::json!({"type": "stickers_changed", "removed": id}),
+                        SiblingEchoBody::StickerRemoved { ids } => match self.delete_stickers(&ids, false) {
+                            Ok(()) => serde_json::json!({"type": "stickers_changed", "removed": ids}),
                             Err(e) => {
                                 warn!("Could not delete sibling sticker: {}", e);
-                                // A bad id is final; a DB error is sent again.
-                                ack = self.sticker_enc_path(&id).is_err();
+                                // A bad id is final; a DB error is sent again (deleting the rest twice is harmless).
+                                ack = ids.iter().any(|id| self.sticker_enc_path(id).is_err());
                                 serde_json::json!({"type": "noop"})
                             }
                         },
                         SiblingEchoBody::ContactRemoved { identity_id, removed_at_ms } => {
-                            let removed_at = removed_at_ms.min(current_time_ms());
-                            if self.contact_added_at(&identity_id) > removed_at {
-                                // Paired again after that delete (here or on a sibling): the pairing wins.
+                            // A generation (`contact_next_gen`), not a time.
+                            let removed_at = removed_at_ms;
+                            // The root takes a removal from itself only: any linked device (a stolen one too) wiped
+                            // the root's chats, keys and sessions of every contact, which only pairing in person restores.
+                            let on_root = self.get_active_own_device_fingerprint().ok() == my_id_now;
+                            if on_root && my_id_now.as_deref() != Some(peer_fp.as_str()) {
+                                info!("Contact removal from a linked device not applied on the primary: {}", crate::log_id(&identity_id));
+                                serde_json::json!({"type": "noop"})
+                            } else if self.contact_added_at(&identity_id) >= removed_at {
+                                // Paired again after that delete, or without knowing of it (here or on a sibling): the pairing wins.
                                 serde_json::json!({"type": "noop"})
                             } else {
                                 match self.identity_to_contact.get(&identity_id).cloned() {
@@ -1459,6 +1559,44 @@ impl P2PCore {
                                         serde_json::json!({"type": "noop"})
                                     }
                                 }
+                            }
+                        }
+                        SiblingEchoBody::Blocked { identity_id, blocked } => {
+                            if !is_fingerprint_hex(&identity_id) || Some(&identity_id) == my_id_now.as_ref() {
+                                serde_json::json!({"type": "noop"})
+                            } else if blocked {
+                                if let Err(e) = self.block_identity_local(&identity_id) {
+                                    warn!("Could not apply sibling block: {}", e);
+                                    ack = false; // DB error: the sibling sends again.
+                                }
+                                serde_json::json!({"type": "device_change", "identity_id": identity_id})
+                            } else {
+                                self.unblock_identity_local(&identity_id);
+                                serde_json::json!({"type": "device_change", "identity_id": identity_id})
+                            }
+                        }
+                        SiblingEchoBody::ContactDeviceRevoked { identity_id, device_fingerprint } => {
+                            match self.apply_sibling_device_revoke(&identity_id, &device_fingerprint) {
+                                Ok(()) => serde_json::json!({"type": "device_change", "identity_id": identity_id}),
+                                Err(e) => {
+                                    warn!("Could not apply sibling device revoke: {}", e);
+                                    ack = false;
+                                    serde_json::json!({"type": "noop"})
+                                }
+                            }
+                        }
+                        SiblingEchoBody::DeviceLeaving => {
+                            // A device may remove only itself: the target is the authenticated sender, never a field.
+                            let on_root = self.own_device_add.is_none()
+                                && self.get_active_own_device_fingerprint().ok() == my_id_now;
+                            if on_root && my_id_now.as_deref() != Some(peer_fp.as_str()) {
+                                info!("Linked device {} is leaving: revoking it", crate::log_id(&peer_fp));
+                                if let Err(e) = self.revoke_own_linked_device(&peer_fp) {
+                                    warn!("Could not revoke the leaving device: {}", e);
+                                }
+                                serde_json::json!({"type": "device_change", "identity_id": own_id})
+                            } else {
+                                serde_json::json!({"type": "noop"})
                             }
                         }
                         SiblingEchoBody::GroupLeft => match &group_id {
@@ -1495,6 +1633,8 @@ impl P2PCore {
                     };
                     if ack {
                         self.send_ack(&peer_fp, &message_id);
+                    } else {
+                        self.ask_resend(&peer_fp, &message_id);
                     }
                     ev
                 }
@@ -1541,7 +1681,7 @@ impl P2PCore {
                     })
                 }
             }
-            MessageContent::SiblingHistoryRequest { per_conversation_limit, conversation_identity_id, group_id, before_timestamp, since_timestamp, after_timestamp } => {
+            MessageContent::SiblingHistoryRequest { per_conversation_limit, conversation_identity_id, group_id, before_timestamp, since_timestamp, after_timestamp, ops_since } => {
                 // Ack widened (network robustness fix): this packet was never acked before. The only guarantee was the periodic re-trigger with a
                 // 5-minute debounce (see `request_sibling_backfill`), so a lost request could go unnoticed for up to 5 minutes. Same reasoning as
                 // `LeaveGroupRequest`: the Ack is sent in EVERY case, the request has at least reached US, and the sender's `awaiting_confirmation`
@@ -1556,9 +1696,28 @@ impl P2PCore {
                     let window = before_timestamp.zip(after_timestamp)
                         .map(|(b, a)| (b, a.max(b.saturating_sub(HISTORY_FETCH_WINDOW_MS as i64))));
                     let limit = per_conversation_limit.min(if window.is_some() { HISTORY_SYNC_MAX_MESSAGES } else { SIBLING_BACKFILL_PER_CONVERSATION });
-                    let (entries, more) = self.build_sibling_history_response(limit, conversation_identity_id.as_deref(), group_id.as_deref(), before_timestamp, since_timestamp, window);
+                    // The automatic backfill: after its first answer it carries a watermark, answered up to a time over
+                    // all chats (`build_sibling_backfill`), plus the journal operations the sibling missed.
+                    let backfill = conversation_identity_id.is_none() && group_id.is_none() && window.is_none();
+                    let (entries, mut more, covered_to) = match since_timestamp.filter(|_| backfill) {
+                        Some(since) => {
+                            let (entries, covered, cut) = self.build_sibling_backfill(since);
+                            (entries, cut, Some(covered))
+                        }
+                        None => {
+                            let (entries, more) = self.build_sibling_history_response(limit, conversation_identity_id.as_deref(), group_id.as_deref(), before_timestamp, since_timestamp, window);
+                            (entries, more, None)
+                        }
+                    };
+                    let ops_seq = if backfill {
+                        let (seq, ops_cut) = self.replay_sibling_journal(&peer_fp, ops_since);
+                        more |= ops_cut;
+                        Some(seq)
+                    } else {
+                        None
+                    };
                     // The echo is the request's own window, not the clamped one.
-                    let resp = MessageContent::SiblingHistoryResponse { entries, window: before_timestamp.zip(after_timestamp), more };
+                    let resp = MessageContent::SiblingHistoryResponse { entries, window: before_timestamp.zip(after_timestamp), more, covered_to, ops_seq };
                     if let Err(e) = self.send_message_content(peer_fp.clone(), &resp, None) {
                         error!("SiblingHistoryResponse could not be sent: {}", e);
                     }
@@ -1566,7 +1725,7 @@ impl P2PCore {
                 serde_json::json!({"type": "noop"})
             }
             // Multi-device: history sent by a sibling; archive it.
-            MessageContent::SiblingHistoryResponse { entries, window, more } => {
+            MessageContent::SiblingHistoryResponse { entries, window, more, covered_to, ops_seq } => {
                 let my_id_now = self.my_identity_id();
                 let from_sibling = self.known_remote_devices.get(&peer_fp)
                     .map(|d| my_id_now.as_deref() == Some(d.identity_id.as_str()))
@@ -1615,13 +1774,9 @@ impl P2PCore {
                         None => (single_group, single_conversation),
                     };
                     // an answer to the unscoped backfill (an empty one
-                    // too) moves this sibling's watermark.
+                    // too) moves this sibling's watermark; a cut one asks for the rest.
                     if backfill {
-                        if let Some(state) = self.sibling_backfill_since.get_mut(&peer_fp) {
-                            if state.0 > 0 {
-                                *state = (0, state.0);
-                            }
-                        }
+                        self.note_sibling_backfill_answer(&peer_fp, covered_to, ops_seq, more);
                     }
                     if let Some(gid) = single_group {
                         serde_json::json!({"type": "older_group_history", "group_id": gid, "messages": merged})

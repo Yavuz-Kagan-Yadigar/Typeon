@@ -41,6 +41,8 @@ class P2PApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // A logout / account delete / revoke left the marker: wipe again before anything opens a file.
+        com.p2p.messenger.util.LocalWipe.finishPending(this)
         // Plaintext left behind by a killed process: a recording or an outgoing copy that was never sent.
         // It runs on this thread before any activity starts. A background delete could otherwise remove a file
         // that a cold-start share or a recording has just written there.
@@ -48,6 +50,8 @@ class P2PApplication : Application() {
         java.io.File(cacheDir, "outgoing").deleteRecursively()
         java.io.File(cacheDir, "attachment_edit").deleteRecursively()
         java.io.File(cacheDir, "attachment_preview").deleteRecursively()
+        java.io.File(cacheDir, "avatar_view").deleteRecursively()
+        java.io.File(cacheDir, "sticker_import").deleteRecursively()
         java.io.File(filesDir, "attachments/plain_cache").listFiles()?.forEach { it.deleteRecursively() }
         androidx.core.content.ContextCompat.registerReceiver(this, object : android.content.BroadcastReceiver() {
             override fun onReceive(c: android.content.Context?, i: Intent?) = AppLock.lockNow(c)
@@ -211,24 +215,24 @@ class P2PApplication : Application() {
                 AppLock.guard(activity)
                 // See the `startedActivityCount` docs.
                 if (startedActivityCount == 0) {
-                    // The check takes the core mutex, which a long poll turn can hold. Off the UI thread once an identity was seen.
-                    if (identityKnown || P2PLib.hasStoredIdentity()) {
-                        identityKnown = true
-                        // Kept off the main thread so JNI does not block it. `retry_all_pending_now` is light (it only updates
-                        // timestamps in a HashMap, and does no network I/O), but it is kept consistent with the other calls.
-                        Thread { P2PLib.retryAllPendingNow() }.start()
-                        // The service used to start only from MainActivity.onResume. If the system stopped the service and the
-                        // user came straight back into ChatActivity (task restore or a notification), message receipt never
-                        // restarted. The start is idempotent (see onStartCommand).
-                        try {
-                            androidx.core.content.ContextCompat.startForegroundService(
-                                this@P2PApplication,
-                                Intent(this@P2PApplication, com.p2p.messenger.service.P2PService::class.java)
-                            )
-                        } catch (e: Exception) {
-                            com.p2p.messenger.util.Log.w("P2PApplication", "Service could not be started: ${e.message}")
+                    // The check takes the core mutex, which a long poll turn can hold: off the UI thread.
+                    Thread {
+                        if (identityKnown || P2PLib.hasStoredIdentity()) {
+                            identityKnown = true
+                            P2PLib.retryAllPendingNow()
+                            // The service used to start only from MainActivity.onResume. If the system stopped the service and the
+                            // user came straight back into ChatActivity (task restore or a notification), message receipt never
+                            // restarted. The start is idempotent (see onStartCommand).
+                            try {
+                                androidx.core.content.ContextCompat.startForegroundService(
+                                    this@P2PApplication,
+                                    Intent(this@P2PApplication, com.p2p.messenger.service.P2PService::class.java)
+                                )
+                            } catch (e: Exception) {
+                                com.p2p.messenger.util.Log.w("P2PApplication", "Service could not be started: ${e.message}")
+                            }
                         }
-                    }
+                    }.start()
                 }
                 startedActivityCount++
                 com.p2p.messenger.service.P2PService.setAppVisible(true)

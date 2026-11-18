@@ -124,6 +124,8 @@ struct VideoLane {
     rotation: u8,
     asked_at: Option<Instant>,
     built_at: Option<Instant>,
+    /// H.264 asked from this sender once (its HEVC does not decode here).
+    avc_asked: bool,
 }
 
 /// Shared by the receive thread and the UI.
@@ -139,6 +141,8 @@ struct Shared {
     camera: Mutex<Option<VideoTx>>,
     /// The running microphone pipeline, so a device change can reopen it.
     mic: Mutex<Option<gst::Pipeline>>,
+    /// A receiver cannot decode our HEVC: the encoder is H.264 for the rest of the call.
+    avc_only: AtomicBool,
 }
 
 /// Loads GStreamer off the UI thread at start-up. The first `gst::init` after
@@ -172,15 +176,23 @@ impl CallMedia {
             video: Mutex::new(HashMap::new()),
             camera: Mutex::new(None),
             mic: Mutex::new(None),
+            avc_only: AtomicBool::new(false),
         });
         let mut threads = Vec::new();
         {
             let s = shared.clone();
             threads.push(std::thread::Builder::new().name("call-audio-tx".into()).spawn(move || audio_tx(s)).map_err(|e| e.to_string())?);
         }
+        // Video on its own thread: a decoder build (hundreds of ms on VA-API
+        // or D3D11) must not hold up the audio behind it.
+        let (video_in, video_out) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
         {
             let s = shared.clone();
-            threads.push(std::thread::Builder::new().name("call-rx".into()).spawn(move || receive(s)).map_err(|e| e.to_string())?);
+            threads.push(std::thread::Builder::new().name("call-video-rx".into()).spawn(move || receive_video(s, video_out)).map_err(|e| e.to_string())?);
+        }
+        {
+            let s = shared.clone();
+            threads.push(std::thread::Builder::new().name("call-rx".into()).spawn(move || receive(s, video_in)).map_err(|e| e.to_string())?);
         }
         let media = CallMedia { shared, threads };
         if video {
@@ -189,8 +201,14 @@ impl CallMedia {
         Ok(media)
     }
 
+    /// Muted closes the microphone (the OS indicator goes out); the state
+    /// beacon keeps running in `audio_tx`.
     pub fn set_muted(&self, muted: bool) {
         self.shared.muted.store(muted, Ordering::Relaxed);
+        let mic = self.shared.mic.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(p) = mic {
+            let _ = p.set_state(if muted { gst::State::Null } else { gst::State::Playing });
+        }
     }
 
     /// Mutes only our own playback; the peers are not told.
@@ -210,7 +228,9 @@ impl CallMedia {
             if let Some(p) = mic {
                 let _ = p.set_state(gst::State::Null);
                 apply_device(&p, true);
-                let _ = p.set_state(gst::State::Playing);
+                if !self.shared.muted.load(Ordering::Relaxed) {
+                    let _ = p.set_state(gst::State::Playing);
+                }
             }
         } else if let Some(p) = &self.shared.playback {
             let Some(spk) = p.by_name("spk") else { return };
@@ -238,19 +258,7 @@ impl CallMedia {
     pub fn set_camera(&self, on: bool) {
         log::info!("call: camera {}", if on { "on" } else { "off" });
         self.shared.camera_on.store(on, Ordering::Relaxed);
-        let mut cam = self.shared.camera.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(tx) = cam.take() {
-            tx.stop();
-        }
-        if on {
-            match VideoTx::start(self.shared.clone()) {
-                Ok(tx) => *cam = Some(tx),
-                Err(e) => {
-                    log::warn!("call: camera unavailable: {e}");
-                    self.shared.camera_on.store(false, Ordering::Relaxed);
-                }
-            }
-        }
+        restart_camera(&self.shared);
     }
 
     /// True while `slot`'s voice stands clear of its noise floor.
@@ -270,6 +278,24 @@ impl CallMedia {
         }
         if let Some(mut lane) = self.shared.video.lock().unwrap_or_else(|p| p.into_inner()).remove(&slot) {
             lane.teardown();
+        }
+    }
+}
+
+/// Stops the camera pipeline and starts it again if the camera is on (an
+/// encoder change, `Shared::avc_only`, applies then).
+fn restart_camera(shared: &Arc<Shared>) {
+    let mut cam = shared.camera.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(tx) = cam.take() {
+        tx.stop();
+    }
+    if shared.camera_on.load(Ordering::Relaxed) && shared.running.load(Ordering::Relaxed) {
+        match VideoTx::start(shared.clone()) {
+            Ok(tx) => *cam = Some(tx),
+            Err(e) => {
+                log::warn!("call: camera unavailable: {e}");
+                shared.camera_on.store(false, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -373,6 +399,25 @@ pub fn audio_devices(input: bool) -> Vec<(String, String)> {
     list
 }
 
+/// Sets a launched pipeline to NULL when an error path drops it (a pipeline
+/// dropped in another state can keep the camera or microphone open).
+struct NullOnError(Option<gst::Pipeline>);
+
+impl NullOnError {
+    /// Success: hand the pipeline on without stopping it.
+    fn release(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for NullOnError {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = p.set_state(gst::State::Null);
+        }
+    }
+}
+
 fn launch(desc: &str) -> Result<gst::Pipeline, String> {
     gst::parse::launch(desc)
         .map_err(|e| e.to_string())?
@@ -426,7 +471,9 @@ fn build_playback() -> Result<gst::Pipeline, String> {
     // Not the sink's clock: a device change restarts the sink alone.
     p.use_clock(Some(&gst::SystemClock::obtain()));
     apply_device(&p, false);
+    let guard = NullOnError(Some(p.clone()));
     p.set_state(gst::State::Playing).map_err(|e| e.to_string())?;
+    guard.release();
     Ok(p)
 }
 
@@ -445,9 +492,12 @@ fn audio_tx(shared: Arc<Shared>) {
              appsink name=out sync=false max-buffers=50 drop=true"
         )
     };
-    let start = |p: gst::Pipeline| {
+    let start = |p: gst::Pipeline| -> Result<gst::Pipeline, String> {
         apply_device(&p, true);
-        p.set_state(gst::State::Playing).map(|_| p).map_err(|e| e.to_string())
+        let guard = NullOnError(Some(p.clone()));
+        p.set_state(gst::State::Playing).map_err(|e| e.to_string())?;
+        guard.release();
+        Ok(p)
     };
     let pipeline = match launch(&desc(dsp)).and_then(start) {
         Ok(p) => p,
@@ -471,6 +521,10 @@ fn audio_tx(shared: Arc<Shared>) {
         return state_only(&shared, "microphone pipeline has no appsink element");
     };
     *shared.mic.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.clone());
+    // Muted before the microphone existed: `set_muted` found nothing to close.
+    if shared.muted.load(Ordering::Relaxed) {
+        let _ = pipeline.set_state(gst::State::Null);
+    }
     let mut bundle: Vec<Vec<u8>> = Vec::with_capacity(PACKETS_PER_BUNDLE);
     let mut state_at = Instant::now() - STATE_EVERY;
     let mut last_flags = u8::MAX;
@@ -485,6 +539,12 @@ fn audio_tx(shared: Arc<Shared>) {
             core::call_send(KIND_STATE, &[flags]);
             last_flags = flags;
             state_at = Instant::now();
+        }
+        // A NULL appsink returns at once: wait here instead of spinning.
+        if shared.muted.load(Ordering::Relaxed) {
+            bundle.clear();
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
         }
         let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) else { continue };
         let Some(buffer) = sample.buffer() else { continue };
@@ -574,9 +634,21 @@ fn add_audio_lane(shared: &Shared, slot: u8) -> Option<AudioLane> {
     .ok()?;
     let src = bin.by_name("src")?.downcast::<gst_app::AppSrc>().ok()?;
     playback.add(&bin).ok()?;
-    let mixer_pad = mixer.request_pad_simple("sink_%u")?;
-    bin.static_pad("src")?.link(&mixer_pad).ok()?;
-    bin.sync_state_with_parent().ok()?;
+    // Failed after `add`: take the bin out again, no orphan in the playback pipeline.
+    let mixer_pad = mixer.request_pad_simple("sink_%u").and_then(|pad| {
+        let linked = bin.static_pad("src").is_some_and(|out| out.link(&pad).is_ok()) && bin.sync_state_with_parent().is_ok();
+        if linked {
+            Some(pad)
+        } else {
+            mixer.release_request_pad(&pad);
+            None
+        }
+    });
+    let Some(mixer_pad) = mixer_pad else {
+        let _ = bin.set_state(gst::State::Null);
+        let _ = playback.remove(&bin);
+        return None;
+    };
     let level = Arc::new(Level { noise: Mutex::new(400.0), speaking_until_ms: std::sync::atomic::AtomicU64::new(0) });
     {
         let level = level.clone();
@@ -645,25 +717,37 @@ fn play_audio(shared: &Shared, slot: u8, payload: &[u8]) {
 
 // ---------------------------------------------------------------- receive
 
-fn receive(shared: Arc<Shared>) {
+fn receive(shared: Arc<Shared>, video: std::sync::mpsc::SyncSender<Vec<u8>>) {
     while shared.running.load(Ordering::Relaxed) {
         let Some(frame) = core::call_recv(200) else { continue };
         if frame.len() < 3 {
             continue;
         }
-        let (kind, slot, payload) = (frame[0], frame[1], &frame[2..]);
-        match kind {
-            KIND_AUDIO => play_audio(&shared, slot, payload),
+        match frame[0] {
+            KIND_AUDIO => play_audio(&shared, frame[1], &frame[2..]),
+            // Full queue: dropped; the decoder asks for a keyframe.
             KIND_VIDEO => {
-                let mut lanes = shared.video.lock().unwrap_or_else(|p| p.into_inner());
-                if !lanes.contains_key(&slot) && lanes.len() >= MAX_LANES {
-                    continue;
-                }
-                let lane = lanes.entry(slot).or_insert_with(VideoLane::new);
-                lane.feed(&shared, slot, payload);
+                let _ = video.try_send(frame);
             }
             _ => {}
         }
+    }
+}
+
+fn receive_video(shared: Arc<Shared>, frames: std::sync::mpsc::Receiver<Vec<u8>>) {
+    while shared.running.load(Ordering::Relaxed) {
+        let frame = match frames.recv_timeout(Duration::from_millis(200)) {
+            Ok(frame) => frame,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let (slot, payload) = (frame[1], &frame[2..]);
+        let mut lanes = shared.video.lock().unwrap_or_else(|p| p.into_inner());
+        if !lanes.contains_key(&slot) && lanes.len() >= MAX_LANES {
+            continue;
+        }
+        let lane = lanes.entry(slot).or_insert_with(VideoLane::new);
+        lane.feed(&shared, slot, payload);
     }
 }
 
@@ -671,7 +755,7 @@ fn receive(shared: Arc<Shared>) {
 
 impl VideoLane {
     fn new() -> Self {
-        VideoLane { pipeline: None, src: None, hevc: false, width: 0, height: 0, rotation: 0, asked_at: None, built_at: None }
+        VideoLane { pipeline: None, src: None, hevc: false, width: 0, height: 0, rotation: 0, asked_at: None, built_at: None, avc_asked: false }
     }
 
     fn feed(&mut self, shared: &Shared, slot: u8, f: &[u8]) {
@@ -690,6 +774,9 @@ impl VideoLane {
                 }
             });
             if failed.is_some() {
+                if self.hevc {
+                    self.ask_avc(slot);
+                }
                 self.teardown();
             }
         }
@@ -714,6 +801,9 @@ impl VideoLane {
                 }
                 Err(e) => {
                     log::warn!("call: no {} decoder: {e}", if hevc { "HEVC" } else { "H.264" });
+                    if hevc {
+                        self.ask_avc(slot);
+                    }
                     return;
                 }
             }
@@ -734,6 +824,15 @@ impl VideoLane {
         if self.asked_at.map_or(true, |t| t.elapsed() >= Duration::from_secs(1)) {
             self.asked_at = Some(Instant::now());
             core::call_request_keyframe(slot);
+        }
+    }
+
+    /// Every report to this sender asks for H.264 from now on.
+    fn ask_avc(&mut self, slot: u8) {
+        if !self.avc_asked {
+            self.avc_asked = true;
+            log::info!("call: asking slot {slot} for H.264");
+            core::call_request_avc(slot);
         }
     }
 
@@ -766,10 +865,12 @@ fn build_decoder(shared: &Shared, slot: u8, hevc: bool, rotation: u8) -> Result<
          videoconvert ! video/x-raw,format=RGBA ! {flip}appsink name=out sync=false max-buffers=2 drop=true \
          caps=\"video/x-raw,format=RGBA\""
     ))?;
+    let guard = NullOnError(Some(p.clone()));
     let src = p.by_name("src").and_then(|e| e.downcast::<gst_app::AppSrc>().ok()).ok_or("appsrc")?;
     let sink = p.by_name("out").and_then(|e| e.downcast::<gst_app::AppSink>().ok()).ok_or("appsink")?;
     attach_frame_sink(&sink, Some(slot), shared.frames.clone());
     p.set_state(gst::State::Playing).map_err(|e| e.to_string())?;
+    guard.release();
     log::info!("call: video decoder {decoder} for slot {slot}");
     Ok((p, src))
 }
@@ -812,8 +913,8 @@ struct Encoder {
 }
 
 /// Hardware HEVC first (the phones decode it in hardware and it needs ~30 %
-/// fewer bits), hardware H.264 next, software H.264 last.
-fn pick_encoder() -> Option<Encoder> {
+/// fewer bits), hardware H.264 next, software H.264 last. `avc_only`: no HEVC.
+fn pick_encoder(avc_only: bool) -> Option<Encoder> {
     const LIST: [Encoder; 8] = [
         Encoder { factory: "vah265enc", hevc: true, bps: false },
         Encoder { factory: "vah265lpenc", hevc: true, bps: false },
@@ -825,7 +926,7 @@ fn pick_encoder() -> Option<Encoder> {
         Encoder { factory: "x264enc", hevc: false, bps: false },
         Encoder { factory: "openh264enc", hevc: false, bps: true },
     ];
-    LIST.into_iter().find(|e| has(e.factory))
+    LIST.into_iter().find(|e| !(avc_only && e.hevc) && has(e.factory))
 }
 
 struct VideoTx {
@@ -861,17 +962,18 @@ fn encoder_kbps(target: u32, caps_fps: f64, admitted_fps: f64) -> u32 {
 
 impl VideoTx {
     fn start(shared: Arc<Shared>) -> Result<Self, String> {
-        let enc = pick_encoder().ok_or("no H.264/HEVC encoder (VA-API, x264 or OpenH264)")?;
+        let enc = pick_encoder(shared.avc_only.load(Ordering::Relaxed)).ok_or("no H.264/HEVC encoder (VA-API, x264 or OpenH264)")?;
         let (codec, parse) = if enc.hevc { ("h265", "h265parse") } else { ("h264", "h264parse") };
         let (w, h) = (tuning::WIDTH, tuning::HEIGHT);
-        // Development/testing: e.g. TYPEON_CAMERA_SRC="videotestsrc is-live=true pattern=ball".
+        // Development/testing: e.g. TYPEON_CAMERA_SRC=videotestsrc.
         let camera = std::env::var("TYPEON_CAMERA_SRC").unwrap_or_else(|_| CAMERA.into());
-        // One source element and its properties, nothing more: a `!` would
-        // splice arbitrary elements (file or network sinks) into the pipeline.
-        let source = camera.split_whitespace().next();
-        if camera.contains('!') || !matches!(source, Some("v4l2src" | "videotestsrc" | "pipewiresrc" | "mfvideosrc")) {
-            return Err("TYPEON_CAMERA_SRC must be one v4l2src, videotestsrc, pipewiresrc or mfvideosrc element".into());
-        }
+        // One bare source element name, nothing more: properties (`device=`,
+        // `path=`) and `!` (file or network sinks) are refused.
+        let camera = match camera.trim() {
+            "videotestsrc" => "videotestsrc is-live=true pattern=ball",
+            name @ ("v4l2src" | "pipewiresrc" | "mfvideosrc") => name,
+            _ => return Err("TYPEON_CAMERA_SRC must be one of v4l2src, videotestsrc, pipewiresrc or mfvideosrc".into()),
+        };
         let pipeline = launch(&format!(
             "{camera} ! videoconvert ! videoscale ! videorate max-rate={fps} drop-only=true ! \
              video/x-raw,format=NV12,width={w},height={h},pixel-aspect-ratio=1/1 ! tee name=t \
@@ -882,6 +984,7 @@ impl VideoTx {
             fps = tuning::MAX_FPS,
             factory = enc.factory,
         ))?;
+        let guard = NullOnError(Some(pipeline.clone()));
         let encoder = pipeline.by_name("enc").ok_or("encoder")?;
         let factor = if enc.hevc { 1.0 } else { tuning::AVC_FACTOR };
         let kbps = move |k: u32| (k as f64 * factor) as u32;
@@ -975,6 +1078,16 @@ impl VideoTx {
                             let _ = pipe.set_state(gst::State::Null);
                             break;
                         }
+                        // A receiver cannot decode our HEVC: rebuild the
+                        // pipeline with H.264. Done on another thread:
+                        // `VideoTx::stop` joins this one.
+                        if hevc && core::call_take_avc_request() {
+                            log::info!("call: a receiver asked for H.264, switching encoder");
+                            shared.avc_only.store(true, Ordering::Relaxed);
+                            let shared = shared.clone();
+                            let _ = std::thread::Builder::new().name("call-camera-restart".into()).spawn(move || restart_camera(&shared));
+                            break;
+                        }
                         // On request, at most one keyframe per KEYFRAME_MIN_GAP_MS.
                         if core::call_take_keyframe_request()
                             && key_at.map_or(true, |t| t.elapsed() >= Duration::from_millis(tuning::KEYFRAME_MIN_GAP_MS))
@@ -1038,6 +1151,7 @@ impl VideoTx {
                 })
                 .map_err(|e| e.to_string())?
         };
+        guard.release();
         Ok(VideoTx { pipeline, running, thread: Some(thread) })
     }
 

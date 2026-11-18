@@ -260,12 +260,15 @@ pub fn stylesheet(appearance: &Appearance) -> String {
     // fully qualified.
     let wallpaper = match &appearance.wallpaper {
         Some(path) => {
-            let path = css_str(path);
+            // A real file URI: `file://C:\...` is not one, and `#` or `%` in
+            // a raw path would break it on any platform.
+            let uri = gtk::gio::prelude::FileExt::uri(&gtk::gio::File::for_path(path));
+            let uri = css_str(uri.as_str());
             format!(
             // Braces are doubled ONCE, not twice: this inner `format!` emits the
             // final text, which the outer one then inserts verbatim without a
             // second round of brace processing.
-            ".chat-messages {{\n    background-image: url(\"file://{path}\");\n    \
+            ".chat-messages {{\n    background-image: url(\"{uri}\");\n    \
              background-size: cover;\n    background-position: center;\n}}\n"
             )
         }
@@ -413,6 +416,8 @@ button.circular {{
     padding: 0;
 }}
 button.pill {{ min-height: 46px; padding-left: 26px; padding-right: 26px; }}
+/* The chat header's Attend pill: header-button size, or it widens the bar and squeezes the title. */
+headerbar button.pill {{ min-height: 0; padding: 2px 12px; }}
 button.suggested-action, button.destructive-action, button.opaque {{ box-shadow: none; }}
 
 /* Surfaces have to be painted explicitly for the same reason the accent does

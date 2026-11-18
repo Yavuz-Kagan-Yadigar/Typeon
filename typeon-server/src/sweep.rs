@@ -77,10 +77,11 @@ impl ServerCore {
         self.conns.retain(|p, c| swarm.is_connected(p) || mono - c.window_start <= RATE_WINDOW_MS);
         self.relay_budget.retain(|_, b| mono - b.0 <= RELAY_WINDOW_MS);
         self.relay_pairs.retain(|_, t| mono - *t <= RELAY_WINDOW_MS);
+        self.deposit_window.retain(|_, w| mono.saturating_sub(w.0) <= DEPOSIT_WINDOW_MS);
 
 
         let now = now_ms();
-        if self.clock_jumped(now, mono) {
+        if self.clock_jumped(now, boot_ms()) {
             warn!("System clock jumped — TTL sweep deferred");
             return;
         }
@@ -103,6 +104,8 @@ impl ServerCore {
             self.drop_blob(&blob_id);
         }
         self.store.recount_blob_bytes();
+        // Enrollments idle this long own nothing any more in the normal case (the archive TTL is the longest).
+        self.store.prune_dead_rows(now - store::ARCHIVE_TTL_MS);
         self.store.incremental_vacuum();
     }
 }

@@ -12,9 +12,11 @@ pub(crate) const MAX_UNKNOWN_INBOUND: usize = 16;
 pub(crate) const UNKNOWN_INBOUND_GRACE_MS: u64 = 2 * 60 * 1000;
 
 /// Of the unknown inbound connections `(id, established ms)`: those older
-/// than the grace time, and the newest ones above the slot cap.
+/// than the grace time, and the oldest ones above the slot cap. Closing the
+/// newest let a stranger holding the slots shut out a new contact who had just
+/// scanned our code.
 pub(crate) fn unknown_inbound_to_close<T>(mut held: Vec<(T, u64)>, now: u64) -> Vec<T> {
-    held.sort_by_key(|(_, at)| *at);
+    held.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
     held.into_iter()
         .enumerate()
         .filter(|(i, (_, at))| *i >= MAX_UNKNOWN_INBOUND || now.saturating_sub(*at) > UNKNOWN_INBOUND_GRACE_MS)
@@ -113,8 +115,8 @@ impl P2PCore {
             }
             return Ok(swarm.local_peer_id().to_string());
         }
-        // The node is onion-only (`tor::DialReject` on TCP). Without Tor the swarm could
-        // dial nothing, and the app would sit offline without an error.
+        // The node is onion-only (no TCP transport). Without Tor the swarm could dial
+        // nothing, and the app would sit offline without an error.
         if !tor_enabled {
             return Err("Tor is off: network runs over Tor only".to_string());
         }
@@ -128,31 +130,24 @@ impl P2PCore {
         let app_files_dir = self.app_files_dir.clone().ok_or("initDatabase must be called first")?;
         let keypair = load_or_generate_libp2p_keypair(&app_files_dir);
 
-        // With Tor on, start the arti onion service (bootstraps in the background). It
-        // bridges incoming Tor streams to `127.0.0.1:TOR_LIBP2P_PORT`, so libp2p must
-        // listen on that fixed port. With Tor off, arti is never created (no runtime cost).
-        let tor_handle: Option<tor::TorHandle> = if tor_enabled {
-            let state_dir = format!("{}/arti_state", app_files_dir);
-            let cache_dir = format!("{}/arti_cache", app_files_dir);
-            match tor::TorHandle::launch(&state_dir, &cache_dir, TOR_LIBP2P_PORT) {
-                Ok(h) => Some(h),
-                // Do not continue without Tor. The node is onion-only, so the swarm could dial
-                // nothing and would put a loopback address in the QR code. The caller retries.
-                Err(e) => return Err(format!("Tor network failed to start: {}", e)),
-            }
-        } else {
-            None
-        };
-        // Dial client for the dial transport. None when Tor is off; the transport is inert.
-        let tor_client = tor_handle.as_ref().map(|h| h.client.clone());
-        let listen_port: u16 = if tor_handle.is_some() { TOR_LIBP2P_PORT } else { 0 };
+        // Start the arti onion service (bootstraps in the background). Its inbound streams
+        // reach the swarm in-process (`tor::OnionListen`); TOR_LIBP2P_PORT is only the
+        // onion service's virtual port. Do not continue without Tor: the node is
+        // onion-only, so the swarm could dial nothing. The caller retries.
+        let state_dir = format!("{}/arti_state", app_files_dir);
+        let cache_dir = format!("{}/arti_cache", app_files_dir);
+        let (tor_handle, onion_listen) = tor::TorHandle::launch(&state_dir, &cache_dir, TOR_LIBP2P_PORT)
+            .map_err(|e| format!("Tor network failed to start: {}", e))?;
+        let tor_client = Some(tor_handle.client.clone());
+        let listen_addr = onion_listen.listen_addr();
 
         // The swarm is built by hand, not with `SwarmBuilder`. libp2p 0.53's `build()`
         // sets a fixed 10 s timeout on every connection and offers no way to change it.
         // Tor onion dials (circuit build plus Noise) and relay circuits routinely exceed
         // that on mobile data; measured on device: constant "Timeout has been reached".
-        // The transports match what the builder would set up (TCP, arti onion dial, relay
-        // client). All use Noise and Yamux, V1Lazy.
+        // The transports: arti onion dial, onion inbound (`OnionListen`), relay client. All
+        // use Noise and Yamux, V1Lazy. There is no TCP transport: nothing can dial or
+        // accept a clearnet or local socket.
         let local_peer_id = keypair.public().to_peer_id();
         let (relay_transport, relay_client) = relay::client::new(local_peer_id);
         let transport = {
@@ -160,15 +155,16 @@ impl P2PCore {
             use libp2p::core::transport::Transport as _;
             use libp2p::core::upgrade::Version;
             let noise_for = |kp: &libp2p::identity::Keypair| noise::Config::new(kp).map_err(|e| e.to_string());
-            // Onion-only: TCP is kept only for incoming onion-bridge connections. Every outgoing
-            // TCP (clearnet) dial is refused, so no peer's real IP is dialed. All egress goes
-            // through onion or relay circuits.
-            let tcp_t = tor::DialReject(tcp::tokio::Transport::new(tcp::Config::default().nodelay(true)))
-                .upgrade(Version::V1Lazy)
-                .authenticate(noise_for(&keypair)?)
-                .multiplex(tuned_yamux())
-                .map(|(p, m), _| (p, StreamMuxerBox::new(m)));
-            // With Tor off the client is None, and every dial is refused (see tor.rs).
+            // Inbound onion streams. A stream must finish Noise and Yamux sooner than an outgoing
+            // dial (see `INBOUND_UPGRADE_SECS`), so a stalled stranger frees its bridge slot.
+            let onion_in_t = libp2p::core::transport::timeout::TransportTimeout::with_ingoing_timeout(
+                onion_listen
+                    .upgrade(Version::V1Lazy)
+                    .authenticate(noise_for(&keypair)?)
+                    .multiplex(tuned_yamux())
+                    .map(|(p, m), _| (p, StreamMuxerBox::new(m))),
+                std::time::Duration::from_secs(tor::INBOUND_UPGRADE_SECS),
+            );
             let tor_t = tor::ArtiDialTransport::new(tor_client.clone())
                 .upgrade(Version::V1Lazy)
                 .authenticate(noise_for(&keypair)?)
@@ -181,7 +177,7 @@ impl P2PCore {
                 .map(|(p, m), _| (p, StreamMuxerBox::new(m)));
             let combined = relay_t
                 .or_transport(tor_t)
-                .or_transport(tcp_t)
+                .or_transport(onion_in_t)
                 .map(|out, _| match out {
                     futures::future::Either::Left(futures::future::Either::Left(o)) => o,
                     futures::future::Either::Left(futures::future::Either::Right(o)) => o,
@@ -214,7 +210,8 @@ impl P2PCore {
                 // OutboundFailure, so a short timeout could retry forever without giving the chunk
                 // enough time. 30 s is generous for a typical chunk over Tor, but still detects a
                 // dead connection in reasonable time (see `DOWNLOAD_STALL_TIMEOUT_MS`).
-                let file_chunks = request_response::cbor::Behaviour::new(
+                // Requests capped at 4 KiB (`FileChunkCodec`).
+                let file_chunks: request_response::Behaviour<FileChunkCodec> = request_response::Behaviour::new(
                     [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default()
                         .with_request_timeout(std::time::Duration::from_millis(server_client::BLOB_REQUEST_TIMEOUT_MS)),
@@ -235,13 +232,15 @@ impl P2PCore {
                 // `poll_events`. The stock `ping::Config` would apply one fixed interval to all
                 // connections, which this custom protocol avoids. `with_request_timeout` is the
                 // longest wait for one reply (see `KEEPALIVE_TIMEOUT_SECS`).
-                let keepalive = request_response::cbor::Behaviour::new(
+                // One probe in flight per side, plus a `bye`: 8 streams per connection (the library allows 100, in and out together).
+                let keepalive: request_response::Behaviour<KeepAliveCodec> = request_response::Behaviour::new(
                     [
                         (StreamProtocol::new(KEEPALIVE_PROTOCOL), request_response::ProtocolSupport::Full),
                         (StreamProtocol::new(KEEPALIVE_QUIET_PROTOCOL), request_response::ProtocolSupport::Full),
                     ],
                     request_response::Config::default()
-                        .with_request_timeout(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS)),
+                        .with_request_timeout(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS))
+                        .with_max_concurrent_streams(8),
                 );
                 // See `P2PBehaviour.server_rpc`: `BLOB_REQUEST_TIMEOUT_MS` (90 s). Same reason as
                 // `file_chunks`: the library's 10 s default is too short for a large payload over Tor.
@@ -251,10 +250,12 @@ impl P2PCore {
                         .with_request_timeout(std::time::Duration::from_millis(server_client::BLOB_REQUEST_TIMEOUT_MS)),
                 );
                 // See `ACK_PROTOCOL`. Over a Tor circuit a round trip can take seconds.
-                let acks = request_response::cbor::Behaviour::new(
+                // A batch over the stream cap fails and falls back to encrypted Ack packets.
+                let acks: request_response::Behaviour<AckCodec> = request_response::Behaviour::new(
                     [(StreamProtocol::new(ACK_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default()
-                        .with_request_timeout(std::time::Duration::from_secs(ACK_REQUEST_TIMEOUT_SECS)),
+                        .with_request_timeout(std::time::Duration::from_secs(ACK_REQUEST_TIMEOUT_SECS))
+                        .with_max_concurrent_streams(32),
                 );
                 let envelopes = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new(ENVELOPE_PROTOCOL), request_response::ProtocolSupport::Full)],
@@ -289,14 +290,9 @@ impl P2PCore {
 
         let peer_id = *swarm.local_peer_id();
 
-        // Fixed port. The onion bridge connects here (see TOR_LIBP2P_PORT).
-        //
-        // Onion-only: listen on 127.0.0.1, not 0.0.0.0. The bridge (`bridge_incoming_stream`)
-        // connects to `127.0.0.1:<port>` itself, so incoming onion traffic is unaffected.
-        // Direct clearnet connections from LAN or internet are refused, and identify does
-        // not advertise an address that peers could dial.
-        swarm.listen_on(format!("/ip4/127.0.0.1/tcp/{}", listen_port).parse().map_err(|_| "bad multiaddr")?)
-            .map_err(|e| e.to_string())?;
+        // The onion inbound listener. Its address is a loopback label with no socket behind
+        // it (see `tor::OnionListen`); peers drop loopback addresses.
+        swarm.listen_on(listen_addr).map_err(|e| e.to_string())?;
 
         // No identity yet. `ensure_own_mailbox_subscription` sets it later.
         if let Ok(active_fp) = self.get_active_own_device_fingerprint() {
@@ -315,7 +311,7 @@ impl P2PCore {
         // transition is tracked from scratch.
         self.tor_was_ready = false;
         self.swarm = Some(swarm);
-        self.tor = tor_handle;
+        self.tor = Some(tor_handle);
         self.tor_dormant = false;
 
         // See `server_client`. Connecting to and registering with configured servers

@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// The goodbye keepalives of `announce_offline` not answered (or failed) yet; `api::announce_offline` waits for
+/// them, bounded. The poll loop removes each one when its answer or failure comes in.
+pub(crate) static BYE_WAIT: std::sync::Mutex<Vec<request_response::OutboundRequestId>> = std::sync::Mutex::new(Vec::new());
+
 impl P2PCore {
 
     /// Starts the handshake proactively when the user opens a chat, before any message is typed. Before, the handshake only started lazily on the
@@ -126,8 +130,8 @@ impl P2PCore {
             }
         }
         self.dial_with_relay_fallback(peer_id, primary_addr);
-        // Also every address the behaviours know for this peer. No direct (IP) addresses are added: the node is onion-only, and `DialReject`
-        // refuses clearnet dials anyway.
+        // Also every address the behaviours know for this peer. No direct (IP) addresses are added: the node is onion-only, and no
+        // transport can dial a clearnet address anyway.
         if let Some(swarm) = &mut self.swarm {
             let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
                 // Only if none of the dials above started. With `Always` this
@@ -145,8 +149,10 @@ impl P2PCore {
     pub(crate) fn announce_offline(&mut self) -> usize {
         let peers: Vec<PeerId> = self.keepalive_state.keys().copied().filter(|p| !self.is_server_peer(p)).collect();
         let Some(swarm) = &mut self.swarm else { return 0 };
+        let mut wait = BYE_WAIT.lock().unwrap_or_else(|e| e.into_inner());
+        wait.clear();
         for p in &peers {
-            swarm.behaviour_mut().keepalive.send_request(p, KeepAliveRequest { bye: true });
+            wait.push(swarm.behaviour_mut().keepalive.send_request(p, KeepAliveRequest { bye: true }));
         }
         peers.len()
     }
@@ -333,9 +339,8 @@ impl P2PCore {
     /// previous session back (memory and disk then agree) and is an error.
     pub(crate) fn install_ratchet(&mut self, fp: &str, state: DeviceRatchetState) -> Result<(), String> {
         let previous = self.ratchets.insert(fp.to_string(), state);
-        if self.persist_ratchet_state(fp) {
-            // Keys of the replaced session must not be loaded onto the new one.
-            self.clear_persisted_skipped_keys(fp);
+        // Keys of the replaced session must not be loaded onto the new one.
+        if self.persist_ratchet_state_replacing_skipped(fp) {
             return Ok(());
         }
         match previous {
@@ -621,6 +626,7 @@ impl P2PCore {
                 skew
             ));
         }
+        let mut older_than_seen = false;
         {
             let seen = self.recent_handshake_sigs.entry(handshake.sender_device_fingerprint.clone()).or_default();
             // Prune old entries from the window (prevents unbounded growth).
@@ -629,8 +635,30 @@ impl P2PCore {
             // past the skew window (both on the sender's clock).
             if seen.iter().any(|(ts, _)| *ts > handshake.timestamp) {
                 info!("HandshakeInit ignored (peer={}) — a newer one was already accepted", crate::log_id(&handshake.sender_device_fingerprint));
-                return Ok(());
+                older_than_seen = !seen.iter().any(|(_, sig)| sig == &handshake.signature_classical);
+                if !older_than_seen {
+                    return Ok(());
+                }
             }
+        }
+        if older_than_seen {
+            // Not a byte-identical replay: the peer's clock may have gone back, and its inits stay below the stored one for days. With no
+            // working session (nothing heard from the peer), this side starts the handshake instead, at most once per redo interval.
+            let fp = handshake.sender_device_fingerprint.clone();
+            let working = self.ratchets.get(&fp).map_or(false, |s| !s.never_heard());
+            let recent_redo = self.last_handshake_redo.get(&fp).map_or(false, |(t, _)| now.saturating_sub(*t) < UNDECRYPTABLE_REDO_MIN_INTERVAL_MS);
+            if !working && !recent_redo {
+                let stale = self.ratchets.get(&fp).map(|s| s.root_handle_now());
+                self.last_handshake_redo.insert(fp.clone(), (now, stale));
+                match self.initiate_handshake_with(&fp) {
+                    Ok(_) => self.regen_pending_for_peer(&fp),
+                    Err(e) => warn!("Handshake answer to an older init failed: {}", e),
+                }
+            }
+            return Ok(());
+        }
+        {
+            let seen = self.recent_handshake_sigs.entry(handshake.sender_device_fingerprint.clone()).or_default();
             if seen.iter().any(|(_, sig)| sig == &handshake.signature_classical) {
                 info!(
                     "HandshakeInit ignored (peer={}) — same signature already seen in window (replay/duplicate packet)",
@@ -807,13 +835,12 @@ impl P2PCore {
             let kyber_ct = state.perform_dh_ratchet(now)?;
             // State first, then the table (as in `receive_message`): stopped
             // in between, the disk held the old state without its skipped keys.
-            if !self.persist_ratchet_state(peer_device_fingerprint) {
+            // We triggered the rotation. The skipped keys of the old chain were moved into the state (`old_recv`), and their copies in the table would now
+            // clash with the new chain's numbers: both writes in one transaction.
+            if !self.persist_ratchet_state_replacing_skipped(peer_device_fingerprint) {
                 self.ratchets.insert(peer_device_fingerprint.to_string(), snapshot);
                 return Err("Session state could not be written, rotation not announced".to_string());
             }
-            // We triggered the rotation. The skipped keys of the old chain were moved into the state (`old_recv`), and their copies in the table would now
-            // clash with the new chain's numbers.
-            self.clear_persisted_skipped_keys(peer_device_fingerprint);
             return Ok(Some(kyber_ct));
         }
         Ok(None)

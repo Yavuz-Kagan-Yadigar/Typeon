@@ -104,7 +104,7 @@ use libp2p::multiaddr::Protocol as MultiaddrProtocol;
 use libp2p::request_response;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{identify, kad, noise, relay, tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
+use libp2p::{identify, kad, noise, relay, yamux, Multiaddr, PeerId, StreamProtocol, Swarm};
 use log::{debug, error, info, warn};
 // Uses the maintained RustCrypto `ml-dsa` and `ml-kem` crates instead of pqcrypto-dilithium and pqcrypto-kyber, which have advisories
 // (RUSTSEC-2024-0380, RUSTSEC-2024-0381) and FIPS 204/203 byte incompatibilities (see the Cargo.toml note). The parameter sets are
@@ -324,15 +324,8 @@ struct P2PCore {
     /// derived from this. Only relay circuit addresses count. The loopback listener is
     /// never shown.
     own_listen_addrs: Vec<Multiaddr>,
-    /// Holds envelopes that `publish_envelope` could not publish (see its docs). In the
-    /// first seconds after the first connection, the gossip mesh may not exist yet, so any
-    /// envelope type can be affected, including HandshakeInit, IdentityExchange, Message
-    /// and GroupUpdate. `poll_events` retries the SAME envelope on every turn, without
-    /// consuming a new ratchet step or message_id. This is the single central retry
-    /// mechanism for all envelope types. Before, each caller kept its own queue, which
-    /// duplicated work and did not cover some envelopes, such as HandshakeInit. The
-    /// third field is the first attempt time (ms). After `PENDING_ENVELOPE_TIMEOUT_MS`
-    /// it is marked "Failed" and dropped, so an unreachable device is not retried forever.
+    /// Envelopes that `publish_envelope` could not send. `poll_events` retries the SAME envelope (no new
+    /// ratchet step or message_id). After `PENDING_ENVELOPE_TIMEOUT_MS` an entry is marked "Failed" and dropped.
     pending_envelopes: Vec<QueuedEnvelope>,
     /// Message status icons for the UI (see the "delivery status" request). Key:
     /// `MessagePacketHeader.message_id`. Bounded: `set_message_status` clears it at
@@ -385,24 +378,12 @@ struct P2PCore {
     /// of their prekeys. A peer that hands out prekeys refuses such an init as a first
     /// contact. See `process_handshake_init`.
     id0_inits: std::collections::HashSet<String>,
-    /// The device fingerprint whose mailbox topic (`p2p_msg_<fp>`) we are currently subscribed to. `None` means we have not subscribed yet.
-    ///
-    /// Why this is needed: the subscription used to happen once in `start_network`, and only if an identity already existed.
-    /// `P2PService.onStartCommand` allows network setup only once per process (its `isRunning` flag). If the service started before the identity
-    /// existed (for example a START_STICKY restart after `exit(0)`, or a service left over from an earlier run), `start_network` ran without an
-    /// identity. The subscription was then skipped silently, and `createIdentity` plus `startNetworkService()` became a no-op because of `isRunning`.
-    /// The result: the swarm was live, the Tor onion service was up, the QR could be made, and inbound connections were accepted, but the device
-    /// subscribed to no gossip topic. No packet could reach it, and the sender got `InsufficientPeers` forever (see libp2p-gossipsub `publish`, where
-    /// an empty recipient set results when there is no `topic_peers` entry).
-    /// With this field, `ensure_own_mailbox_subscription` (run every `poll_events` turn) completes the subscription when the identity is created or
-    /// loaded later. No network restart is needed.
+    /// The active own device fingerprint once the swarm runs (set by `start_network` or, for an identity made or
+    /// restored later, by `ensure_own_mailbox_subscription`). Names the own server mailbox. No gossip topic exists.
     own_mailbox_topic_fp: Option<String>,
-    /// Measured on two real devices: even with both phones directly connected on the same LAN, after a fresh pairing the `IdentityExchange` took
-    /// about 5 MINUTES to reach the other side. Gossip did not deliver reliably to a mailbox topic the sender was not subscribed to ("fanout").
-    /// It worked only once the slower Tor or server path kicked in.
-    /// Fix: during pairing, each side also subscribes to the OTHER side's mailbox topic (`p2p_msg_<peer_fp>`). Both then use the same topic, a real
-    /// gossip mesh forms, and `Handshake` and `IdentityExchange` go out within seconds. The subscription is dropped once a ratchet session exists
-    /// (it uses the rotating topic then), or when `PAIRING_MAILBOX_TTL_MS` expires. Key: peer_fp. Value: time subscribed (ms).
+    /// Devices this device started a pairing with and has no ratchet with yet. Key: peer_fp. Value: start
+    /// time (ms). Only a marker (no gossip topic): dropped when the ratchet exists or after
+    /// `PAIRING_MAILBOX_TTL_MS`.
     pairing_mailbox_subs: HashMap<String, u64>,
     /// The connection a verified IdentityExchange arrived on, per device. Only our
     /// IdentityExchange and Handshake to that device use it. The side that showed its
@@ -595,6 +576,8 @@ struct P2PCore {
     message_rate_limiter: HashMap<PeerId, (u64, u32)>,
     /// Same shape, for served file chunks (see the `FileChunks` request arm).
     chunk_rate_limiter: HashMap<PeerId, (u64, u32)>,
+    /// (window start, bytes) of chunks served per (peer, file) per day (`serve_chunk_request_budgeted`).
+    chunk_bytes_served: HashMap<(PeerId, String), (u64, u64)>,
     /// (window start, count) for server-delivered mail (`source == None`). It has no peer id to
     /// key `message_rate_limiter` on. Over the budget, it waits in `deferred_incoming`.
     /// `server_fetch` and `commit_server_fetches` hold while that happens.

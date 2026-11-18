@@ -99,6 +99,8 @@ app/src/main/jniLibs/
 └── x86/libp2p_messenger.so
 ```
 
+A Gradle run that builds only the debug variant writes `app/src/debug/jniLibs/` instead. Any other run writes `app/src/main/jniLibs/` and deletes `app/src/debug/jniLibs/`.
+
 ### Building the Android App
 
 1. Open the project folder in Android Studio

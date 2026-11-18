@@ -8,15 +8,15 @@
 <component type="desktop-application">
   <id>com.p2p.messenger.Typeon</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>Apache-2.0</project_license>
+  <project_license>GPL-3.0-or-later</project_license>
   <name>Typeon</name>
   <summary>Peer-to-peer encrypted messaging — linked desktop device</summary>
   <description>
     <p>
       Typeon joins your existing Typeon account as a secondary device: it
       generates its own keys, shows a device-link QR code and is adopted by
-      the primary (a phone). A Linux machine can also be its own account, or
-      restore one from a recovery file.
+      the primary (a phone). It cannot create or restore an account of its
+      own: the phone stays the account's authority.
     </p>
     <p>
       Every message is end-to-end encrypted with a hybrid post-quantum

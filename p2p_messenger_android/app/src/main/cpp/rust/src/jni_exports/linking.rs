@@ -102,22 +102,28 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_peekDeviceLink<'local>(mut 
 }
 
 /// The short code both devices show while a device is linked, for the user to
-/// compare by eye: six digits from the link QR's device fingerprint and
+/// compare by eye: nine digits from the link QR's device fingerprint and
 /// nonce. The new device computes it from the QR it shows, the approving
 /// device from the QR it scanned. Empty for a QR that is not a link request.
+///
+/// Someone who sees the QR and puts a QR of their own in front of the
+/// approving device can try nonces until their code matches. Nine digits
+/// through a slow KDF make that hours of GPU work per QR instead of a
+/// second. A code from values exchanged after the scan does not help: a
+/// device in the middle picks its own part after seeing the other side's.
 pub(crate) fn device_link_code(request_cbor: &[u8]) -> String {
-    use sha2::Digest;
     let Ok(req) = DeviceLinkRequest::from_cbor(request_cbor) else { return String::new() };
     if req.nonce.len() != 16 || !is_fingerprint_hex(&req.device_fingerprint) {
         return String::new();
     }
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(b"typeon-link-code-v1");
-    hasher.update(req.device_fingerprint.to_ascii_lowercase().as_bytes());
-    hasher.update(&req.nonce);
-    let digest = hasher.finalize();
-    let number = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
-    format!("{:03} {:03}", number / 1000, number % 1000)
+    let mut input = req.device_fingerprint.to_ascii_lowercase().into_bytes();
+    input.extend_from_slice(&req.nonce);
+    let mut out = [0u8; 8];
+    // ~0.1 s on a phone; both callers run off the UI thread.
+    let iterations = std::num::NonZeroU32::new(100_000).expect("non-zero");
+    ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, iterations, b"typeon-link-code-v2", &input, &mut out);
+    let number = u64::from_be_bytes(out) % 1_000_000_000;
+    format!("{:03} {:03} {:03}", number / 1_000_000, number / 1000 % 1000, number % 1000)
 }
 
 #[no_mangle]

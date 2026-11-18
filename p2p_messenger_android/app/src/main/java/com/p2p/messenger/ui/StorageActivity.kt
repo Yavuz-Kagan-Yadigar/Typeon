@@ -424,6 +424,8 @@ class PrunePanel(root: View, private val scope: CoroutineScope, private val onDo
     private var kind = ""
     private var id = ""
     private var oldest = 0L
+    /** Fixed at bind, so the shown sizes and the deleted range use the same cut-off. */
+    private var nowMs = 0L
     private var delCount = 0L
     private var job: Job? = null
 
@@ -443,18 +445,20 @@ class PrunePanel(root: View, private val scope: CoroutineScope, private val onDo
         this.id = id
         oldest = 0
         seek.progress = 0
-        // No stale range / sizes of the chat that used this row before.
-        seek.isEnabled = false
+        nowMs = System.currentTimeMillis()
+        // No stale range / sizes of the chat that used this row before. The stats are asked
+        // lazily, on the first slider touch: not one locked DB scan per bound row.
+        job?.cancel()
+        seek.isEnabled = true
         button.isEnabled = false
         sizes.text = ""
-        refresh()
+        date.text = "—"
     }
 
     private fun beforeMs(): Long {
         val p = seek.progress
         if (p == 0 || oldest == 0L) return 0
-        val now = System.currentTimeMillis()
-        return oldest + (now - oldest) * p / 100
+        return oldest + (nowMs - oldest) * p / 100
     }
 
     private fun refresh() {
@@ -470,7 +474,11 @@ class PrunePanel(root: View, private val scope: CoroutineScope, private val onDo
             }
             if (k != kind || i != id) return@launch
             // The range comes from the first (before = 0) load of this chat.
-            if (oldest == 0L) oldest = st.optLong("oldest_ms")
+            if (oldest == 0L) {
+                oldest = st.optLong("oldest_ms")
+                // The slider was moved before the range was known: ask again for its real position.
+                if (oldest != 0L && seek.progress > 0) { refresh(); return@launch }
+            }
             delCount = st.optLong("del_msg_count") + (if (st.optLong("del_att_bytes") > 0) 1 else 0)
             seek.isEnabled = oldest != 0L
             button.isEnabled = delCount > 0

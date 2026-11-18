@@ -160,7 +160,9 @@ class ServerService : Service() {
     private fun setLocks(on: Boolean) {
         retryLock?.let { if (it.isHeld) it.release() }
         retryLock = null
-        if (!on) {
+        // `onDestroy` clears `isRunning` before it releases: a start finishing
+        // on the core thread afterwards must not take the locks again.
+        if (!on || !isRunning) {
             wakeLock?.let { if (it.isHeld) it.release() }
             wakeLock = null
             wifiLock?.let { if (it.isHeld) it.release() }
@@ -187,6 +189,9 @@ class ServerService : Service() {
 
     private var retryLock: PowerManager.WakeLock? = null
 
+    /** Failed starts in a row; only the core thread touches it. */
+    private var startFailures = 0
+
     /** The watchdog runs on the uptime clock: without a lock the CPU suspends
      *  and a failed start stays down until something else wakes the phone.
      *  Timed, so a core that never starts does not hold the CPU for good. */
@@ -194,6 +199,8 @@ class ServerService : Service() {
     private fun holdForRetry() {
         // One object: a second failed start must not leave the first lock held.
         retryLock?.let { if (it.isHeld) it.release() }
+        retryLock = null
+        if (!isRunning) return
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         retryLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Typeon:server-retry").apply {
             setReferenceCounted(false)
@@ -332,10 +339,17 @@ class ServerService : Service() {
                 // with backoff, but do not hold the locks meanwhile.
                 lastError = result
                 setLocks(false)
-                holdForRetry()
+                // Each lock outlasts the gap to the next tick, so holding one
+                // on every failure kept the CPU awake for good. Transient
+                // causes (SD card mount, old loop closing) clear within the
+                // first retries; after that the watchdog retries whenever the
+                // phone is awake anyway.
+                // ponytail: uptime-clock retries after 3 failures; AlarmManager if a late recovery must be prompt.
+                if (++startFailures <= 3) holdForRetry()
                 nm.notify(NOTIFICATION_ID, buildNotification(serverErrorText(this, result)))
             } else {
                 lastError = null
+                startFailures = 0
                 setLocks(true)
                 nm.cancel(ERROR_NOTIFICATION_ID)
                 nm.notify(NOTIFICATION_ID, buildNotification(getString(R.string.notif_running)))
@@ -344,6 +358,7 @@ class ServerService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         // Really stop the Rust core too. Before, only the wake lock was released here. The server kept running in the process. Even with the switch showing
         // "off", it went on accepting mail.
         core.execute {
@@ -365,7 +380,6 @@ class ServerService : Service() {
         watchdog.removeCallbacks(watchdogTick)
         watchdog.removeCallbacks(updateTick)
         if (instance === this) instance = null
-        isRunning = false
         super.onDestroy()
     }
 
@@ -435,7 +449,10 @@ class ServerService : Service() {
                 android.os.StatFs(blobs.absolutePath).availableBytes,
                 android.os.StatFs(dataDir(this).absolutePath).availableBytes
             )
-            val used = blobs.listFiles()?.sumOf { it.length() } ?: 0L
+            // Mail and archive count against the budget too: the DB file (and its WAL) bounds them from above.
+            val db = java.io.File(dataDir(this), "typeon_server.db")
+            val used = (blobs.listFiles()?.sumOf { it.length() } ?: 0L) +
+                db.length() + java.io.File(db.path + "-wal").length()
             // At least 1: 0 means "no budget" to the native side.
             (used + free / 2).coerceAtMost(8L * 1024 * 1024 * 1024).coerceAtLeast(1L)
         } catch (e: Throwable) {

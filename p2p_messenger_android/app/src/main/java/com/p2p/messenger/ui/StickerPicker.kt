@@ -257,7 +257,7 @@ class StickerPicker(
             .setMessage(R.string.msg_confirm_delete_sticker)
             .setPositiveButton(R.string.action_delete_selected) { _, _ ->
                 scope.launch(Dispatchers.IO) {
-                    val failed = doomed.map { call { P2PLib.deleteSticker(it) } }.firstOrNull { it.startsWith("Error:") }
+                    val failed = call { P2PLib.deleteStickers(org.json.JSONArray(doomed).toString()) }.takeIf { it.startsWith("Error:") }
                     withContext(Dispatchers.Main) {
                         if (failed != null) toast(coreErrorText(activity, failed))
                         selected.clear()
@@ -404,6 +404,8 @@ class StickerPicker(
         }
         /** Being decoded: no second request for the same sticker. */
         private val pending = mutableSetOf<String>()
+        /** Few grid decodes at once: a fling must not decode 64 animations in parallel. */
+        private val decodeGate = Semaphore(3)
 
         inner class Holder(view: View) : RecyclerView.ViewHolder(view) {
             val image: ImageView = view.findViewById(R.id.imgStickerCell)
@@ -451,6 +453,12 @@ class StickerPicker(
             }
             if (cached != null || !pending.add(id)) return
             scope.launch(Dispatchers.IO) {
+              decodeGate.withPermit {
+                // Scrolled away while waiting: skip; a re-bind asks again.
+                if (!holder.itemView.isAttachedToWindow) {
+                    withContext(Dispatchers.Main) { pending.remove(id) }
+                    return@withPermit
+                }
                 drawableAt { P2PLib.stickerFirstFrame(id) }?.let { p ->
                     withContext(Dispatchers.Main) {
                         cache.put(id, p)
@@ -466,6 +474,7 @@ class StickerPicker(
                     val idx = ids.indexOf(id)
                     if (idx >= 0) notifyItemChanged(idx)
                 }
+              }
             }
         }
     }

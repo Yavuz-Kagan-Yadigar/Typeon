@@ -27,6 +27,12 @@ object ChatListDrawer {
         val fragment = activity.supportFragmentManager
             .findFragmentById(R.id.chatListDrawerContainer) as? ChatsFragment
         fragment?.onChatOpenedFromDrawer = { activity.finish() }
+        fragment?.inClosedDrawer = { !drawer.isDrawerOpen(GravityCompat.START) }
+        drawer.addDrawerListener(object : DrawerLayout.SimpleDrawerListener() {
+            // From the first drag, so the list is fresh while it slides in.
+            override fun onDrawerStateChanged(newState: Int) { if (newState != DrawerLayout.STATE_IDLE) fragment?.onDrawerOpened() }
+            override fun onDrawerOpened(drawerView: android.view.View) { fragment?.onDrawerOpened() }
+        })
 
         activity.onBackPressedDispatcher.addCallback(activity, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {

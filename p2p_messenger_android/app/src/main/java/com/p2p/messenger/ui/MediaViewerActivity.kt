@@ -99,6 +99,9 @@ class MediaViewerActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_media_viewer)
 
+        // A rotation recreates the screen: keep the video position and speed.
+        resumePositionMs = savedInstanceState?.getInt("pos") ?: 0
+        videoSpeed = savedInstanceState?.getFloat("speed", 1f) ?: 1f
         val uri = intent.getParcelableExtra<Uri>(EXTRA_URI) ?: run { finish(); return }
         val mimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: ""
 
@@ -318,6 +321,7 @@ class MediaViewerActivity : AppCompatActivity() {
         val skipLeft = findViewById<TextView>(R.id.txtSkipIndicatorLeft)
         val skipRight = findViewById<TextView>(R.id.txtSkipIndicatorRight)
         val speedButton = findViewById<TextView>(R.id.btnPlaybackSpeed)
+        if (videoSpeed != 1f) speedButton.text = formatSpeedLabel(videoSpeed)
         overlay.visibility = View.VISIBLE
 
         // Double-tap skipping of ±5 s still works (see the gesture detector below). But the controls are also visible, tappable buttons now. Before,
@@ -415,6 +419,12 @@ class MediaViewerActivity : AppCompatActivity() {
                 if (it.isPlaying) it.pause()
             }
         } catch (e: IllegalStateException) { }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt("pos", resumePositionMs)
+        outState.putFloat("speed", videoSpeed)
     }
 
     override fun onResume() {

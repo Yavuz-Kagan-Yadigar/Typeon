@@ -3,8 +3,9 @@
 //! Three deliberately separate parts:
 //!
 //! - **Signalling** (`MessageContent::Call`) rides the normal ratchet path
-//!   (`send_message_content`), so a ring reaches the peer over gossipsub OR the
-//!   store-and-forward server, whichever works right now.
+//!   (`send_message_content`), so a ring reaches the peer over a direct libp2p
+//!   connection OR the store-and-forward server, whichever works right now.
+//!   Call signals are sent once and never acknowledged or repeated.
 //! - **Media** never touches the core lock or the poll loop. Kotlin encodes
 //!   (MediaCodec Opus / H.264) and hands opaque frames to `media_send`, which
 //!   encrypts once and pushes into per-link channels. Tokio tasks drain those
@@ -272,6 +273,8 @@ struct Remote {
     /// Monotonic twin of `last_rx_ms` for the lost-call timeout: a wall-clock
     /// step must not end a call.
     last_rx: Option<Instant>,
+    /// When this remote was added: a device that never sends counts as silent from then.
+    added: Instant,
     /// One-way delay samples (receive time - sender's `sent_ms`). Absolute
     /// values carry the clock difference between the phones; `ewma - min` does
     /// not, and is the queue building up somewhere on the path.
@@ -306,7 +309,7 @@ struct Remote {
 impl Remote {
     fn new(fp: &str, slot: u8, key: [u8; 32], sid: [u8; 8]) -> Self {
         Remote {
-            fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0, last_rx: None,
+            fp: fp.to_string(), slot, key: Zeroizing::new(key), sid, max_seq: 0, seen: 0, last_rx_ms: 0, last_rx: None, added: Instant::now(),
             delay_ewma: 0.0, delay_min: 0.0, base_prev: f64::INFINITY, base_since: Instant::now(), samples: 0, win_min: f64::INFINITY, last_queue: 0, via: None, last_report_ms: 0, want_keyframe: false, want_avc: false,
             muted: false, video_off: false,
         }
@@ -425,6 +428,8 @@ struct Media {
     /// Encrypted media bytes queued out (per copy) / accepted in.
     bytes_out: u64,
     bytes_in: u64,
+    /// Key hash -> highest `seq` seen under it, kept across start/stop (`keep_floors`).
+    floors: VecDeque<([u8; 32], u64)>,
 }
 
 lazy_static::lazy_static! {
@@ -630,6 +635,11 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_callTakeKeyframeRequest<'lo
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_callBacklog<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) -> jint {
     crate::catch_panic(media_backlog).unwrap_or(0) as jint
 }
+
+/// Tests that drive the process-wide call statics (`MEDIA`, `GROUP_OFFERS`,
+/// `EARLY_HANGUP`, `SIBLING_CALLS`) hold this: the suite runs on many threads.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests;

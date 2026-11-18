@@ -44,8 +44,29 @@ impl P2PCore {
         let own_fp = self.own_mailbox_topic_fp.as_ref()?;
         let own = self.own_device_keys.get(own_fp)?;
         let peer = self.known_remote_devices.get(peer_fp).or_else(|| self.own_devices.get(peer_fp))?;
+        // Memoized: one X25519 and one HKDF per session on every sweep, fetch answer and push. Keyed by both keys and both
+        // fingerprints, so a changed key misses.
+        let tag: [u8; 32] = Sha256::new()
+            .chain_update(own.kem_sk_x25519.as_bytes())
+            .chain_update(&peer.kem_pubkey_x25519)
+            .chain_update(own_fp.as_bytes())
+            .chain_update([0u8])
+            .chain_update(peer_fp.as_bytes())
+            .finalize()
+            .into();
+        if let Some(hit) = SESSION_MAILBOX_MEMO.lock().ok()?.get_or_insert_with(HashMap::new).get(&tag) {
+            return Some(hit.clone());
+        }
         let secret = server_seal::session_mailbox_secret(&own.kem_sk_x25519, &peer.kem_pubkey_x25519, own_fp, peer_fp).ok()?;
-        Some((key_bound_mailbox_id(&secret)?, secret))
+        let id = key_bound_mailbox_id(&secret)?;
+        let mut memo = SESSION_MAILBOX_MEMO.lock().ok()?;
+        let memo = memo.get_or_insert_with(HashMap::new);
+        // ponytail: dropped whole past 4096 entries, like `key_bound_mailbox_id`.
+        if memo.len() >= 4096 {
+            memo.clear();
+        }
+        memo.insert(tag, (id.clone(), secret));
+        Some((id, secret))
     }
 
     /// The `MailboxProof` of `mailbox` for this enrollment at `server_id`.
@@ -394,11 +415,25 @@ impl P2PCore {
         // (`server_item_failed`).
         let deferred: std::collections::HashSet<[u8; 32]> =
             self.deferred_incoming.iter().filter(|(s, _)| s.is_none()).map(|(_, r)| Sha256::digest(r).into()).collect();
+        let mut refetch = false;
         for (sid, rt) in self.server_rt.iter_mut() {
             rt.taken.retain(|d, _| deferred.contains(d));
             let below = |mb: &String, seq: u64| cursors.get(&(sid.clone(), mb.clone())).map_or(true, |c| *c < seq);
+            // A held item the cursor went past was processed: its mailbox is healthy again.
+            let cleared: Vec<String> = rt.held.iter().filter(|(mb, (seq, _))| !below(*mb, *seq)).map(|(mb, _)| mb.clone()).collect();
+            for mb in &cleared {
+                rt.hold_strikes.remove(mb);
+            }
             rt.held.retain(|mb, (seq, _)| below(mb, *seq));
             rt.passed.retain(|(mb, seq)| below(mb, *seq));
+            // This turn's items are processed, so a rotation they carried is applied: fetch the held item again now.
+            if std::mem::take(&mut rt.refetch_now) {
+                rt.fetch_due_at = 0;
+                refetch = true;
+            }
+        }
+        if refetch {
+            self.server_sweep_at = 0;
         }
         let due: Vec<String> = self
             .server_rt
@@ -439,6 +474,7 @@ impl P2PCore {
     /// the server keeps it). `false`: it has failed for `SERVER_HOLD_GRACE_MS` and is passed over for good.
     pub(crate) fn hold_server_item(&mut self, server_id: &str, mailbox: &str, seq: u64, now: u64) -> bool {
         let Some(rt) = self.server_rt.get_mut(server_id) else { return false };
+        let strikes = rt.hold_strikes.get(mailbox).copied().unwrap_or(0);
         let e = rt.held.entry(mailbox.to_string()).or_insert((seq, now));
         // A lower item holds the cursor: this one waits behind it and must not restart that item's timer. Otherwise
         // two failing items would keep resetting each other.
@@ -448,12 +484,14 @@ impl P2PCore {
         if seq < e.0 {
             *e = (seq, now);
         }
-        if now.saturating_sub(e.1) < SERVER_HOLD_GRACE_MS {
+        // `SERVER_HOLD_MAX_STRIKES` passes in a row: this mailbox gets no more grace until a hold clears.
+        if strikes < SERVER_HOLD_MAX_STRIKES && now.saturating_sub(e.1) < SERVER_HOLD_GRACE_MS {
             return true;
         }
-        warn!("Server item could not be opened/processed for {} min, skipping (mailbox={})", SERVER_HOLD_GRACE_MS / 60_000, mailbox_log_id(mailbox));
+        warn!("Server item could not be opened/processed, skipping (mailbox={}, strikes={})", mailbox_log_id(mailbox), strikes);
         rt.held.remove(mailbox);
         rt.passed.insert((mailbox.to_string(), seq));
+        *rt.hold_strikes.entry(mailbox.to_string()).or_insert(0) += 1;
         false
     }
 
@@ -526,6 +564,15 @@ impl P2PCore {
         }
     }
 
+}
+
+/// See `session_mailbox`. Holds mailbox proof secrets, so `wipe_all_local_state` clears it.
+static SESSION_MAILBOX_MEMO: std::sync::Mutex<Option<HashMap<[u8; 32], (String, [u8; 32])>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn clear_session_mailbox_memo() {
+    if let Ok(mut memo) = SESSION_MAILBOX_MEMO.lock() {
+        *memo = None;
+    }
 }
 
 /// A mailbox ID is a read capability. Logs show 24 bits of its hash, never a part of the ID itself.

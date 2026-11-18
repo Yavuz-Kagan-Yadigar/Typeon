@@ -91,48 +91,6 @@ import com.p2p.messenger.ui.ChatActivity.Companion.TYPING_INDICATOR_TIMEOUT_MS
 // History
 // ---------------------------------------------------------------
 
-/** Opening sync from the other side (see `requestHistorySync`): only rows NEWER than the local ones are added. */
-internal fun ChatActivity.applyHistorySync(obj: JSONObject) {
-    if (!historySyncPending) return
-    historySyncPending = false
-    val array = obj.optJSONArray("messages") ?: return
-    if (array.length() == 0) return
-    val withoutId = HashSet<String>()
-    val synced = (0 until array.length()).map { i ->
-        val m = array.getJSONObject(i)
-        val messageId = if (m.isNull("message_id")) null else m.optString("message_id").ifEmpty { null }
-        SimpleChatAdapter.Item(
-            messageId = messageId ?: UUID.randomUUID().toString().also { withoutId.add(it) },
-            text = m.optString("text"),
-            isMine = m.optString("direction") == "sent",
-            timestamp = m.optLong("timestamp", System.currentTimeMillis()),
-            sentAtMs = m.optLong("sent_at_ms", 0L).takeIf { it > 0 },
-            isEdited = m.optBoolean("is_edited", false),
-            viaSync = m.optBoolean("via_sync", false),
-            reactions = m.optString("reactions", ""),
-            isDeleted = m.optBoolean("is_deleted", false)
-        )
-    }
-    // Rows are filtered by `message_id` as well as by time. `timestamp` is the local archive time, so a sync copy from the other side can carry a LATER
-    // timestamp than our own copy of the same message. Without the id filter, our own sent messages were added a second time (a duplicate bubble on the sender).
-    val existingIds = localMessages.mapTo(HashSet()) { it.messageId }
-    val toAdd = if (localMessages.isEmpty()) {
-        synced
-    } else {
-        val latestLocal = localMessages.maxOf { it.timestamp }
-        // The peer's archive clock is not ours: a missed message older
-        // than our newest row (or any, with the peer's clock behind) was
-        // never merged. Only rows without an id still need the clock.
-        synced.filter { it.messageId !in existingIds && (it.messageId !in withoutId || it.timestamp > latestLocal) }
-    }
-    if (toAdd.isEmpty()) return
-    localMessages.addAll(toAdd)
-    localMessages.sortWith(compareBy { it.orderKey })
-    adapter.notifyDataSetChanged()
-    adapter.dedupeByMessageId()
-    recycler.scrollToPosition(localMessages.size - 1)
-}
-
 internal fun ChatActivity.loadHistoryIfAvailable(targetPeer: String) {
     lifecycleScope.launch {
         val merged = withContext(Dispatchers.IO) { readNewestPage(targetPeer) }
@@ -212,10 +170,12 @@ internal fun ChatActivity.resolveReplyLabel(replyToMessageId: String?): String? 
 
 /** After new rows are added: the target of a reply may only be loaded NOW (for example an older page arrived), so the labels are refreshed. */
 internal fun ChatActivity.resolveReplyLabels() {
+    val byId = localMessages.associateBy { it.messageId }
     for (item in localMessages) {
-        if (item.replyToMessageId != null) {
-            item.replyToSenderLabel = resolveReplyLabel(item.replyToMessageId)
-        }
+        val id = item.replyToMessageId ?: continue
+        val target = byId[id]
+        item.replyToSenderLabel = if (target == null) null
+            else if (target.isMine) getString(R.string.lbl_you) else txtToolbarTitle.text?.toString()
     }
 }
 
@@ -294,6 +254,8 @@ internal fun ChatActivity.attachmentItemFromJson(obj: JSONObject, skipPreview: S
         messageId = obj.optString("file_id"),
         text = "",
         isMine = obj.optString("direction") == "sent",
+        // My file's offer status (`send_status`), so an ERROR mark survives a reload.
+        status = if (obj.isNull("send_status")) SimpleChatAdapter.Status.SENT else parseStatus(obj.optString("send_status")),
         timestamp = obj.optLong("created_at", System.currentTimeMillis()),
         attachment = SimpleChatAdapter.AttachmentInfo(
             fileId = obj.optString("file_id"),
@@ -378,6 +340,13 @@ internal fun ChatActivity.syncMissedMessages() {
         val missed = withContext(Dispatchers.IO) { readNewestPage(targetPeer, knownIds) }
         if (peerDeviceFingerprint != targetPeer) return@launch
         val (missedItems, seenMessageIds) = missed
+        // A full newest page that starts after everything on screen leaves a hole that scroll-up paging never reads: drop the old rows, paging refills them.
+        if (missedItems.size >= CHAT_PAGE_SIZE && localMessages.isNotEmpty() &&
+            missedItems.minOf { it.timestamp } > localMessages.maxOf { it.timestamp }
+        ) {
+            localMessages.clear()
+            noMoreOlderHistory = false
+        }
         val existingIds = localMessages.mapTo(mutableSetOf()) { it.messageId }
         val fresh = missedItems.filter { it.messageId !in existingIds }
         if (adapter.refreshFrom(missedItems)) resolveReplyLabels()

@@ -84,6 +84,13 @@ object CallMedia {
      *  thread that outlived `stop()` come back to life with the next call. */
     @Volatile private var generation = 0
 
+    /** Last incoming-audio decode failure (elapsedRealtime); 0 = none this call. */
+    @Volatile private var audioFailAt = 0L
+
+    /** True while some participant's audio cannot be played (retries run every 2 s). */
+    fun audioPlaybackFailing(): Boolean =
+        running && audioFailAt != 0L && android.os.SystemClock.elapsedRealtime() - audioFailAt < 5_000
+
     fun start(video: Boolean) {
         if (running) return
         val gen = ++generation
@@ -92,6 +99,8 @@ object CallMedia {
         lanes.values.forEach { it.alive = false }
         lanes.clear()
         running = true
+        audioFailAt = 0L
+        captureFailing = false
         muted = false
         speakerMuted = false
         if (video) videoEncoder = VideoEncoder()
@@ -153,13 +162,22 @@ object CallMedia {
     private fun captureLoop(gen: Int) {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
         // A recorder that stops delivering (audio server restart) is built
-        // again; any other failure ends the capture as before.
-        while (running && generation == gen && captureSession(gen)) Thread.sleep(500)
+        // again at once; any other failure (microphone busy or blocked) is
+        // retried every 2 s for as long as the call runs.
+        while (running && generation == gen) {
+            val stalled = captureSession(gen)
+            if (!running || generation != gen) break
+            Thread.sleep(if (stalled) 500 else 2_000)
+        }
     }
+
+    /** True while the microphone cannot be opened; the call screen shows it. */
+    @Volatile var captureFailing = false
+        private set
 
     private class CaptureStalled(message: String) : Exception(message)
 
-    /** @return true when the recorder died and a new session should start. */
+    /** @return true when the recorder stalled, false when it failed to run. */
     private fun captureSession(gen: Int): Boolean {
         var rec: AudioRecord? = null
         var enc: MediaCodec? = null
@@ -180,6 +198,7 @@ object CallMedia {
             enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             enc.start()
             rec.startRecording()
+            captureFailing = false
             val pcm = ByteArray(FRAME_SAMPLES * 2)
             val info = MediaCodec.BufferInfo()
             val bundle = ArrayList<ByteArray>(PACKETS_PER_FRAME)
@@ -255,6 +274,7 @@ object CallMedia {
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Audio capture failed", e)
+            if (running && generation == gen) captureFailing = true
         } finally {
             try { rec?.stop() } catch (_: Exception) {}
             if (recorder === rec) recorder = null
@@ -311,7 +331,7 @@ object CallMedia {
         private fun decode(f: ByteArray) {
             if (!alive) return
             when (kind) {
-                KIND_AUDIO -> try {
+                KIND_AUDIO -> {
                     // Not on every 60 ms packet after a failure.
                     if (android.os.SystemClock.elapsedRealtime() < audioRetryAt) return
                     // `stop()` cleared audioSinks on another thread and waits
@@ -320,11 +340,18 @@ object CallMedia {
                     // sink that outlives stop() is exactly the leak this
                     // guards (see `generation`).
                     if (!running || generation != gen) return
-                    audioSinks.getOrPut(slot) { AudioSink() }.feed(f, 2)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Audio decode failed (slot $slot), resetting", e)
-                    audioSinks.remove(slot)?.release()
-                    audioRetryAt = android.os.SystemClock.elapsedRealtime() + 2_000
+                    var sink: AudioSink? = null
+                    try {
+                        sink = audioSinks.getOrPut(slot) { AudioSink() }
+                        sink.feed(f, 2)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Audio decode failed (slot $slot), resetting", e)
+                        // Only the sink this lane used: after stop() the slot
+                        // may already hold the next call's sink.
+                        if (sink != null && audioSinks.remove(slot, sink)) sink.release()
+                        if (generation == gen) audioFailAt = android.os.SystemClock.elapsedRealtime()
+                        audioRetryAt = android.os.SystemClock.elapsedRealtime() + 2_000
+                    }
                 }
                 KIND_VIDEO -> try {
                     videoSinks[slot]?.feed(f, 2)
@@ -421,6 +448,21 @@ object CallMedia {
             }
             noise = if (p < noise) p.toFloat().coerceAtLeast(60f) else noise + (p - noise) * 0.002f
             if (p > 1500 && p > noise * 3.2f) speakingUntil = android.os.SystemClock.elapsedRealtime() + 400
+        }
+
+        init {
+            val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1).apply {
+                setByteBuffer("csd-0", ByteBuffer.wrap(opusHead()))
+                setByteBuffer("csd-1", nativeLong(0))
+                setByteBuffer("csd-2", nativeLong(80_000_000))
+            }
+            try {
+                dec.configure(fmt, null, null, 0)
+                dec.start()
+            } catch (e: Exception) {
+                dec.release()
+                throw e
+            }
         }
 
         fun feed(frame: ByteArray, off: Int) {
@@ -1100,12 +1142,13 @@ object CallMedia {
             askKeyframe()
         }
 
-        private var released = false
+        @Volatile private var released = false
 
-        @Synchronized
+        /** Called on the UI thread: [feed] can hold the lock for 0.1-1 s on a
+         *  slow vendor codec, so the codec is let go on a thread of its own. */
         fun release() {
             released = true
-            reset()
+            Thread({ synchronized(this) { reset() } }, "call-video-release").start()
         }
     }
 }

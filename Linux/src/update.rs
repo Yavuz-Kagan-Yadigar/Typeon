@@ -27,8 +27,15 @@ pub fn dir() -> PathBuf {
 }
 
 thread_local! {
-    /// A verified download that waits for the call to end.
+    /// A verified download that waits for the call to end or for the user.
     static PENDING: RefCell<Option<(String, PathBuf)>> = const { RefCell::new(None) };
+    /// The "Restart to update" toast is on screen.
+    static ASKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marker left by a failed Windows install, so that version is not retried daily.
+fn failed_marker(version: &str) -> PathBuf {
+    dir().join(format!("failed-{version}"))
 }
 
 /// The only builds with an installer path. A plain `cargo run` must never replace itself.
@@ -95,10 +102,52 @@ fn install(app: &Rc<App>, version: String, path: PathBuf) {
         PENDING.with(|p| *p.borrow_mut() = Some((version, path)));
         return;
     }
+    if failed_marker(&version).exists() {
+        log::warn!("update: {version} failed to install before; waiting for a newer release");
+        return;
+    }
+    // A visible window may hold a draft, a recording or an open dialog: ask.
+    // Hidden (Windows tray) installs at once.
+    if app.window().is_some_and(|window| window.is_visible()) {
+        PENDING.with(|p| *p.borrow_mut() = Some((version.clone(), path)));
+        if !ASKING.with(|a| a.replace(true)) {
+            ask_restart(app, &version);
+        }
+        return;
+    }
+    install_now(app, version, path);
+}
+
+/// One toast until it is dismissed; a dismissed one is asked again on the next hourly tick.
+fn ask_restart(app: &Rc<App>, version: &str) {
+    let Some(overlay) = app.toasts.borrow().clone() else {
+        ASKING.with(|a| a.set(false));
+        return;
+    };
+    let toast = adw::Toast::builder()
+        .title(glib::markup_escape_text(&format!("Typeon {version} is ready to install")).as_str())
+        .button_label("Restart")
+        .timeout(0)
+        .build();
+    let restart = app.clone();
+    toast.connect_button_clicked(move |_| {
+        if let Some((version, path)) = PENDING.with(|p| p.borrow_mut().take()) {
+            if crate::ui::call::active() {
+                PENDING.with(|p| *p.borrow_mut() = Some((version, path)));
+            } else {
+                install_now(&restart, version, path);
+            }
+        }
+    });
+    toast.connect_dismissed(|_| ASKING.with(|a| a.set(false)));
+    overlay.add_toast(toast);
+}
+
+fn install_now(app: &Rc<App>, version: String, path: PathBuf) {
     log::info!("update: installing {version} from {}", path.display());
     let app = app.clone();
     app::run_in_background(
-        move || platform_install(&path),
+        move || platform_install(&path, &version),
         move |result| match result {
             // The new build is started by the installer side; this one leaves.
             Ok(()) => app.application.quit(),
@@ -111,7 +160,7 @@ fn install(app: &Rc<App>, version: String, path: PathBuf) {
 }
 
 #[cfg(not(windows))]
-fn platform_install(bundle: &Path) -> Result<(), String> {
+fn platform_install(bundle: &Path, _version: &str) -> Result<(), String> {
     use std::process::Command;
     // The installation this sandbox runs from: a user install must not ask for root, a system one has to.
     let info = std::fs::read_to_string("/.flatpak-info").unwrap_or_default();
@@ -156,25 +205,34 @@ fn platform_install(bundle: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn platform_install(zip: &Path) -> Result<(), String> {
+fn platform_install(zip: &Path, version: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // ...\Typeon\bin\typeon.exe; the zip holds the same `Typeon\` tree.
     let root = exe.parent().and_then(Path::parent).ok_or("no install dir")?;
+    // Unpacked under Program Files, say: the copy would fail after this process quit.
+    let probe = root.join(".typeon-update-probe");
+    std::fs::write(&probe, b"").map_err(|e| format!("install folder is not writable: {e}"))?;
+    let _ = std::fs::remove_file(&probe);
     let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
     let staging = dir().join("unpacked");
+    // Typeon starts again whatever happens (finally); a failed copy leaves a
+    // marker so this version is not retried every day.
     let script = format!(
         "$ErrorActionPreference='Stop'; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+         try {{ \
          if (Test-Path {s}) {{ Remove-Item -Recurse -Force {s} }}; \
          Expand-Archive -Force -LiteralPath {z} -DestinationPath {s}; \
          Copy-Item -Recurse -Force (Join-Path {s} 'Typeon\\*') {r}; \
-         Remove-Item -Recurse -Force {s}; Remove-Item -Force {z}; \
-         Start-Process -FilePath {e} -ArgumentList '{bg}'",
+         Remove-Item -Recurse -Force {s}; Remove-Item -Force {z} \
+         }} catch {{ Set-Content -LiteralPath {f} -Value $_.ToString() }} \
+         finally {{ Start-Process -FilePath {e} -ArgumentList '{bg}' }}",
         pid = std::process::id(),
         s = quote(&staging),
         z = quote(zip),
         r = quote(root),
+        f = quote(&failed_marker(version)),
         e = quote(&exe),
         bg = crate::win::BACKGROUND_ARG,
     );

@@ -37,7 +37,19 @@ impl P2PCore {
         )
     }
 
-    /// When the user last paired with this contact on any of my devices (ms, 0 = never).
+    /// The newest pairing / removal generation known for this identity. A
+    /// pairing or a removal made here takes the next one, so a later event
+    /// wins over every event this device knew of, whatever the clocks of the
+    /// devices say. Two made on different devices without knowing of each
+    /// other get the same number; then the pairing wins.
+    pub(crate) fn contact_next_gen(&self, identity_id: &str) -> u64 {
+        self.contact_added_at(identity_id)
+            .max(self.contact_removed_at(identity_id).unwrap_or(0))
+            .saturating_add(1)
+    }
+
+    /// The pairing generation of this contact (0 = never; `contact_next_gen`).
+    /// Rows written before generations held a time in ms: still ordered right.
     pub(crate) fn contact_added_at(&self, identity_id: &str) -> u64 {
         self.meta_u64(&format!("cadd:{}", identity_id))
     }
@@ -164,6 +176,8 @@ impl P2PCore {
         // Same test as `load_pending_durable_retries_from_db`, which skipped this
         // peer's rows at start-up while it was stale.
         let was_stale = now.saturating_sub(d.last_seen) >= STALE_PEER_RETRY_HORIZON_MS;
+        let prev = d.last_seen;
+        let identity_id = d.identity_id.clone();
         d.last_seen = now;
         if let Some(conn) = &self.db {
             let _ = conn.execute(
@@ -173,6 +187,17 @@ impl P2PCore {
         }
         if was_stale {
             self.load_pending_durable_retries_from_db();
+        }
+        // A contact device not heard from since my newest revoke may have missed its notice, which is retried for
+        // 7 days only: it then kept fanning out to the revoked device. Our IdentityExchange carries the revokes and
+        // needs no session. Once per device per revoke (this runs at most hourly and moves `last_seen`).
+        if prev < self.meta_u64("own_revoke_at")
+            && self.my_identity_id().as_deref() != Some(identity_id.as_str())
+            && self.identity_to_contact.contains_key(&identity_id)
+        {
+            if let Err(e) = self.send_identity_exchange(fp) {
+                warn!("Could not send revocations to returning contact device: {}", e);
+            }
         }
     }
 
@@ -714,11 +739,22 @@ impl P2PCore {
         } else if my_id.as_deref() != Some(revoke.identity_id.as_str()) {
             // no contact to hold the tombstone (a group member): its old
             // DeviceAdd must not bring the device back either.
-            // ponytail: one app_meta row per such revoke, never pruned; each
-            // is signed by the identity, so only group members can add them.
+            // Keyed by identity too: keyed by the device alone, another
+            // identity's signed "revoke" of the same fingerprint replaced the
+            // row, and the real owner's revoked device was taken back.
+            // Capped per identity: each row is signed by the identity, so a
+            // member could add rows for random fingerprints without end.
             // With the time: `group_author_proof_valid` takes the device's
             // proofs only for rows dated before it.
-            self.meta_put(&format!("orv:{}", revoke.revoked_device_fingerprint), &format!("{}|{}", revoke.identity_id, now));
+            let key = format!("orv:{}:{}", revoke.identity_id, revoke.revoked_device_fingerprint);
+            let held = self.db.as_ref().map_or(0, |c| c.query_row(
+                "SELECT COUNT(*) FROM app_meta WHERE k LIKE 'orv:' || ?1 || ':%'", params![revoke.identity_id], |r| r.get::<_, i64>(0),
+            ).unwrap_or(0));
+            if self.meta_str(&key).is_none() && held >= 64 {
+                warn!("Revocation of a non-contact's device not stored: {} has too many ({})", crate::log_id(&revoke.identity_id), held);
+            } else {
+                self.meta_put(&key, &now.to_string());
+            }
         }
         if let Some(rec) = self.known_remote_devices.get_mut(&revoke.revoked_device_fingerprint) {
             rec.is_active = false;

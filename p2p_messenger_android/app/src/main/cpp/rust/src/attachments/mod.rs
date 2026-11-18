@@ -273,19 +273,28 @@ pub fn decrypt_file_from_disk_with(
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; chunk_size + 16];
     let mut chunk_index: u32 = 0;
-    loop {
-        let n = read_full(&mut src, &mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
+    let written = (|| -> Result<(), String> {
+        loop {
+            let n = read_full(&mut src, &mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            let nonce = nonce_from_chunk_index(chunk_index);
+            let plaintext = cipher.decrypt(&nonce, &buf[..n]).map_err(|_| format!("Chunk {} decryption failed", chunk_index))?;
+            hasher.update(&plaintext);
+            dest.write_all(&plaintext).map_err(|e| e.to_string())?;
+            chunk_index = chunk_index.checked_add(1).ok_or("File too large")?;
+            if n < buf.len() {
+                break;
+            }
         }
-        let nonce = nonce_from_chunk_index(chunk_index);
-        let plaintext = cipher.decrypt(&nonce, &buf[..n]).map_err(|_| format!("Chunk {} decryption failed", chunk_index))?;
-        hasher.update(&plaintext);
-        dest.write_all(&plaintext).map_err(|e| e.to_string())?;
-        chunk_index = chunk_index.checked_add(1).ok_or("File too large")?;
-        if n < buf.len() {
-            break;
-        }
+        Ok(())
+    })();
+    drop(dest);
+    // No partial plaintext stays behind on any error.
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(dest_plain_path);
+        return Err(e);
     }
     let actual = hex::encode(hasher.finalize());
     // Offers carry the hex as the sender wrote it; the download check ignores case too.
@@ -373,8 +382,8 @@ pub fn write_verified_chunk_at_with(dest_enc_path: &Path, chunk_index: u32, ciph
     let offset = chunk_index as u64 * (chunk_size as u64 + 16);
     f.seek(SeekFrom::Start(offset)).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
     f.write_all(ciphertext).map_err(|e| ChunkAppendError::Io(e.to_string()))?;
-    // The caller records the chunk as received only after it is on disk. Otherwise a power loss would leave a hole in a download marked done.
-    f.sync_data().map_err(|e| ChunkAppendError::Io(e.to_string()))?;
+    // No sync per chunk: a resume re-checks every chunk group on disk against the offer's hashes, and
+    // `finalize_download` syncs the file once before the row says complete.
     Ok(plaintext_len)
 }
 

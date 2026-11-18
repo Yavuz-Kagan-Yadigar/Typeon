@@ -120,12 +120,13 @@ internal fun GroupChatActivity.retryFailedGroupMessage(item: SimpleChatAdapter.I
                 "Error: ${e.message}"
             }
         }
-        if (result.startsWith("Error:")) {
+        val sent = if (result.startsWith("Error:")) null else parseGroupSendResult(result)
+        if (sent == null) {
             Toast.makeText(this@retryFailedGroupMessage, R.string.error_send_failed, Toast.LENGTH_SHORT).show()
             adapter.applyStatus(item.messageId, SimpleChatAdapter.Status.ERROR)
             return@launch
         }
-        adapter.retryMessage(item.messageId, result, SimpleChatAdapter.Status.SENT)
+        adapter.retryMessage(item.messageId, sent.first, sent.second)
     }
 }
 
