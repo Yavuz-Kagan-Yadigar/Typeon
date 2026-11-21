@@ -43,6 +43,8 @@ class MediaViewerActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_URI = "uri"
         const val EXTRA_MIME_TYPE = "mime_type"
+        /** A disappearing file: screenshots and screen recording are blocked here. */
+        const val EXTRA_PROTECTED = "protected"
         private const val MIN_SCALE = 1f
         /** Longest bitmap edge decoded; a canvas refuses to draw much more. */
         private const val MAX_BITMAP_EDGE = 4096
@@ -97,6 +99,7 @@ class MediaViewerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent.getBooleanExtra(EXTRA_PROTECTED, false)) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         setContentView(R.layout.activity_media_viewer)
 
         // A rotation recreates the screen: keep the video position and speed.

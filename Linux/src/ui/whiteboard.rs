@@ -80,6 +80,8 @@ struct Inner {
     group_id: String,
     state: RefCell<State>,
     root: gtk::Revealer,
+    /// The board lives in its own window; `root` is its content.
+    window: gtk::Window,
     area: gtk::DrawingArea,
     legend: gtk::Label,
     page_label: gtk::Label,
@@ -99,6 +101,7 @@ pub struct Board {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        self.window.destroy();
         // Whatever is still queued goes out before the chat is gone.
         std::thread::spawn(core::whiteboard_tick);
     }
@@ -251,6 +254,9 @@ impl Board {
             .reveal_child(false)
             .build();
 
+        let window = gtk::Window::builder().title("Whiteboard").default_width(960).default_height(720).build();
+        window.set_application(Some(&app.application));
+        window.set_child(Some(&root));
         let inner = Rc::new(Inner {
             app: app.clone(),
             peer: peer.to_string(),
@@ -273,6 +279,7 @@ impl Board {
                 redo: VecDeque::new(),
             }),
             root,
+            window,
             area,
             legend,
             page_label,
@@ -288,10 +295,6 @@ impl Board {
         inner.wire();
         inner.refresh_info();
         Board { inner }
-    }
-
-    pub fn panel(&self) -> &gtk::Revealer {
-        &self.inner.root
     }
 
     pub fn toggle_button(&self) -> &gtk::ToggleButton {
@@ -412,12 +415,24 @@ impl Inner {
             self.toggle.connect_toggled(move |button| {
                 let Some(me) = weak.upgrade() else { return };
                 me.root.set_reveal_child(button.is_active());
-                if button.is_active() {
+                if !button.is_active() {
+                    me.window.set_visible(false);
+                } else {
+                    me.window.present();
                     let (peer, gid) = (me.peer.clone(), me.group_id.clone());
                     std::thread::spawn(move || core::whiteboard_open(&peer, &gid));
                     me.refresh_info();
                     me.load_page();
                 }
+            });
+        }
+
+        // Closing the window just hides it, like toggling the header button.
+        {
+            let toggle = self.toggle.clone();
+            self.window.connect_close_request(move |_| {
+                toggle.set_active(false);
+                glib::Propagation::Stop
             });
         }
 

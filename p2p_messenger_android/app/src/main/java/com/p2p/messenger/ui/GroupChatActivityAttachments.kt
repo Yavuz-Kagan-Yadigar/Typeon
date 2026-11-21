@@ -165,6 +165,7 @@ internal fun GroupChatActivity.onGroupPhotoCaptured(jpeg: ByteArray, caption: St
                             messageId = result,
                             text = "",
                             isMine = true,
+                            expireSecs = disappearSecs, expireAtMs = Disappear.atFor(disappearSecs),
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = result,
                                 fileName = prepared.fileName,
@@ -267,6 +268,7 @@ internal fun GroupChatActivity.onGroupFilePicked(uri: Uri, caption: String = "",
                             messageId = result,
                             text = "",
                             isMine = true,
+                            expireSecs = disappearSecs, expireAtMs = Disappear.atFor(disappearSecs),
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = result,
                                 fileName = prepared.fileName,
@@ -334,7 +336,7 @@ internal fun GroupChatActivity.onGroupAttachmentClicked(item: SimpleChatAdapter.
                     if (path.startsWith("Error:")) {
                         Toast.makeText(this@onGroupAttachmentClicked, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                     } else {
-                        openGroupAttachmentFile(path)
+                        openGroupAttachmentFile(path, Disappear.locked(item))
                     }
                 }
             }
@@ -344,7 +346,8 @@ internal fun GroupChatActivity.onGroupAttachmentClicked(item: SimpleChatAdapter.
 }
 
 /** Same as ChatActivity.openAttachmentFile; it does not depend on the peer. */
-internal fun GroupChatActivity.openGroupAttachmentFile(path: String) {
+/** `protected`: a disappearing file. Shown only in the in-app viewer, with screenshots blocked; never handed to another app. */
+internal fun GroupChatActivity.openGroupAttachmentFile(path: String, protected: Boolean = false) {
     // The file's own extension picks the viewer and the handler, not the
     // type the sender declared.
     val mimeType = android.webkit.MimeTypeMap.getSingleton()
@@ -355,9 +358,14 @@ internal fun GroupChatActivity.openGroupAttachmentFile(path: String) {
             val intent = Intent(this, MediaViewerActivity::class.java).apply {
                 putExtra(MediaViewerActivity.EXTRA_URI, uri)
                 putExtra(MediaViewerActivity.EXTRA_MIME_TYPE, mimeType)
+                putExtra(MediaViewerActivity.EXTRA_PROTECTED, protected)
             }
             grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             startActivity(intent)
+            return
+        }
+        if (protected) {
+            Toast.makeText(this, R.string.disappear_cannot_open, Toast.LENGTH_LONG).show()
             return
         }
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -382,16 +390,20 @@ internal fun GroupChatActivity.onGroupAttachmentLongClicked(item: SimpleChatAdap
     val attachment = item.attachment ?: return
     // Same pattern as ChatActivity.onAttachmentLongClicked: only attachments we sent ourselves can be deleted.
     val options = mutableListOf<String>().apply {
-        add(getString(R.string.action_open_with))
-        add(getString(R.string.action_save_to_downloads))
-        // Save to Downloads hands out a JPEG XL as PNG/GIF; this keeps the original.
-        if (attachment.fileName.endsWith(".jxl", true) || attachment.mimeType == "image/jxl") add(getString(R.string.action_save_as_jxl))
-        if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
-        if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
+        // A disappearing file: nothing that copies it out (open in another app, save, copy, add sticker, select).
+        val locked = Disappear.locked(item)
+        if (!locked) {
+            add(getString(R.string.action_open_with))
+            add(getString(R.string.action_save_to_downloads))
+            // Save to Downloads hands out a JPEG XL as PNG/GIF; this keeps the original.
+            if (attachment.fileName.endsWith(".jxl", true) || attachment.mimeType == "image/jxl") add(getString(R.string.action_save_as_jxl))
+            if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
+            if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
+        }
         if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
         if (item.isMine && item.status != SimpleChatAdapter.Status.SENT) add(getString(R.string.action_resend_message))
         if (item.isMine) add(getString(R.string.action_delete_message))
-        add(getString(R.string.action_select))
+        if (!locked) add(getString(R.string.action_select))
     }
     AlertDialog.Builder(this)
         .setItems(options.toTypedArray()) { _, which ->
@@ -547,6 +559,7 @@ internal fun GroupChatActivity.handleIncomingGroupFileOffer(obj: JSONObject) {
             messageId = obj.optString("file_id"),
             text = "",
             isMine = obj.optString("type") == "sibling_file",
+            expireSecs = Disappear.fromEvent(obj).first, expireAtMs = Disappear.fromEvent(obj).second,
             senderName = sender?.displayName ?: senderIdentityId.take(8),
             senderAvatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
             attachment = SimpleChatAdapter.AttachmentInfo(

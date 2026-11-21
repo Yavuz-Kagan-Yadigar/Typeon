@@ -287,7 +287,8 @@ impl P2PCore {
         // the UI WHICH peer a message belongs to. Before, that was never passed on: with several chats open, each incoming message went to
         // whichever ChatActivity was open, not to the right one.
         let event = match content {
-            MessageContent::Text { group_id: None, text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, .. } => {
+            MessageContent::Text { group_id: None, text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, expire_secs, .. } => {
+                let expire_secs = packet::disappear_secs(expire_secs);
                 // Multi-device: a STABLE conversation id. `group_message_local_id` if present (the SAME in all fan-out copies from the sender),
                 // otherwise (older sender) the id in the packet header. Archive, UI, edit, delete and seen all use this. ACK uses the packet's
                 // OWN `message_id` (per-device delivery).
@@ -305,7 +306,7 @@ impl P2PCore {
                 // The Ack is sent only if the archive write was made PERMANENT. Otherwise (a transient failure such as a full disk or DB error)
                 // the sender would be told "received, no retry" while the message is stored nowhere. Without an Ack, the sender's
                 // `awaiting_confirmation` mechanism (see its docs) retries automatically.
-                match self.archive_message(&chat_key, "received", text.as_bytes(), Some(&display_id), None, reply_to_message_id.as_deref(), reply_to_preview.as_deref(), sent_at_ms) {
+                match self.archive_message_exp(&chat_key, "received", text.as_bytes(), Some(&display_id), None, reply_to_message_id.as_deref(), reply_to_preview.as_deref(), sent_at_ms, expire_secs) {
                     Ok(()) => {
                         self.ack_text_packet(&peer_fp, &message_id, Some(&display_id));
                         // See `pending_edits_deletes`. If an Edit/Delete for this message arrived BEFORE the Text (gossipsub gives no ordering),
@@ -327,10 +328,12 @@ impl P2PCore {
                 // too, so an open screen draws the message correctly at once, without waiting for an archive write or reload.
                 serde_json::json!({
                     "type": "message", "peer": chat_key, "message_id": display_id, "text": text, "sent_at_ms": sent_at_ms,
-                    "reply_to_message_id": reply_to_message_id, "reply_to_preview": reply_to_preview
+                    "reply_to_message_id": reply_to_message_id, "reply_to_preview": reply_to_preview,
+                    "expire_secs": expire_secs, "expire_at_ms": expire_secs.map(|s| first_expiry("received", s))
                 })
             }
-            MessageContent::Text { group_id: Some(gid), text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, author_proof, mentions } => {
+            MessageContent::Text { group_id: Some(gid), text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, author_proof, mentions, expire_secs } => {
+                let expire_secs = packet::disappear_secs(expire_secs);
                 // Group integration: this is one pairwise fan-out copy of a group message. It carries `group_id` AND the sender's `identity_id`
                 // (required in a group, unlike 1:1, since several people are in it), so GroupChatActivity can route it to the right chat.
                 // `group_message_local_id` is the id Kotlin must send back when marking a message "seen" (see Seen). `message_id` means nothing to
@@ -380,7 +383,7 @@ impl P2PCore {
                 let author_proof = author_proof.filter(|p| {
                     group_message_local_id.as_deref().map_or(false, |mid| self.group_author_proof_valid(&gid, mid, &sender_identity_id, &text, signed_sent_at_ms, Some(p.as_str())))
                 });
-                let archived_ok = self.archive_group_message(&gid, &sender_identity_id, "received", text.as_bytes(), group_message_local_id.as_deref(), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, author_proof.as_deref()).is_ok();
+                let archived_ok = self.archive_group_message_exp(&gid, &sender_identity_id, "received", text.as_bytes(), group_message_local_id.as_deref(), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, author_proof.as_deref(), expire_secs).is_ok();
                 let mentions_me = self.group_mentions_me(&gid, mentions);
                 if archived_ok && mentions_me {
                     if let (Some(conn), Some(mid)) = (&self.db, group_message_local_id.as_deref()) {
@@ -416,7 +419,8 @@ impl P2PCore {
                     "sent_at_ms": sent_at_ms,
                     "reply_to_message_id": reply_to_message_id, "reply_to_preview": reply_to_preview,
                     "reply_to_sender_identity_id": reply_to_sender_identity_id,
-                    "mentions_me": mentions_me
+                    "mentions_me": mentions_me,
+                    "expire_secs": expire_secs, "expire_at_ms": expire_secs.map(|s| first_expiry("received", s))
                 })
             }
             MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof } => {
@@ -879,7 +883,7 @@ impl P2PCore {
             MessageContent::FileOffer {
                 group_id, file_id, file_name, mime_type, total_size, file_key, sha256_hex,
                 preview_jpeg, duration_ms, chunk_size, chunk_hashes,
-                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin,
+                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, expire_secs,
             } => {
                 // See `sender_may_post_to_group`. Same gap as the group Text arm, and worse here: an accepted offer starts an AUTOMATIC download in
                 // node mode, so an unauthorised sender got direct access to the recipient's disk and bandwidth.
@@ -905,12 +909,15 @@ impl P2PCore {
                 let reply_ok = group_id.as_deref().map_or(true, |g| group_reply_bound(g, reply_to_message_id.as_deref(), reply_to_sender_identity_id.as_deref()));
                 let (reply_to_message_id, reply_to_preview, reply_to_sender_identity_id) =
                     if reply_ok { (reply_to_message_id, reply_to_preview, reply_to_sender_identity_id) } else { (None, None, None) };
-                let ev = self.receive_file_offer(
+                let mut ev = self.receive_file_offer(
                     &peer_fp, &sender_identity_id, group_id, &file_id, &file_name, &mime_type,
                     total_size, &file_key, &sha256_hex, &preview_jpeg, duration_ms, chunk_size, &chunk_hashes,
                     &caption, reply_to_message_id.as_deref(), reply_to_preview.as_deref(),
                     reply_to_sender_identity_id.as_deref(), sticker, sticker_origin.as_deref(), signed_sent_at_ms,
                 );
+                if ev["type"] == "file_offer" {
+                    self.stamp_file_expiry(&mut ev, &file_id, "received", expire_secs);
+                }
                 // "noop" with no row = the row could not be written (key or DB
                 // not ready): no Ack, the sender offers again. Every other
                 // outcome is final (stored, duplicate, rejected).
@@ -1319,7 +1326,8 @@ impl P2PCore {
                     // the sibling then sends again.
                     let mut ack = true;
                     let ev = match body {
-                        SiblingEchoBody::Text { message_id: mid, text, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id } => {
+                        SiblingEchoBody::Text { message_id: mid, text, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, expire_secs } => {
+                            let expire_secs = packet::disappear_secs(expire_secs);
                             // Double archive fix, same dedup as the 1:1 and group Text arms: a sibling's `regen_content` refresh or restart resend can
                             // bring the same echo a second time. The Ack is sent below (`ack`).
                             // In this chat: with the global check, a member who saw the id could send any text under it first, and the echo was dropped as a duplicate.
@@ -1337,21 +1345,23 @@ impl P2PCore {
                                 ack = false;
                                 serde_json::json!({"type": "noop"})
                             } else if let Some(gid) = &group_id {
-                                ack = self.archive_group_message(gid, &own_id, "sent", text.as_bytes(), Some(&mid),
-                                    reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, None).is_ok();
+                                ack = self.archive_group_message_exp(gid, &own_id, "sent", text.as_bytes(), Some(&mid),
+                                    reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, None, expire_secs).is_ok();
                                 serde_json::json!({
                                     "type": "sibling_group_message", "group_id": gid, "message_id": mid,
                                     "text": text, "sent_at_ms": sent_at_ms, "sender_identity_id": own_id,
                                     "reply_to_message_id": reply_to_message_id, "reply_to_preview": reply_to_preview,
-                                    "reply_to_sender_identity_id": reply_to_sender_identity_id
+                                    "reply_to_sender_identity_id": reply_to_sender_identity_id,
+                                    "expire_secs": expire_secs, "expire_at_ms": expire_secs.map(|s| first_expiry("sent", s))
                                 })
                             } else if let Some(ck) = &chat_key {
-                                ack = self.archive_message(ck, "sent", text.as_bytes(), Some(&mid),
-                                    Some(MessageSendStatus::Sent.as_str()), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), sent_at_ms).is_ok();
+                                ack = self.archive_message_exp(ck, "sent", text.as_bytes(), Some(&mid),
+                                    Some(MessageSendStatus::Sent.as_str()), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), sent_at_ms, expire_secs).is_ok();
                                 serde_json::json!({
                                     "type": "sibling_message", "peer": ck, "message_id": mid, "text": text,
                                     "sent_at_ms": sent_at_ms, "reply_to_message_id": reply_to_message_id,
-                                    "reply_to_preview": reply_to_preview
+                                    "reply_to_preview": reply_to_preview,
+                                    "expire_secs": expire_secs, "expire_at_ms": expire_secs.map(|s| first_expiry("sent", s))
                                 })
                             } else {
                                 ack = false;
@@ -1400,7 +1410,7 @@ impl P2PCore {
                             MessageContent::FileOffer {
                                 file_id, file_name, mime_type, total_size, file_key, sha256_hex,
                                 preview_jpeg, duration_ms, chunk_size, chunk_hashes,
-                                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, ..
+                                caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, sticker_origin, expire_secs, ..
                             } => {
                                 // The same echo a second time (regen/restart): if the row exists, leave it alone. `receive_file_offer`'s INSERT OR REPLACE
                                 // would reset a completed download.
@@ -1431,6 +1441,7 @@ impl P2PCore {
                                         }
                                         ev["type"] = "sibling_file".into();
                                         ev["peer"] = peer_col.into();
+                                        self.stamp_file_expiry(&mut ev, &file_id, "sent", expire_secs);
                                     } else if ev["type"] == "noop" {
                                         ack = false; // row not written, see `receive_file_offer`
                                     }

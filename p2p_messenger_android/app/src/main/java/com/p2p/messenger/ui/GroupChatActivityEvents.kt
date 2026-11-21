@@ -103,7 +103,8 @@ internal fun parseGroupSendResult(result: String): Pair<String, SimpleChatAdapte
     null
 }
 
-internal fun GroupChatActivity.sendNewMessage(text: String): kotlinx.coroutines.Job {
+/** `expireSecs`: a disappearing message (see ui/Disappear.kt), 0 = an ordinary one. */
+internal fun GroupChatActivity.sendNewMessage(text: String, expireSecs: Int = disappearSecs): kotlinx.coroutines.Job {
     btnSend.isEnabled = false
     btnSend.visibility = View.INVISIBLE
     progressSending.visibility = View.VISIBLE
@@ -111,7 +112,7 @@ internal fun GroupChatActivity.sendNewMessage(text: String): kotlinx.coroutines.
     return lifecycleScope.launch {
         val result = withContext(Dispatchers.IO) {
             try {
-                P2PLib.sendGroupMessage(targetGroupId, text, null, null, null, mentionIdsJson(text))
+                P2PLib.sendGroupMessage(targetGroupId, text, null, null, null, mentionIdsJson(text), expireSecs.toLong())
             } catch (e: Exception) {
                 "Error: ${e.message}"
             }
@@ -144,7 +145,9 @@ internal fun GroupChatActivity.sendNewMessage(text: String): kotlinx.coroutines.
                 text = text,
                 isMine = true,
                 status = sent?.second ?: SimpleChatAdapter.Status.ERROR,
-                senderIdentityId = ownIdentityId
+                senderIdentityId = ownIdentityId,
+                expireSecs = expireSecs,
+                expireAtMs = if (expireSecs > 0) System.currentTimeMillis() + expireSecs * 1000L else 0L
             )
         )
         maybePlayTyphoonEffect()
@@ -172,7 +175,9 @@ internal fun GroupChatActivity.handleSiblingGroupMessage(obj: JSONObject) {
             replyToMessageId = replyToMessageId,
             replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null },
             replyToSenderIdentityId = replyToSenderIdentityId,
-            replyToSenderLabel = resolveReplyLabel(replyToMessageId, replyToSenderIdentityId)
+            replyToSenderLabel = resolveReplyLabel(replyToMessageId, replyToSenderIdentityId),
+            expireSecs = Disappear.fromEvent(obj).first,
+            expireAtMs = Disappear.fromEvent(obj).second
         )
     )
     scrollToBottomNow()
@@ -211,7 +216,9 @@ internal fun GroupChatActivity.handleIncomingGroupMessage(obj: JSONObject) {
             replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null },
             replyToSenderIdentityId = replyToSenderIdentityId,
             replyToSenderLabel = resolveReplyLabel(replyToMessageId, replyToSenderIdentityId),
-            mentionsMe = obj.optBoolean("mentions_me")
+            mentionsMe = obj.optBoolean("mentions_me"),
+            expireSecs = Disappear.fromEvent(obj).first,
+            expireAtMs = Disappear.fromEvent(obj).second
         )
     )
     maybePlayTyphoonEffect()

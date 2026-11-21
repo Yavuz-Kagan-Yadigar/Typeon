@@ -588,7 +588,7 @@ class P2PService : Service() {
             "message" -> {
                 val peer = obj.optString("peer")
                 if (peer.isNotEmpty() && activeConversationId != peer) {
-                    NotificationHelper.showMessageNotification(applicationContext, peer, obj.optString("text"), obj.optString("message_id"))
+                    NotificationHelper.showMessageNotification(applicationContext, peer, shownText(obj, obj.optString("text")), obj.optString("message_id"))
                 }
             }
             // A new drawing (not an erase): the core sets "new" only when a stroke from someone else was stored.
@@ -604,7 +604,7 @@ class P2PService : Service() {
                 val groupId = obj.optString("group_id")
                 if (groupId.isNotEmpty() && activeConversationId != "group:$groupId") {
                     NotificationHelper.showGroupMessageNotification(
-                        applicationContext, groupId, obj.optString("sender_identity_id"), obj.optString("text"),
+                        applicationContext, groupId, obj.optString("sender_identity_id"), shownText(obj, obj.optString("text")),
                         obj.optString("message_id"), mention = obj.optBoolean("mentions_me")
                     )
                 }
@@ -646,9 +646,9 @@ class P2PService : Service() {
                         // Attachments produce notifications too, not only text messages.
             "file_offer" -> {
                 val groupId = if (obj.isNull("group_id")) "" else obj.optString("group_id")
-                val label = attachmentNotificationLabel(
+                val label = shownText(obj, attachmentNotificationLabel(
                     obj.optString("mime_type", ""), obj.optString("file_name", ""), obj.optBoolean("sticker")
-                )
+                ))
                 if (groupId.isNotEmpty()) {
                     if (activeConversationId != "group:$groupId") {
                         NotificationHelper.showGroupMessageNotification(
@@ -667,6 +667,10 @@ class P2PService : Service() {
     }
 
     /** Short label for the attachment notification (see `maybeNotify`, 'file_offer'). */
+    /** A disappearing message's content never goes into a notification (it would outlive the message there). */
+    private fun shownText(obj: JSONObject, text: String): String =
+        if (obj.optLong("expire_secs", 0L) > 0) getString(R.string.disappear_notification) else text
+
     private fun attachmentNotificationLabel(mimeType: String, fileName: String, sticker: Boolean): String = when {
         sticker -> getString(R.string.lbl_last_sticker)
         mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)

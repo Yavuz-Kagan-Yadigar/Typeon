@@ -313,6 +313,11 @@ impl P2PCore {
     /// `message_id` and `status` are stored in the row. A DB read after a reopen must return the real state, not assume "sent". Status updates are written to the same row via `set_message_status`.
     /// `reply_to_message_id` / `reply_to_preview` (see the packet.rs `MessageContent::Text.reply_to_message_id` docs) are persisted in the row, so a reply preview survives a history reload.
     pub(crate) fn archive_message(&mut self, peer_device_fingerprint: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, status: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, sent_at_ms: u64) -> Result<(), String> {
+        self.archive_message_exp(peer_device_fingerprint, direction, plaintext, message_id, status, reply_to_message_id, reply_to_preview, sent_at_ms, None)
+    }
+
+    /// `archive_message` for a row that may disappear (`expire_secs`, see `first_expiry`). A disappearing row never goes to the server archive.
+    pub(crate) fn archive_message_exp(&mut self, peer_device_fingerprint: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, status: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, sent_at_ms: u64, expire_secs: Option<u32>) -> Result<(), String> {
         // The sender's clock: not later than ours, or its messages sort into
         // the future (and land in an archive bucket nobody probes).
         let sent_at_ms = sent_at_ms.min(current_time_ms());
@@ -338,9 +343,10 @@ impl P2PCore {
         let sent_col: Option<i64> = if sent_at_ms > 0 { Some(sent_at_ms as i64) } else { None };
         // a row with this id is already there (UNIQUE index): nothing new.
         let inserted = conn.execute(
-            "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, sent_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![peer_device_fingerprint, direction, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64, message_id, status, reply_to_message_id, reply_to_preview, sent_col],
+            "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, sent_at_ms, expire_secs, expire_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![peer_device_fingerprint, direction, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64, message_id, status, reply_to_message_id, reply_to_preview, sent_col,
+                expire_secs, expire_secs.map(|s| first_expiry(direction, s))],
         ).map_err(|e| e.to_string())?;
         if inserted == 0 {
             return Ok(());
@@ -350,7 +356,7 @@ impl P2PCore {
         // server. If history storage on the server is off, the function returns at once.
         //
         // The server archive is keyed by IDENTITY, not by device fingerprint, so that readability survives when the contact changes device.
-        if let Some(mid) = message_id {
+        if let Some(mid) = message_id.filter(|_| expire_secs.is_none()) {
             let conv_key = self.identity_id_for_device(peer_device_fingerprint);
             if let Some(conv_key) = conv_key {
                 let archived = ArchivedMessage {
@@ -372,6 +378,8 @@ impl P2PCore {
                     seen_by: String::new(),
                     author_proof: None,
                     mentions_me: false,
+                    expire_secs: None,
+                    expire_at_ms: None,
                 };
                 if let Ok(cbor) = ciborium_bytes(&archived) {
                     // `rev` from our clock, as every later revision: with the
@@ -388,6 +396,149 @@ impl P2PCore {
             }
         }
         Ok(())
+    }
+
+    /// Disappearing messages: starts the countdown of the received rows of one chat. Each row goes `expire_secs` after now, or earlier if it
+    /// already would (the unread cap, or an earlier read). So a repeat call never extends a timer. `group_id` set: that group; else the 1:1
+    /// rows under `chat_keys`. Only for a chat on THIS device's screen: a sibling's read does not start it, since a desktop shows only a
+    /// placeholder and the phone has not shown the message yet.
+    pub(crate) fn start_expiry(&self, group_id: Option<&str>, chat_keys: [&str; 2]) {
+        let Some(conn) = &self.db else { return };
+        if let Err(e) = conn.execute(
+            "UPDATE messages SET expire_at_ms = MIN(expire_at_ms, ?1 + expire_secs * 1000)
+             WHERE expire_at_ms IS NOT NULL AND direction = 'received' AND is_deleted = 0
+               AND CASE WHEN ?2 IS NOT NULL THEN group_id = ?2
+                        ELSE (group_id IS NULL OR group_id = '') AND peer_device_fingerprint IN (?3, ?4) END",
+            params![current_time_ms() as i64, group_id, chat_keys[0], chat_keys[1]],
+        ) {
+            error!("Disappearing timer could not start: {}", e);
+        }
+        // Attachments: a 1:1 file row is under the device that sent it, so any device of the same person.
+        if let Err(e) = conn.execute(
+            "UPDATE files SET expire_at_ms = MIN(expire_at_ms, ?1 + expire_secs * 1000)
+             WHERE expire_at_ms IS NOT NULL AND expire_secs > 0 AND direction = 'received' AND status != 'expired'
+               AND CASE WHEN ?2 IS NOT NULL THEN group_id = ?2
+                        ELSE group_id IS NULL AND (peer_device_fingerprint IN (?3, ?4) OR peer_device_fingerprint IN (
+                            SELECT device_fingerprint FROM remote_devices WHERE identity_id =
+                                (SELECT identity_id FROM remote_devices WHERE device_fingerprint = ?3))) END",
+            params![current_time_ms() as i64, group_id, chat_keys[0], chat_keys[1]],
+        ) {
+            error!("Disappearing file timer could not start: {}", e);
+        }
+    }
+
+    fn disappear_key(&self, peer_fp: &str, group_id: &str) -> String {
+        if group_id.is_empty() {
+            format!("dm:{}", self.canonical_peer_key(peer_fp))
+        } else {
+            format!("dm:group:{group_id}")
+        }
+    }
+
+    /// The chat's disappearing mode (held Send button): every message sent in it, text or file, carries this timer. None = off.
+    /// This device only: my other devices keep their own setting.
+    pub(crate) fn disappear_mode(&self, peer_fp: &str, group_id: &str) -> Option<u32> {
+        packet::disappear_secs(self.meta_str(&self.disappear_key(peer_fp, group_id)).and_then(|v| v.parse().ok()))
+    }
+
+    /// `secs` 0 (or out of range) turns the mode off.
+    pub(crate) fn set_disappear_mode(&self, peer_fp: &str, group_id: &str, secs: u32) {
+        let key = self.disappear_key(peer_fp, group_id);
+        match packet::disappear_secs(Some(secs)) {
+            Some(s) => self.meta_put(&key, &s.to_string()),
+            None => self.meta_del(&key),
+        }
+    }
+
+    /// Writes a file row's timer (see `first_expiry`). Returns its `expire_at_ms`; None for an ordinary file.
+    pub(crate) fn set_file_expiry(&self, file_id: &str, direction: &str, expire_secs: Option<u32>) -> Option<u64> {
+        let secs = packet::disappear_secs(expire_secs)?;
+        let at = first_expiry(direction, secs);
+        if let Some(conn) = &self.db {
+            let _ = conn.execute("UPDATE files SET expire_secs = ?1, expire_at_ms = ?2 WHERE file_id = ?3", params![secs, at, file_id]);
+        }
+        Some(at as u64)
+    }
+
+    /// `set_file_expiry`, and the same two fields in the UI event.
+    pub(crate) fn stamp_file_expiry(&self, ev: &mut serde_json::Value, file_id: &str, direction: &str, expire_secs: Option<u32>) {
+        if let Some(at) = self.set_file_expiry(file_id, direction, expire_secs) {
+            ev["expire_secs"] = packet::disappear_secs(expire_secs).into();
+            ev["expire_at_ms"] = at.into();
+        }
+    }
+
+    /// The chat is on screen: its received disappearing messages start counting down now, on this device's clock. Nothing is sent.
+    /// `peer_fp` for a 1:1 chat, `group_id` (non-empty) for a group.
+    pub(crate) fn start_expiry_on_screen(&self, peer_fp: &str, group_id: &str) {
+        if group_id.is_empty() {
+            let canon = self.canonical_peer_key(peer_fp);
+            self.start_expiry(None, [peer_fp, &canon]);
+        } else {
+            self.start_expiry(Some(group_id), ["", ""]);
+        }
+    }
+
+    /// Removes every disappearing row whose time is up, on this device only: nothing is sent, the peer's copy has its own timer. The row
+    /// stays as a tombstone (`apply_delete_to_archive`), so a late duplicate or a history answer cannot bring it back, and the UI hides it
+    /// (`expiry_filter`). Its reactions and seen marks go too. Cheap when nothing is due: an indexed lookup.
+    pub(crate) fn expire_due(&mut self) {
+        let Some(conn) = &self.db else { return };
+        let due: Vec<(Option<String>, String, String)> = conn
+            .prepare("SELECT group_id, peer_device_fingerprint, message_id FROM messages WHERE expire_at_ms <= ?1 AND message_id IS NOT NULL")
+            .and_then(|mut st| st.query_map(params![current_time_ms() as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|rows| rows.flatten().collect()))
+            .unwrap_or_default();
+        for (group_id, fp, mid) in due {
+            let scope = group_id.unwrap_or_default();
+            self.apply_delete_to_archive(Some(scope.as_str()).filter(|g| !g.is_empty()), &fp, &mid);
+            if let Some(conn) = &self.db {
+                // NULL: off the index, so the next sweep does not see it again.
+                let _ = conn.execute(
+                    "UPDATE messages SET expire_at_ms = NULL, is_deleted = 1 WHERE message_id = ?1 AND expire_secs IS NOT NULL AND COALESCE(group_id, '') = ?2",
+                    params![mid, scope],
+                );
+                let _ = conn.execute("DELETE FROM message_reactions WHERE message_id = ?1", params![mid]);
+                let _ = conn.execute("DELETE FROM message_seen WHERE message_id = ?1", params![mid]);
+            }
+        }
+        self.expire_due_files();
+    }
+
+    /// Attachments whose time is up. My own sent file goes in two steps: first off my screen (its decrypted copies too), while the
+    /// encrypted `.enc` stays for a receiver that was offline and has not downloaded it yet (the receiver's timer only starts when it
+    /// sees it); at the unread cap the `.enc` goes as well. A received file goes at once. The row stays as a tombstone (`status =
+    /// 'expired'`): a repeated offer then finds it and is dropped (`receive_file_offer`).
+    fn expire_due_files(&mut self) {
+        let Some(conn) = &self.db else { return };
+        let now = current_time_ms() as i64;
+        let due: Vec<(String, String, String, i64, u32)> = conn
+            .prepare("SELECT file_id, direction, status, created_at, expire_secs FROM files WHERE expire_at_ms <= ?1 AND expire_secs IS NOT NULL")
+            .and_then(|mut st| st.query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map(|rows| rows.flatten().collect()))
+            .unwrap_or_default();
+        for (file_id, direction, status, created_at, secs) in due {
+            let cap_end = created_at + packet::DISAPPEAR_MAX_SECS as i64 * 1000;
+            let keep_for_receivers = direction == "sent" && secs > 0 && status == "complete" && cap_end > now;
+            if keep_for_receivers {
+                self.remove_attachment_plain(&file_id);
+            } else {
+                self.remove_attachment_copy(&file_id);
+                self.finish_blob_upload(&file_id);
+            }
+            let Some(conn) = &self.db else { return };
+            let _ = if keep_for_receivers {
+                conn.execute(
+                    "UPDATE files SET expire_secs = 0, expire_at_ms = ?1, caption = '', preview_jpeg = NULL WHERE file_id = ?2",
+                    params![cap_end, file_id],
+                )
+            } else {
+                conn.execute(
+                    "UPDATE files SET status = 'expired', expire_at_ms = NULL, caption = '', preview_jpeg = NULL, reply_to_preview = NULL WHERE file_id = ?1",
+                    params![file_id],
+                )
+            };
+            let _ = conn.execute("DELETE FROM message_reactions WHERE message_id = ?1", params![file_id]);
+            let _ = conn.execute("DELETE FROM message_seen WHERE message_id = ?1", params![file_id]);
+        }
     }
 
     /// Returns the `identity_id` of a device fingerprint's owner. Needed for the chat key of the server archive. See the note in `archive_message`.
@@ -501,6 +652,11 @@ impl P2PCore {
     }
 
     pub(crate) fn archive_group_message(&mut self, group_id: &str, sender_identity_id: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sent_at_ms: u64, author_proof: Option<&str>) -> Result<(), String> {
+        self.archive_group_message_exp(group_id, sender_identity_id, direction, plaintext, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, author_proof, None)
+    }
+
+    /// Group twin of `archive_message_exp`.
+    pub(crate) fn archive_group_message_exp(&mut self, group_id: &str, sender_identity_id: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sent_at_ms: u64, author_proof: Option<&str>, expire_secs: Option<u32>) -> Result<(), String> {
         // The sender's clock: not later than ours, or its messages sort into
         // the future (and land in an archive bucket nobody probes).
         let sent_at_ms = sent_at_ms.min(current_time_ms());
@@ -518,16 +674,17 @@ impl P2PCore {
         let sent_col: Option<i64> = if sent_at_ms > 0 { Some(sent_at_ms as i64) } else { None };
         // see `archive_message`.
         let inserted = conn.execute(
-            "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, group_id, sender_identity_id, message_id, status, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, author_proof)
-             VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', ?8, ?9, ?10, ?11, ?12)",
-            params![direction, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64, group_id, sender_identity_id, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_col, author_proof],
+            "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, group_id, sender_identity_id, message_id, status, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, author_proof, expire_secs, expire_at_ms)
+             VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![direction, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64, group_id, sender_identity_id, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_col, author_proof,
+                expire_secs, expire_secs.map(|s| first_expiry(direction, s))],
         ).map_err(|e| e.to_string())?;
         if inserted == 0 {
             return Ok(());
         }
 
         // See the same hook in `archive_message`. In a group, the chat key is directly the `group_id`.
-        if let Some(mid) = message_id {
+        if let Some(mid) = message_id.filter(|_| expire_secs.is_none()) {
             let archived = ArchivedMessage {
                 direction: direction.to_string(),
                 text: String::from_utf8_lossy(plaintext).to_string(),
@@ -547,6 +704,8 @@ impl P2PCore {
                 seen_by: String::new(),
                 author_proof: author_proof.map(|p| p.to_string()),
                 mentions_me: false,
+                expire_secs: None,
+                expire_at_ms: None,
             };
             if let Ok(cbor) = ciborium_bytes(&archived) {
                 // see `archive_message`.
@@ -915,6 +1074,10 @@ impl P2PCore {
             return;
         }
         let Some(conn) = &self.db else { return };
+        // A disappearing row never reached the server archive (see `archive_message_exp`); its edit or expiry must not upload it now.
+        if conn.query_row("SELECT 1 FROM messages WHERE message_id = ?1 AND expire_secs IS NOT NULL", params![target_message_id], |_| Ok(())).is_ok() {
+            return;
+        }
 
         let row: Option<(Vec<u8>, Vec<u8>, String, Option<i64>, Option<String>, i64, i64, Option<String>, Option<String>, Option<String>)> =
             match group_id {
@@ -966,6 +1129,8 @@ impl P2PCore {
             seen_by: self.seen_by_json(target_message_id),
             author_proof: group_id.and_then(|gid| self.group_author_proof(gid, target_message_id)),
             mentions_me: false,
+            expire_secs: None,
+            expire_at_ms: None,
         };
         let Ok(cbor) = ciborium_bytes(&archived) else { return };
 
@@ -1139,11 +1304,12 @@ impl P2PCore {
             return Vec::new();
         }
         let t = if sent_clock { "COALESCE(NULLIF(sent_at_ms,0), timestamp)" } else { "timestamp" };
+        let e = expiry_filter(with_marks);
         let mut stmt = match conn.prepare(&format!(
-            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), via_sync FROM messages
-             WHERE peer_device_fingerprint = ?1 AND {t} < ?3 AND {t} > ?4
+            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), via_sync, expire_secs, expire_at_ms FROM messages
+             WHERE peer_device_fingerprint = ?1 AND {t} < ?3 AND {t} > ?4 {e}
                AND {t} >= COALESCE((SELECT {t} FROM messages
-                    WHERE peer_device_fingerprint = ?1 AND {t} < ?3 AND {t} > ?4
+                    WHERE peer_device_fingerprint = ?1 AND {t} < ?3 AND {t} > ?4 {e}
                     ORDER BY {t} DESC, id DESC LIMIT 1 OFFSET ?2 - 1), 0)
              ORDER BY {t} DESC, id DESC"
         )) {
@@ -1165,6 +1331,8 @@ impl P2PCore {
                 row.get::<_, i64>(9)?,
                 row.get::<_, i64>(10)?,
                 row.get::<_, i64>(11)?,
+                row.get::<_, Option<u32>>(12)?,
+                row.get::<_, Option<i64>>(13)?,
             ))
         });
 
@@ -1172,7 +1340,7 @@ impl P2PCore {
         let (mut page_budget, mut page_cut) = (PAGE_MAX_BYTES, None);
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, eff_sent, via_sync) = row;
+                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, status, reply_to_message_id, reply_to_preview, is_deleted, is_edited, eff_sent, via_sync, expire_secs, expire_at_ms) = row;
                 // bounded in bytes, not rows only (500 texts near 1 MiB
                 // each went into one JNI string); never mid-millisecond.
                 if page_bytes_full(&mut page_budget, &mut page_cut, if sent_clock { eff_sent } else { timestamp }, encrypted_blob.len()) {
@@ -1206,6 +1374,8 @@ impl P2PCore {
                             seen_by: seen_by_for_row,
                             author_proof: None,
                             mentions_me: false,
+                            expire_secs,
+                            expire_at_ms: expire_at_ms.map(|v| v.max(0) as u64),
                         });
                     }
                 }
@@ -1343,11 +1513,12 @@ impl P2PCore {
             return Vec::new();
         }
         let t = if sent_clock { "COALESCE(NULLIF(sent_at_ms,0), timestamp)" } else { "timestamp" };
+        let e = expiry_filter(with_marks);
         let mut stmt = match conn.prepare(&format!(
-            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), mentions_me, status FROM messages
-             WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4
+            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), mentions_me, status, expire_secs, expire_at_ms FROM messages
+             WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4 {e}
                AND {t} >= COALESCE((SELECT {t} FROM messages
-                    WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4
+                    WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4 {e}
                     ORDER BY {t} DESC, id DESC LIMIT 1 OFFSET ?2 - 1), 0)
              ORDER BY {t} DESC, id DESC"
         )) {
@@ -1371,6 +1542,8 @@ impl P2PCore {
                 row.get::<_, i64>(11)?,
                 row.get::<_, i64>(12)?,
                 row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<u32>>(14)?,
+                row.get::<_, Option<i64>>(15)?,
             ))
         });
 
@@ -1378,7 +1551,7 @@ impl P2PCore {
         let (mut page_budget, mut page_cut) = (PAGE_MAX_BYTES, None);
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, eff_sent, mentions_me, row_status) = row;
+                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, eff_sent, mentions_me, row_status, expire_secs, expire_at_ms) = row;
                 // bounded in bytes, not rows only (500 texts near 1 MiB
                 // each went into one JNI string); never mid-millisecond.
                 if page_bytes_full(&mut page_budget, &mut page_cut, if sent_clock { eff_sent } else { timestamp }, encrypted_blob.len()) {
@@ -1414,6 +1587,8 @@ impl P2PCore {
                             seen_by: seen_by_for_row,
                             author_proof: None,
                             mentions_me: mentions_me != 0,
+                            expire_secs,
+                            expire_at_ms: expire_at_ms.map(|v| v.max(0) as u64),
                         });
                     }
                 }
@@ -1548,5 +1723,22 @@ impl P2PCore {
                 params![peer_device_fingerprint],
             );
         }
+    }
+}
+
+/// The first `expire_at_ms` of a disappearing row (local clock). My own message counts from now. A received one counts from when it is read
+/// (`start_expiry`); until then it holds the unread cap, so a message never opened does not stay for ever.
+pub(crate) fn first_expiry(direction: &str, secs: u32) -> i64 {
+    let secs = if direction == "sent" { secs } else { packet::DISAPPEAR_MAX_SECS };
+    current_time_ms() as i64 + secs as i64 * 1000
+}
+
+/// The history-query clause for disappearing rows. A gone row (expired, or its tombstone) is never shown. Without `with_marks` the
+/// query feeds a history answer, a recovery copy or a chat preview: a disappearing row is left out of those entirely.
+fn expiry_filter(with_marks: bool) -> String {
+    if with_marks {
+        format!("AND NOT (expire_secs IS NOT NULL AND (is_deleted = 1 OR expire_at_ms <= {}))", current_time_ms())
+    } else {
+        "AND expire_secs IS NULL".to_string()
     }
 }

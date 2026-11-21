@@ -174,7 +174,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  `replyToSenderLabel` (GroupChatActivity.resolveReplyLabel) falls back to this value
          *  when the replied-to message is not stored on this device. It maps the id to a name
          *  through the contact list (`resolveContactByIdentity`). */
-        var replyToSenderIdentityId: String? = null
+        var replyToSenderIdentityId: String? = null,
+        /** Disappearing message: the timer in seconds (Rust `MessageContent::Text.expire_secs`), 0 = an ordinary message. */
+        var expireSecs: Int = 0,
+        /** When it goes, this device's clock (ms). A received one holds a later cap until it is on screen (see `disappearTick`). */
+        var expireAtMs: Long = 0L
     ) {
         /** Sort key of the row: the sender's send time (`sentAtMs`), or this device's receive or
          *  create time (`timestamp`) when unknown. A late-delivered message goes to its SEND
@@ -238,7 +242,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     fun selectedItems(): List<Item> = items.filter { it.messageId in selectedIds && !it.isDeleted }
 
     fun toggleSelection(item: Item) {
-        if (item.isDeleted) return
+        // A disappearing message is never picked: selection copies and forwards.
+        if (item.isDeleted || Disappear.locked(item)) return
         if (!selectedIds.remove(item.messageId)) {
             val kind = kindOf(item)
             if (selectedKind != null && selectedKind != kind) {
@@ -425,11 +430,123 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val imgSeenBy1: ImageView = itemView.findViewById(R.id.imgSeenBy1)
         val imgSeenBy2: ImageView = itemView.findViewById(R.id.imgSeenBy2)
         val imgSeenBy3: ImageView = itemView.findViewById(R.id.imgSeenBy3)
+        val imgSeenBy4: ImageView = itemView.findViewById(R.id.imgSeenBy4)
+        val imgSeenBy5: ImageView = itemView.findViewById(R.id.imgSeenBy5)
         val txtSeenByMore: TextView = itemView.findViewById(R.id.txtSeenByMore)
+        val txtExpire: TextView = itemView.findViewById(R.id.txtExpire)
+    }
+
+    // --- Disappearing messages ---
+
+    /** Bound holders of disappearing bubbles: the pulse and the time-left line touch only these. */
+    private val disappearHolders = HashSet<BubbleViewHolder>()
+    /** The chat screen is resumed. The pulse runs only then, and only then does a received message start counting down. */
+    private var onScreen = false
+    private var lastSecond = 0L
+    /** A received disappearing message started counting down on screen: the caller tells the core (`P2PLib.startDisappearCountdown`). */
+    var onDisappearStarted: (() -> Unit)? = null
+    /** The same slow fade as the whiteboard tab and the call Attend pill. */
+    private val disappearPulse = com.p2p.messenger.util.SlowPulse { disappearTick(it) }
+
+    /** From the Activity's onResume (true) and onPause (false). */
+    fun setOnScreen(visible: Boolean) {
+        onScreen = visible
+        updateDisappearPulse()
+    }
+
+    /** Called when a disappearing bubble comes on screen (true) or the last one goes (false): the Activity blocks screenshots. */
+    var onDisappearPresent: ((Boolean) -> Unit)? = null
+    private var disappearPresent = false
+
+    private fun updateDisappearPulse() {
+        val present = items.any { it.expireSecs > 0 && !it.isDeleted }
+        disappearPulse.running = onScreen && present
+        if (present != disappearPresent) {
+            disappearPresent = present
+            onDisappearPresent?.invoke(present)
+        }
+    }
+
+    /** One pulse frame: the accent edge fades with [p]. Once a second the time-left lines change, received messages on screen
+     *  start counting down, and the ones whose time is up slide out. */
+    private fun disappearTick(p: Float) {
+        val alpha = (64 + 191 * p).toInt()
+        for (h in disappearHolders) h.bubble.foreground?.alpha = alpha
+        val now = System.currentTimeMillis()
+        if (!onScreen || now / 1000 == lastSecond) return
+        lastSecond = now / 1000
+        var started = false
+        val gone = ArrayList<String>()
+        for (item in items) {
+            if (item.expireSecs <= 0 || item.isDeleted) continue
+            val full = now + item.expireSecs * 1000L
+            if (!item.isMine && item.expireAtMs > full) {
+                item.expireAtMs = full
+                started = true
+            }
+            if (item.expireAtMs <= now) gone.add(item.messageId)
+        }
+        for (h in disappearHolders) {
+            val pos = h.bindingAdapterPosition
+            if (pos in items.indices) h.txtExpire.text = Disappear.formatLeft(h.itemView.context, items[pos], now)
+        }
+        if (started) onDisappearStarted?.invoke()
+        gone.forEach { slideOut(it) }
+    }
+
+    /** Slides the bubble off to its own side, then drops the row. The core removes it from the archive on its own clock. */
+    private fun slideOut(messageId: String) {
+        val idx = indexOfMessageId(messageId)
+        if (idx < 0) return
+        val item = items[idx]
+        item.expireSecs = 0
+        val drop = {
+            val i = indexOfMessageId(messageId)
+            if (i >= 0) {
+                items.removeAt(i)
+                notifyItemRemoved(i)
+                // The neighbours' grouping (merged outline, time on the last one) changes.
+                if (i > 0) notifyItemChanged(i - 1)
+                if (i < items.size) notifyItemChanged(i)
+            }
+            updateDisappearPulse()
+        }
+        val holder = recyclerView?.findViewHolderForAdapterPosition(idx) as? BubbleViewHolder
+        if (holder == null) {
+            drop()
+            return
+        }
+        val v = holder.itemView
+        v.animate().translationX((if (item.isMine) 1f else -1f) * v.width).alpha(0f).setDuration(300L).withEndAction { drop() }.start()
+    }
+
+    private fun bindDisappear(holder: BubbleViewHolder, item: Item) {
+        if (item.expireSecs <= 0 || item.isDeleted) {
+            holder.txtExpire.visibility = View.GONE
+            holder.bubble.foreground = null
+            disappearHolders.remove(holder)
+            return
+        }
+        holder.txtExpire.visibility = View.VISIBLE
+        holder.txtExpire.gravity = if (item.isMine) Gravity.END else Gravity.START
+        holder.txtExpire.text = Disappear.formatLeft(holder.itemView.context, item, System.currentTimeMillis())
+        val density = holder.itemView.resources.displayMetrics.density
+        holder.bubble.foreground = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = 18f * density // MergedBubbleDecoration.OUTER_RADIUS_DP
+            setColor(android.graphics.Color.TRANSPARENT)
+            setStroke((2 * density).toInt().coerceAtLeast(1), MaterialColors.getColor(holder.bubble, androidx.appcompat.R.attr.colorPrimary))
+        }
+        disappearHolders.add(holder)
+        updateDisappearPulse()
     }
 
     override fun onViewRecycled(holder: BubbleViewHolder) {
         super.onViewRecycled(holder)
+        disappearHolders.remove(holder)
+        // A slid-out row comes back for another message.
+        holder.itemView.animate().cancel()
+        holder.itemView.translationX = 0f
+        holder.itemView.alpha = 1f
         val fileId = holder.itemView.getTag(R.id.layoutVoiceMessage) as? String
         if (fileId != null && boundVoiceHolders[fileId] === holder) {
             boundVoiceHolders.remove(fileId)
@@ -547,6 +664,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** Tapping the reaction pill opens the "who reacted with what" list (see ChatActivity /
      *  GroupChatActivity `showReactionsDialog`). */
     var onReactionsClick: ((Item) -> Unit)? = null
+
+    /** Tapping the seen-by avatars lists who saw the message and when (`showSeenByDialog`). */
+    var onSeenByClick: ((Item) -> Unit)? = null
 
     fun applyReactions(messageId: String, summary: String) {
         val idx = indexOfMessageId(messageId)
@@ -994,6 +1114,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
         if (item.isMine && !item.isDeleted && item.messageId == lastSeenMessageId && lastSeenAvatars.isNotEmpty()) {
             bindSeenBy(holder)
+            holder.rowSeenBy.setOnClickListener { onSeenByClick?.invoke(item) }
         } else {
             holder.rowSeenBy.visibility = View.GONE
         }
@@ -1014,6 +1135,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // See the `Linkify.addLinks` note above. A text with links can consume the touch on
         // `holder.textView` through its own `LinkMovementMethod`, so the same listener is set there too.
         holder.textView.setOnLongClickListener(longPressListener)
+        bindDisappear(holder, item)
     }
 
     /**
@@ -1270,21 +1392,21 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
     }
 
-    /** Shows at most 3 small avatars. The rest is summarised as "+N". In 1:1 chats `lastSeenAvatars`
-     *  always has one entry. In group chats it can have several members' avatars. */
+    /** Shows the 5 latest viewers as small avatars (the list is in seen order). The rest is summarised
+     *  as "+N". In 1:1 chats `lastSeenAvatars` always has one entry. */
     private fun bindSeenBy(holder: BubbleViewHolder) {
         holder.rowSeenBy.visibility = View.VISIBLE
-        val avatars = lastSeenAvatars
-        val slots = listOf(holder.imgSeenBy1, holder.imgSeenBy2, holder.imgSeenBy3)
+        val slots = listOf(holder.imgSeenBy1, holder.imgSeenBy2, holder.imgSeenBy3, holder.imgSeenBy4, holder.imgSeenBy5)
+        val avatars = lastSeenAvatars.takeLast(slots.size)
         for (i in slots.indices) {
-            if (i < avatars.size && i < 3) {
+            if (i < avatars.size) {
                 slots[i].visibility = View.VISIBLE
                 AvatarUtil.renderInto(slots[i], avatars[i].avatarJpeg, avatars[i].displayName)
             } else {
                 slots[i].visibility = View.GONE
             }
         }
-        val overflow = avatars.size - 3
+        val overflow = lastSeenAvatars.size - avatars.size
         if (overflow > 0) {
             holder.txtSeenByMore.visibility = View.VISIBLE
             holder.txtSeenByMore.text = "+$overflow"

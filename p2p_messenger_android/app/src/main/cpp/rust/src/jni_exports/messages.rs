@@ -15,11 +15,38 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_syncReadState<'local>(mut e
     });
 }
 
+/// The chat's disappearing mode in seconds, 0 = off (see `disappear_mode`).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_getDisappearMode<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, group_id: JString<'local>) -> jlong {
+    let peer: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
+    let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
+    catch_panic(move || core_lock_read().disappear_mode(&peer, &gid).unwrap_or(0) as jlong).unwrap_or(0)
+}
+
+/// Turns the chat's disappearing mode on (`secs`) or off (0).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setDisappearMode<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, group_id: JString<'local>, secs: jlong) {
+    let peer: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
+    let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
+    let secs = u32::try_from(secs).unwrap_or(0);
+    let _ = catch_panic(move || core_lock_read().set_disappear_mode(&peer, &gid, secs));
+}
+
+/// Disappearing messages on screen start counting down (see `start_expiry_on_screen`). Local only, nothing is sent.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_startDisappearCountdown<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer_device_fingerprint: JString<'local>, group_id: JString<'local>) {
+    let peer: String = jstr(&mut env, &peer_device_fingerprint).unwrap_or_default();
+    let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
+    let _ = catch_panic(move || core_lock_read().start_expiry_on_screen(&peer, &gid));
+}
+
 /// Returns `{"message_id":"...","status":"sent"|"pending"}` on success, or `"Error: ..."`. `status` lets the UI show the send icon (clock or tick)
 /// correctly at once. If it is "pending", it will be retried in the background and updated by a "status" event (see pollNetwork).
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, expire_secs: jlong) -> jstring {
     let target_str: String = jstr(&mut env, &target).unwrap_or_default();
+    // 0 = an ordinary message; else a disappearing one (see `MessageContent::Text.expire_secs`).
+    let expire_secs = u32::try_from(expire_secs).ok().filter(|s| *s > 0);
     let msg_str: String = jstr(&mut env, &msg).unwrap_or_default();
     // See the `optional_jstring` docs: WhatsApp-style reply. If there is no reply, Kotlin passes `null`.
     let reply_id_opt = optional_jstring(&mut env, &reply_to_message_id);
@@ -27,7 +54,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendMessage<'local>(mut env
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.send_message(target_str, msg_str, reply_id_opt, reply_preview_opt)
+        core.send_message(target_str, msg_str, reply_id_opt, reply_preview_opt, expire_secs)
     });
     match result {
         Ok(Ok((message_id, status))) => safe_new_jstring(&mut env, serde_json::json!({"message_id": message_id, "status": status}).to_string()),
@@ -90,6 +117,15 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_listReactions<'local>(mut e
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_topReactions<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
     let json = crate::api::top_reactions();
+    safe_new_jstring(&mut env, json)
+}
+
+/// See `P2PCore::seen_by_json`. Fills the "who saw it, when" list when the seen avatars are tapped.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_listSeenBy<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, message_id: JString<'local>) -> jstring {
+    let id: String = jstr(&mut env, &message_id).unwrap_or_default();
+    let result = catch_panic(move || core_lock_read().seen_by_json(&id));
+    let json = result.unwrap_or_else(|e| { error!("list_seen_by panicked: {}", e); "[]".to_string() });
     safe_new_jstring(&mut env, json)
 }
 

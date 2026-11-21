@@ -33,12 +33,15 @@ object Forward {
 
     /** Stickers are not offered: sent as a file they would lose the sticker look. */
     fun canForward(item: SimpleChatAdapter.Item) =
-        !item.isDeleted && item.attachment?.isSticker != true
+        !item.isDeleted && item.attachment?.isSticker != true && !com.p2p.messenger.ui.Disappear.locked(item)
 
     fun start(activity: ComponentActivity, item: SimpleChatAdapter.Item) = start(activity, listOf(item))
 
     /** Several messages, sent in this order to the chat picked. */
-    fun start(activity: ComponentActivity, items: List<SimpleChatAdapter.Item>) {
+    fun start(activity: ComponentActivity, all: List<SimpleChatAdapter.Item>) {
+        // A disappearing message is never forwarded.
+        val items = all.filterNot { com.p2p.messenger.ui.Disappear.locked(it) }
+        if (items.isEmpty()) return
         activity.lifecycleScope.launch {
             val pending = items.map { item ->
                 val attachment = item.attachment ?: return@map Pending(mark(item.text), null)

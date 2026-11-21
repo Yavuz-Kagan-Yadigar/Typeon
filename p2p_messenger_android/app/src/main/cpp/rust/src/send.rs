@@ -215,15 +215,15 @@ impl P2PCore {
         if let Some(plaintext) = archive_plaintext {
             // See packet.rs `MessageContent::Text.reply_to_message_id`. Our own sent message's archive row must also carry the reply info (if any).
             // Otherwise, even on our own bubble, the "replying to whom" info would be lost after a reload.
-            let (reply_to_id, reply_to_prev, sent_at) = match content {
-                MessageContent::Text { reply_to_message_id, reply_to_preview, sent_at_ms, .. } => {
-                    (reply_to_message_id.as_deref(), reply_to_preview.as_deref(), *sent_at_ms)
+            let (reply_to_id, reply_to_prev, sent_at, expire_secs) = match content {
+                MessageContent::Text { reply_to_message_id, reply_to_preview, sent_at_ms, expire_secs, .. } => {
+                    (reply_to_message_id.as_deref(), reply_to_preview.as_deref(), *sent_at_ms, *expire_secs)
                 }
-                _ => (None, None, 0),
+                _ => (None, None, 0, None),
             };
             // Not sent when our own copy cannot be kept: the peer would hold
             // a message our history never has. The skipped number is harmless.
-            if let Err(e) = self.archive_message(&peer_device_fingerprint, "sent", plaintext, Some(&message_id), Some(MessageSendStatus::Pending.as_str()), reply_to_id, reply_to_prev, sent_at) {
+            if let Err(e) = self.archive_message_exp(&peer_device_fingerprint, "sent", plaintext, Some(&message_id), Some(MessageSendStatus::Pending.as_str()), reply_to_id, reply_to_prev, sent_at, expire_secs) {
                 error!("Sent message could not be written to archive, not sent: {}", e);
                 return Err(format!("Message could not be saved: {}", e));
             }
@@ -286,7 +286,9 @@ impl P2PCore {
     }
 
     /// `reply_to_message_id` / `reply_to_preview`: a swipe-to-reply quote (see the packet.rs `MessageContent::Text.reply_to_message_id` docs). The Kotlin side already shows the text, so it passes the truncated summary. The Rust side does no archive lookup.
-    pub(crate) fn send_message(&mut self, peer_device_fingerprint: String, plaintext: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>) -> Result<(String, String), String> {
+    /// `expire_secs`: a disappearing message (see `MessageContent::Text.expire_secs`); None = the chat's disappearing mode, if on.
+    pub(crate) fn send_message(&mut self, peer_device_fingerprint: String, plaintext: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, expire_secs: Option<u32>) -> Result<(String, String), String> {
+        let expire_secs = packet::disappear_secs(expire_secs).or_else(|| self.disappear_mode(&peer_device_fingerprint, ""));
         if self.known_remote_devices.get(&peer_device_fingerprint)
             .map_or(false, |d| self.deleted_identities.contains(&d.identity_id))
         {
@@ -303,7 +305,7 @@ impl P2PCore {
         let content = MessageContent::Text {
             group_id: None, text: plaintext.clone(), group_message_local_id: Some(conv_id.clone()), sent_at_ms,
             reply_to_message_id: reply_to_message_id.clone(), reply_to_preview: reply_to_preview.clone(),
-            reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
+            reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs,
         };
         info!("Sending text: id={} peer={}", &conv_id[..8], &peer_device_fingerprint[..8.min(peer_device_fingerprint.len())]);
         let result = self.send_message_content_inner(
@@ -317,7 +319,7 @@ impl P2PCore {
             self.fanout_extra_copies(&peer_device_fingerprint, &content);
             self.echo_1to1_to_siblings(&peer_device_fingerprint, SiblingEchoBody::Text {
                 message_id: conv_id.clone(), text: plaintext, sent_at_ms,
-                reply_to_message_id, reply_to_preview, reply_to_sender_identity_id: None,
+                reply_to_message_id, reply_to_preview, reply_to_sender_identity_id: None, expire_secs,
             });
         }
         result

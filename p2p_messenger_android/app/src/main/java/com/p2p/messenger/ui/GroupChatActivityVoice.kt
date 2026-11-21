@@ -259,6 +259,7 @@ internal fun GroupChatActivity.sendVoiceMessage(file: File, durationMs: Long, ca
                             messageId = result,
                             text = "",
                             isMine = true,
+                            expireSecs = disappearSecs, expireAtMs = Disappear.atFor(disappearSecs),
                             caption = caption,
                             replyToMessageId = quote?.id,
                             replyToPreview = quote?.preview,

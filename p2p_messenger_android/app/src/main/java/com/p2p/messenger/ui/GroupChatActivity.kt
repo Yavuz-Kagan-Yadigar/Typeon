@@ -139,6 +139,8 @@ class GroupChatActivity : AppCompatActivity() {
      */
     /** Same note as ChatActivity `btnSend`: the cloud logo is a masked circular `ImageButton`. */
     internal lateinit var btnSend: ImageButton
+    /** This group's disappearing mode in seconds, 0 = off (Send held for 3 s, see ui/Disappear.kt). */
+    internal var disappearSecs = 0
     /** See `maybePlayTyphoonEffect` and ui.TyphoonParticleView. */
     internal lateinit var typhoonEffect: TyphoonParticleView
     internal lateinit var progressSending: ProgressBar
@@ -302,7 +304,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     internal val stickerPicker = StickerPicker(this, { id, quote -> P2PLib.sendGroupSticker(groupId, id, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: "") }, ::takeQuote) { item ->
         item.replyToSenderLabel = resolveReplyLabel(item.replyToMessageId)
-        adapter.addMessage(item)
+        adapter.addMessage(Disappear.stamp(item, disappearSecs))
         scrollToBottomNow()
     }
 
@@ -471,6 +473,15 @@ class GroupChatActivity : AppCompatActivity() {
             { groupId }, { localMessages.minOfOrNull { it.orderKey } ?: 0L })
         // Group messages also get Edit and Delete (plus Resend if sending failed). See ChatActivity.showEditDeleteDialog, same pattern.
         adapter.onItemLongPress = { item -> showGroupEditDeleteDialog(item) }
+        adapter.onDisappearStarted = {
+            val gid = groupId
+            Thread { try { P2PLib.startDisappearCountdown("", gid) } catch (e: Throwable) { } }.start()
+        }
+        // A disappearing message on screen: screenshots, screen recording and the recents thumbnail come out black.
+        adapter.onDisappearPresent = { on ->
+            if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
         selection = MessageSelection(this, adapter, { saveGroupAttachmentToDownloads(it) }) { P2PLib.deleteGroupMessage(groupId, it) }
         adapter.onAttachmentClick = { item -> onGroupAttachmentClicked(item) }
         // Long press on an attachment bubble opens 'Save to Downloads' and 'Open with another app'. This was not wired on this screen before
@@ -478,6 +489,7 @@ class GroupChatActivity : AppCompatActivity() {
         adapter.onAttachmentLongClick = { item -> onGroupAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
         adapter.onItemDoubleTap = { item, bubble -> showReactionPicker(item, bubble) }
+        adapter.onSeenByClick = { item -> showSeenByDialog(item.messageId) }
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
         stickerPicker.provideBubbleImages(adapter)
         setupSwipeToReply()
@@ -545,6 +557,23 @@ class GroupChatActivity : AppCompatActivity() {
             if (text.isBlank()) return@setOnClickListener
             input.text.clear()
             sendNewMessage(text)
+        }
+        // Held for 3 s: the group's disappearing mode (ui/Disappear.kt). Turned on with text typed, the text goes out at once.
+        Disappear.attachHold(btnSend, { disappearSecs }) { secs ->
+            disappearSecs = secs
+            Disappear.showMode(btnSend, secs)
+            val gid = groupId
+            lifecycleScope.launch(Dispatchers.IO) { try { P2PLib.setDisappearMode("", gid, secs.toLong()) } catch (e: Throwable) { } }
+            val text = input.text.toString()
+            if (secs > 0 && text.isNotBlank()) {
+                input.text.clear()
+                sendNewMessage(text)
+            }
+        }
+        lifecycleScope.launch {
+            val gid = groupId
+            disappearSecs = withContext(Dispatchers.IO) { try { P2PLib.getDisappearMode("", gid).toInt() } catch (e: Throwable) { 0 } }
+            Disappear.showMode(btnSend, disappearSecs)
         }
         // Only sends on false->true/true->false transitions (see ChatActivity).
         input.addTextChangedListener(object : TextWatcher {
@@ -744,6 +773,7 @@ class GroupChatActivity : AppCompatActivity() {
         syncMissedGroupMessages()
         // Members are told the read boundary as soon as the group opens (not only in onPause, and to members as well as sibling devices).
         if (resumedUnlocked) scheduleGroupReadWatermark()
+        adapter.setOnScreen(resumedUnlocked)
     }
 
     internal val groupReadWatermarkHandler = Handler(Looper.getMainLooper())
@@ -764,6 +794,7 @@ class GroupChatActivity : AppCompatActivity() {
             syncGroupReadStateAsync()
         }
         resumedUnlocked = false
+        adapter.setOnScreen(false)
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         // Same note as ChatActivity onPause: a pulse animation must not stay registered with vsync in the background while the Activity is not visible.
         ownStatusDot.cancelPulse()

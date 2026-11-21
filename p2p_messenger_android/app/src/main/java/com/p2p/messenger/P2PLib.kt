@@ -101,6 +101,11 @@ object P2PLib {
     /** Multi-device (section 1.7.1): when a chat is read on THIS device, the sibling devices are told it was read (so they count it as read too). For 1:1, `peerDeviceFingerprint`
      *  is set and `groupId` is empty; for a group, the reverse. No-op if there is no sibling device. It reaches the other devices as a "read_state_sync" pollNetwork event. */
     external fun syncReadState(peerDeviceFingerprint: String, groupId: String, readAtMs: Long)
+    /** Disappearing messages on screen start counting down in the core too. Local only, nothing is sent. */
+    external fun startDisappearCountdown(peerDeviceFingerprint: String, groupId: String)
+    /** The chat's disappearing mode in seconds, 0 = off. Every message sent in the chat carries it (text, files, voice, stickers). */
+    external fun getDisappearMode(peerDeviceFingerprint: String, groupId: String): Long
+    external fun setDisappearMode(peerDeviceFingerprint: String, groupId: String, secs: Long)
 
     // --- Section 2.2: device change alerts ---
     /** JSON-encoded List<DeviceAlertInfo>. */
@@ -186,7 +191,8 @@ object P2PLib {
     /** `replyToMessageId` and `replyToPreview` are for swipe-to-reply. If there is no reply, both must be passed as `null`: default parameter values are not used
      *  on `external fun`, so every caller passes `null` explicitly. `replyToPreview` is a short summary of the replied-to message (truncated
      *  by the caller), so the receiver can show the reply without looking in its own archive. */
-    external fun sendMessage(targetDeviceFingerprint: String, message: String, replyToMessageId: String?, replyToPreview: String?): String
+    /** `expireSecs`: a disappearing message (seconds after it is read), 0 = an ordinary one. See ui/Disappear.kt. */
+    external fun sendMessage(targetDeviceFingerprint: String, message: String, replyToMessageId: String?, replyToPreview: String?, expireSecs: Long): String
     /** Returns the same JSON format as sendMessage. */
     external fun editMessage(targetDeviceFingerprint: String, targetMessageId: String, newText: String): String
     external fun deleteMessage(targetDeviceFingerprint: String, targetMessageId: String): String
@@ -198,6 +204,8 @@ object P2PLib {
     /** Returns the "who reacted with what" list, shown when the reaction pill is tapped. JSON: [{"identity_id":"...","emoji":"👍"}, ...], newest reaction first.
      *  The summary on the pill (see the return of `reactToMessage`) carries only totals and no person information, so this is a separate call. */
     external fun listReactions(targetMessageId: String): String
+    /** Who has seen a message and when: [{"identity_id":"...","seen_at_ms":123}, ...], first viewer first. */
+    external fun listSeenBy(messageId: String): String
     /** My 5 most used reaction emojis, for the double-tap quick-reaction bar. JSON string array, padded with defaults. */
     external fun topReactions(): String
     /** Group counterpart of `editMessage` and `deleteMessage`: it is sent to ALL reachable other members (the same fan-out pattern as `sendGroupMessage`).
@@ -290,8 +298,6 @@ object P2PLib {
     /** Deletes several stickers ([idsJson]: JSON array of ids), one sync echo. "OK" or "Error: ...". */
     external fun deleteStickers(idsJson: String): String
     external fun setStickerFavorite(id: String, favorite: Boolean): String
-    /** Sends a sticker to a contact's device. Returns the attachment's `file_id`, or "Error: ...". */
-    external fun sendSticker(peerFp: String, stickerId: String, replyToMessageId: String, replyToPreview: String): String
     /** This device's sticker folders: JSON [{"id","name","stickers":[sticker id]}], oldest first. */
     external fun listStickerFolders(): String
     /** Returns the new folder's id, or "Error: ...". */
@@ -303,6 +309,8 @@ object P2PLib {
     external fun addStickersToFolder(id: Long, idsJson: String): String
     /** Takes stickers out of a folder; they stay in the store. "OK" or "Error: ...". */
     external fun removeStickersFromFolder(id: Long, idsJson: String): String
+    /** Sends a sticker to a contact's device. Returns the attachment's `file_id`, or "Error: ...". */
+    external fun sendSticker(peerFp: String, stickerId: String, replyToMessageId: String, replyToPreview: String): String
     /** Group counterpart of `sendSticker`. */
     external fun sendGroupSticker(groupId: String, stickerId: String, replyToMessageId: String, replyToPreview: String, replyToSenderIdentityId: String): String
     /** Copies a received (downloaded) sticker into this device's own sticker store. Returns the sticker id, or "Error: ...". */
@@ -357,7 +365,7 @@ object P2PLib {
      *  to match "seen" notices to the right bubble), or "Error: ...".
      *  `replyTo*`: see the same note on `sendMessage`. For groups there is also `replyToSenderIdentityId` (the identity of the replied-to message's sender,
      *  so "reply to <name>" can be shown). `mentionIdsJson`: JSON array of the identity ids of @mentioned members, or null. */
-    external fun sendGroupMessage(groupId: String, message: String, replyToMessageId: String?, replyToPreview: String?, replyToSenderIdentityId: String?, mentionIdsJson: String?): String
+    external fun sendGroupMessage(groupId: String, message: String, replyToMessageId: String?, replyToPreview: String?, replyToSenderIdentityId: String?, mentionIdsJson: String?, expireSecs: Long): String
     /** Group profile photo. It succeeds ONLY for the founder (see Rust set_group_avatar). `avatarJpeg` null removes it. In both cases a GroupUpdate
      *  is sent to ALL members. */
     external fun setGroupProfilePicture(groupId: String, avatarJpeg: ByteArray?): String

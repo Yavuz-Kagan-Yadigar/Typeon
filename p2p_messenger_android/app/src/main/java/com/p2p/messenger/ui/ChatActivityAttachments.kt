@@ -205,16 +205,20 @@ internal fun ChatActivity.onAttachmentLongClicked(item: SimpleChatAdapter.Item) 
     // 'Open with another app' is available. A tap (photo and video in the in-app MediaViewerActivity, others in the system default) is unchanged.
     // This option always shows the app chooser (`Intent.createChooser`).
     val options = mutableListOf<String>().apply {
-        add(getString(R.string.action_open_with))
-        add(getString(R.string.action_save_to_downloads))
-        // Save to Downloads hands out a JPEG XL as PNG/GIF; this keeps the original.
-        if (attachment.fileName.endsWith(".jxl", true) || attachment.mimeType == "image/jxl") add(getString(R.string.action_save_as_jxl))
-        if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
-        if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
+        // A disappearing file: nothing that copies it out (open in another app, save, copy, add sticker, select).
+        val locked = Disappear.locked(item)
+        if (!locked) {
+            add(getString(R.string.action_open_with))
+            add(getString(R.string.action_save_to_downloads))
+            // Save to Downloads hands out a JPEG XL as PNG/GIF; this keeps the original.
+            if (attachment.fileName.endsWith(".jxl", true) || attachment.mimeType == "image/jxl") add(getString(R.string.action_save_as_jxl))
+            if (attachment.mimeType.startsWith("image/")) add(getString(R.string.action_copy_image))
+            if (attachment.isSticker && !item.isMine) add(getString(R.string.action_add_to_my_stickers))
+        }
         if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
         if (item.isMine && item.status != SimpleChatAdapter.Status.SENT) add(getString(R.string.action_resend_message))
         if (item.isMine) add(getString(R.string.action_delete_message))
-        add(getString(R.string.action_select))
+        if (!locked) add(getString(R.string.action_select))
     }
     AlertDialog.Builder(this)
         .setItems(options.toTypedArray()) { _, which ->
@@ -329,7 +333,7 @@ internal fun ChatActivity.onAttachmentClicked(item: SimpleChatAdapter.Item) {
                     if (path.startsWith("Error:")) {
                         Toast.makeText(this@onAttachmentClicked, getString(R.string.error_attachment_open_failed), Toast.LENGTH_SHORT).show()
                     } else {
-                        openAttachmentFile(path)
+                        openAttachmentFile(path, Disappear.locked(item))
                     }
                 }
             }
@@ -341,7 +345,8 @@ internal fun ChatActivity.onAttachmentClicked(item: SimpleChatAdapter.Item) {
 }
 
 /** Photos and videos open in the in-app viewer (MediaViewerActivity); other types go to the system default. */
-internal fun ChatActivity.openAttachmentFile(path: String) {
+/** `protected`: a disappearing file. Shown only in the in-app viewer, with screenshots blocked; never handed to another app. */
+internal fun ChatActivity.openAttachmentFile(path: String, protected: Boolean = false) {
     // The file's own extension picks the viewer and the handler, not the
     // type the sender declared.
     val mimeType = android.webkit.MimeTypeMap.getSingleton()
@@ -352,9 +357,14 @@ internal fun ChatActivity.openAttachmentFile(path: String) {
             val intent = Intent(this, MediaViewerActivity::class.java).apply {
                 putExtra("uri", uri)
                 putExtra("mime_type", mimeType)
+                putExtra(MediaViewerActivity.EXTRA_PROTECTED, protected)
             }
             grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             startActivity(intent)
+            return
+        }
+        if (protected) {
+            Toast.makeText(this, R.string.disappear_cannot_open, Toast.LENGTH_LONG).show()
             return
         }
         val intent = Intent(Intent.ACTION_VIEW).apply {
@@ -411,6 +421,7 @@ internal fun ChatActivity.onPhotoCaptured(jpeg: ByteArray, caption: String = "",
                             messageId = obj.optString("message_id"),
                             text = "",
                             isMine = true,
+                            expireSecs = disappearSecs, expireAtMs = Disappear.atFor(disappearSecs),
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = obj.optString("message_id"),
                                 fileName = prepared.fileName,
@@ -513,6 +524,7 @@ internal fun ChatActivity.onFilePicked(uri: Uri, caption: String = "", hiRes: Bo
                             messageId = obj.optString("message_id"),
                             text = "",
                             isMine = true,
+                            expireSecs = disappearSecs, expireAtMs = Disappear.atFor(disappearSecs),
                             attachment = SimpleChatAdapter.AttachmentInfo(
                                 fileId = obj.optString("message_id"),
                                 fileName = prepared.fileName,

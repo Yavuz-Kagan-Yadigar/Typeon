@@ -271,6 +271,18 @@ pub fn sync_read_state(peer_fingerprint: &str, group_id: &str, read_at_ms: u64) 
     api::sync_read_state(peer_fingerprint, group_id, read_at_ms);
 }
 
+pub fn start_disappear_countdown(peer_fingerprint: &str, group_id: &str) {
+    api::start_disappear_countdown(peer_fingerprint, group_id);
+}
+
+pub fn disappear_mode(peer_fingerprint: &str, group_id: &str) -> u32 {
+    api::disappear_mode(peer_fingerprint, group_id)
+}
+
+pub fn set_disappear_mode(peer_fingerprint: &str, group_id: &str, secs: u32) {
+    api::set_disappear_mode(peer_fingerprint, group_id, secs);
+}
+
 // --- contacts ---
 
 pub fn list_contacts() -> Vec<ContactSummary> {
@@ -381,8 +393,9 @@ pub fn send_message(
     text: &str,
     reply_to_id: Option<String>,
     reply_preview: Option<String>,
+    expire_secs: Option<u32>,
 ) -> Result<SendReceipt, String> {
-    parse_receipt(api::send_message(target, text, reply_to_id, reply_preview))
+    parse_receipt(api::send_message(target, text, reply_to_id, reply_preview, expire_secs))
 }
 
 pub fn edit_message(target: &str, message_id: &str, new_text: &str) -> Result<SendReceipt, String> {
@@ -488,6 +501,7 @@ pub fn send_group_message(
     reply_preview: Option<String>,
     reply_sender_identity_id: Option<String>,
     mentions: Vec<String>,
+    expire_secs: Option<u32>,
 ) -> Result<String, String> {
     parse(api::send_group_message(
         group_id,
@@ -496,6 +510,7 @@ pub fn send_group_message(
         reply_preview,
         reply_sender_identity_id,
         mentions,
+        expire_secs,
     ))
 }
 
@@ -679,6 +694,23 @@ pub fn top_reactions() -> Vec<String> {
     parse_list(api::top_reactions())
 }
 
+/// Who has seen a message and when, first viewer first.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeenEntry {
+    pub identity_id: String,
+    #[serde(default)]
+    pub seen_at_ms: u64,
+}
+
+pub fn list_seen_by(message_id: &str) -> Vec<SeenEntry> {
+    parse_seen_by(api::list_seen_by(message_id))
+}
+
+/// `ArchivedMessage.seen_by` (empty when the row carries no marks).
+pub fn parse_seen_by(json: String) -> Vec<SeenEntry> {
+    if json.is_empty() { Vec::new() } else { parse_list(json) }
+}
+
 /// 1 = sent again to the group devices that missed it, 0 = nothing to send, -1 = failed.
 pub fn retry_group_message_copies(group_id: &str, local_id: &str) -> i32 {
     api::retry_group_message_copies(group_id, local_id)
@@ -784,23 +816,6 @@ pub fn delete_sticker(id: &str) -> Result<(), String> {
     parse_unit(api::delete_sticker(id))
 }
 
-// --- pending (unacknowledged) messages ---
-
-pub fn list_pending_messages() -> Vec<PendingMessageSummary> {
-    parse_list(api::list_pending_messages())
-}
-
-pub fn cancel_pending_message(message_id: &str) -> bool {
-    api::cancel_pending_message(message_id)
-}
-
-pub fn retry_pending_message_now(message_id: &str) -> bool {
-    api::retry_pending_message_now(message_id)
-}
-
-// --- server (store-and-forward) option ---
-// See the core's `server_client` module. Unlike relays, a server stores envelopes: a relay stores nothing and builds a live circuit only
-// while BOTH sides are connected. A server writes the envelope to disk when the recipient is offline, and delivers it when the recipient
 /// A sticker folder of this device (not synced to my other devices).
 #[derive(Debug, Clone, Deserialize)]
 pub struct StickerFolder {
@@ -836,6 +851,23 @@ pub fn remove_stickers_from_folder(id: i64, sticker_ids: &[String]) -> Result<()
     parse_unit(api::remove_stickers_from_folder(id, sticker_ids))
 }
 
+// --- pending (unacknowledged) messages ---
+
+pub fn list_pending_messages() -> Vec<PendingMessageSummary> {
+    parse_list(api::list_pending_messages())
+}
+
+pub fn cancel_pending_message(message_id: &str) -> bool {
+    api::cancel_pending_message(message_id)
+}
+
+pub fn retry_pending_message_now(message_id: &str) -> bool {
+    api::retry_pending_message_now(message_id)
+}
+
+// --- server (store-and-forward) option ---
+// See the core's `server_client` module. Unlike relays, a server stores envelopes: a relay stores nothing and builds a live circuit only
+// while BOTH sides are connected. A server writes the envelope to disk when the recipient is offline, and delivers it when the recipient
 // returns. The server cannot read the content: envelopes are already end-to-end encrypted and sealed a second time.
 
 #[derive(Debug, Clone, Deserialize)]

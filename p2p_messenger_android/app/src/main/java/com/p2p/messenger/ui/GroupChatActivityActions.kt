@@ -115,7 +115,7 @@ internal fun GroupChatActivity.retryFailedGroupMessage(item: SimpleChatAdapter.I
         // Same as ChatActivity.retryFailedMessage: if it is a reply, the same reply context is kept.
         val result = withContext(Dispatchers.IO) {
             try {
-                P2PLib.sendGroupMessage(gid, item.text, item.replyToMessageId, item.replyToPreview, item.replyToSenderIdentityId, mentionIdsJson(item.text))
+                P2PLib.sendGroupMessage(gid, item.text, item.replyToMessageId, item.replyToPreview, item.replyToSenderIdentityId, mentionIdsJson(item.text), item.expireSecs.toLong())
             } catch (e: Exception) {
                 "Error: ${e.message}"
             }
@@ -140,9 +140,9 @@ internal fun GroupChatActivity.showGroupEditDeleteDialog(item: SimpleChatAdapter
         // Same pattern as ChatActivity: we cannot edit someone else's message, but we can leave a reaction.
         val theirOptions = listOfNotNull(
             getString(R.string.action_react),
-            getString(R.string.lbl_copy),
+            getString(R.string.lbl_copy).takeIf { !Disappear.locked(item) },
             getString(R.string.action_forward).takeIf { com.p2p.messenger.util.Forward.canForward(item) },
-            getString(R.string.action_select),
+            getString(R.string.action_select).takeIf { !Disappear.locked(item) },
         )
         AlertDialog.Builder(this)
             .setItems(theirOptions.toTypedArray()) { _, which ->
@@ -163,9 +163,12 @@ internal fun GroupChatActivity.showGroupEditDeleteDialog(item: SimpleChatAdapter
         add(getString(R.string.action_react))
         add(getString(R.string.action_edit_message))
         add(getString(R.string.action_delete_message))
-        add(getString(R.string.lbl_copy))
-        if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
-        add(getString(R.string.action_select))
+        // A disappearing message: nothing that copies it out.
+        if (!Disappear.locked(item)) {
+            add(getString(R.string.lbl_copy))
+            if (com.p2p.messenger.util.Forward.canForward(item)) add(getString(R.string.action_forward))
+            add(getString(R.string.action_select))
+        }
     }
     AlertDialog.Builder(this)
         .setItems(options.toTypedArray()) { _, which ->
@@ -336,6 +339,8 @@ internal fun GroupChatActivity.setupSwipeToReply() {
 
 /** Same pattern as ChatActivity.startReply: in a group, when `item.isMine` is false, the label is the already-resolved `senderName` of that message. */
 internal fun GroupChatActivity.startReply(item: SimpleChatAdapter.Item) {
+    // A quote copies the text into a message that does not disappear.
+    if (Disappear.locked(item)) return
     com.p2p.messenger.util.Quote.insert(findViewById(R.id.edtMessage), item.messageId, replyPreviewFor(item))
 }
 

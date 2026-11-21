@@ -157,7 +157,9 @@ internal fun ChatActivity.itemFromHistoryJson(obj: JSONObject): SimpleChatAdapte
         // The 1:1 history load now reads the reaction summary too (the group path, `itemFromGroupHistoryJson`, already did). Reactions are kept in the DB
         // (`message_reactions`) and show in the live event, but a reopen or app restart would hide them. `load_message_history` puts the `reactions` field
         // in the JSON (see Rust `reactions_summary`).
-        reactions = obj.optString("reactions", "")
+        reactions = obj.optString("reactions", ""),
+        expireSecs = Disappear.fromEvent(obj).first,
+        expireAtMs = Disappear.fromEvent(obj).second
     )
 }
 
@@ -254,6 +256,8 @@ internal fun ChatActivity.attachmentItemFromJson(obj: JSONObject, skipPreview: S
         messageId = obj.optString("file_id"),
         text = "",
         isMine = obj.optString("direction") == "sent",
+        expireSecs = Disappear.fromEvent(obj).first,
+        expireAtMs = Disappear.fromEvent(obj).second,
         // My file's offer status (`send_status`), so an ERROR mark survives a reload.
         status = if (obj.isNull("send_status")) SimpleChatAdapter.Status.SENT else parseStatus(obj.optString("send_status")),
         timestamp = obj.optLong("created_at", System.currentTimeMillis()),

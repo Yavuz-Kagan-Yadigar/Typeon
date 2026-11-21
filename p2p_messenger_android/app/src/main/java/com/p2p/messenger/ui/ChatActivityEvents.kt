@@ -87,7 +87,8 @@ import com.p2p.messenger.ui.ChatActivity.Companion.TYPING_INDICATOR_TIMEOUT_MS
 
 // ChatActivity: incoming core events, sending text, seen and typing.
 
-internal fun ChatActivity.sendNewMessage(text: String): kotlinx.coroutines.Job {
+/** `expireSecs`: a disappearing message (see ui/Disappear.kt), 0 = an ordinary one. */
+internal fun ChatActivity.sendNewMessage(text: String, expireSecs: Int = disappearSecs): kotlinx.coroutines.Job {
     btnSend.isEnabled = false
     btnSend.visibility = View.INVISIBLE
     progressSending.visibility = View.VISIBLE
@@ -96,7 +97,7 @@ internal fun ChatActivity.sendNewMessage(text: String): kotlinx.coroutines.Job {
     return lifecycleScope.launch {
         val result = withContext(Dispatchers.IO) {
             try {
-                P2PLib.sendMessage(targetPeer, text, null, null)
+                P2PLib.sendMessage(targetPeer, text, null, null, expireSecs.toLong())
             } catch (e: Throwable) {
                 "Error: ${e.message}" // a JNI throw must not kill the process
             }
@@ -129,7 +130,9 @@ internal fun ChatActivity.sendNewMessage(text: String): kotlinx.coroutines.Job {
         }
         adapter.addMessage(
             SimpleChatAdapter.Item(
-                messageId = messageId, text = text, isMine = true, status = status
+                messageId = messageId, text = text, isMine = true, status = status,
+                expireSecs = expireSecs,
+                expireAtMs = if (expireSecs > 0) System.currentTimeMillis() + expireSecs * 1000L else 0L
             )
         )
         scrollToBottomNow()
@@ -176,7 +179,9 @@ internal fun ChatActivity.handleIncomingEvent(obj: JSONObject) {
                     sentAtMs = sentAtMs,
                     replyToMessageId = replyToMessageId,
                     replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null },
-                    replyToSenderLabel = resolveReplyLabel(replyToMessageId)
+                    replyToSenderLabel = resolveReplyLabel(replyToMessageId),
+                    expireSecs = Disappear.fromEvent(obj).first,
+                    expireAtMs = Disappear.fromEvent(obj).second
                 )
             )
             maybePlayTyphoonEffect()
@@ -200,7 +205,9 @@ internal fun ChatActivity.handleIncomingEvent(obj: JSONObject) {
                     sentAtMs = sentAtMs,
                     replyToMessageId = replyToMessageId,
                     replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null },
-                    replyToSenderLabel = resolveReplyLabel(replyToMessageId)
+                    replyToSenderLabel = resolveReplyLabel(replyToMessageId),
+                    expireSecs = Disappear.fromEvent(obj).first,
+                    expireAtMs = Disappear.fromEvent(obj).second
                 )
             )
             scrollToBottomNow()
@@ -238,6 +245,7 @@ internal fun ChatActivity.handleIncomingEvent(obj: JSONObject) {
                     messageId = obj.optString("file_id"),
                     text = "",
                     isMine = obj.optString("type") == "sibling_file",
+                    expireSecs = Disappear.fromEvent(obj).first, expireAtMs = Disappear.fromEvent(obj).second,
                     attachment = SimpleChatAdapter.AttachmentInfo(
                         fileId = obj.optString("file_id"),
                         fileName = obj.optString("file_name"),

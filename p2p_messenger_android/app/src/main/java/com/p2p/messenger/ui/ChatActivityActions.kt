@@ -117,9 +117,9 @@ internal fun ChatActivity.showEditDeleteDialog(item: SimpleChatAdapter.Item) {
         // We cannot edit or delete the other side's message (the other side would reject it anyway; see Rust `message_owned_by_sender`), but we can leave a reaction.
         val theirOptions = listOfNotNull(
             getString(R.string.action_react),
-            getString(R.string.lbl_copy),
+            getString(R.string.lbl_copy).takeIf { !Disappear.locked(item) },
             getString(R.string.action_forward).takeIf { com.p2p.messenger.util.Forward.canForward(item) },
-            getString(R.string.action_select),
+            getString(R.string.action_select).takeIf { !Disappear.locked(item) },
         )
         AlertDialog.Builder(this)
             .setItems(theirOptions.toTypedArray()) { _, which ->
@@ -140,9 +140,12 @@ internal fun ChatActivity.showEditDeleteDialog(item: SimpleChatAdapter.Item) {
         add(getString(R.string.action_react))
         add(getString(R.string.action_edit_message))
         add(getString(R.string.action_delete_message))
-        add(getString(R.string.lbl_copy))
-        add(getString(R.string.action_forward))
-        add(getString(R.string.action_select))
+        // A disappearing message: nothing that copies it out.
+        if (!Disappear.locked(item)) {
+            add(getString(R.string.lbl_copy))
+            add(getString(R.string.action_forward))
+            add(getString(R.string.action_select))
+        }
     }
     AlertDialog.Builder(this)
         .setItems(options.toTypedArray()) { _, which ->
@@ -158,6 +161,50 @@ internal fun ChatActivity.showEditDeleteDialog(item: SimpleChatAdapter.Item) {
             }
         }
         .show()
+}
+
+/**
+ * Tapping the seen-by avatars lists who saw the message and when, newest first (1:1 and group).
+ * Names come from this device's own contact list, as in `showReactionsDialog`.
+ */
+internal fun AppCompatActivity.showSeenByDialog(messageId: String) {
+    lifecycleScope.launch(Dispatchers.IO) {
+        val raw = try { P2PLib.listSeenBy(messageId) } catch (e: Exception) { "[]" }
+        val names = HashMap<String, String>()
+        try {
+            val contacts = JSONArray(P2PLib.listContacts())
+            for (i in 0 until contacts.length()) {
+                val c = contacts.getJSONObject(i)
+                names[c.optString("identity_id")] = c.optString("display_name")
+            }
+        } catch (e: Exception) {
+            // Names fall back to the shortened id.
+        }
+        val rows = mutableListOf<String>()
+        try {
+            val array = JSONArray(raw)
+            for (i in array.length() - 1 downTo 0) {
+                val entry = array.getJSONObject(i)
+                val identityId = entry.optString("identity_id")
+                val who = names[identityId]?.takeIf { it.isNotBlank() } ?: identityId.take(8)
+                val at = android.text.format.DateUtils.formatDateTime(
+                    this@showSeenByDialog, entry.optLong("seen_at_ms"),
+                    android.text.format.DateUtils.FORMAT_SHOW_DATE or android.text.format.DateUtils.FORMAT_SHOW_TIME
+                )
+                rows.add("$who   $at")
+            }
+        } catch (e: Exception) {
+            // Malformed JSON: show an empty list instead of crashing.
+        }
+        withContext(Dispatchers.Main) {
+            if (rows.isEmpty() || isFinishing) return@withContext
+            AlertDialog.Builder(this@showSeenByDialog)
+                .setTitle(R.string.title_seen_by)
+                .setItems(rows.toTypedArray(), null)
+                .setNegativeButton(android.R.string.ok, null)
+                .show()
+        }
+    }
 }
 
 /**
@@ -328,6 +375,8 @@ internal fun ChatActivity.setupSwipeToReply() {
 }
 
 internal fun ChatActivity.startReply(item: SimpleChatAdapter.Item) {
+    // A quote copies the text into a message that does not disappear.
+    if (Disappear.locked(item)) return
     com.p2p.messenger.util.Quote.insert(findViewById(R.id.edtMessage), item.messageId, replyPreviewFor(item))
 }
 
@@ -371,7 +420,7 @@ internal fun ChatActivity.retryFailedMessage(item: SimpleChatAdapter.Item) {
     lifecycleScope.launch {
         val result = withContext(Dispatchers.IO) {
             try {
-                P2PLib.sendMessage(peer, item.text, item.replyToMessageId, item.replyToPreview)
+                P2PLib.sendMessage(peer, item.text, item.replyToMessageId, item.replyToPreview, item.expireSecs.toLong())
             } catch (e: Throwable) {
                 "Error: ${e.message}"
             }

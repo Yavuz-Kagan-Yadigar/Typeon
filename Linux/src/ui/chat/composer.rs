@@ -103,6 +103,8 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
         let view = view.clone();
         send.connect_clicked(move |_| view.send());
     }
+    // Held for 3 s: pick a disappearing timer, then send.
+    disappear_hold(view, &send);
 
     // Enter sends, Shift+Enter inserts a newline — the convention every
     // desktop chat client uses.
@@ -164,6 +166,8 @@ impl ChatView {
 
         let own_identity = self.app().own_identity_id.borrow().clone();
         let now = util::now_ms();
+        // The chat's disappearing mode (see `disappear.rs`); the core stamps the message with it too.
+        let expire_secs = Some(self.disappear_mode.get()).filter(|secs| *secs > 0);
 
         // Composer clears first; the core call runs off the GTK thread and the
         // bubble appears on its result. A failed send puts the text back.
@@ -175,6 +179,7 @@ impl ChatView {
         let restore = text.clone();
         let preview_for_core = reply_preview.clone();
         let reply_sender_for_core = reply_sender.clone();
+        let reply_id_entry = reply_id.clone();
         let make_entry = move |id: String, status: String| Entry {
             id,
             mine: true,
@@ -184,11 +189,13 @@ impl ChatView {
             status: Some(status),
             reply_preview: reply_preview.clone(),
             reply_sender: reply_sender.clone(),
+            reply_id: reply_id_entry.clone(),
             deleted: false,
             edited: false,
             attachment: None,
-            seen: false,
+            seen_by: Vec::new(),
             reactions: String::new(),
+            expire: expire_secs.map(|secs| (secs, now + secs as u64 * 1000)),
         };
         let done = move |view: Rc<Self>, result: Result<Entry, String>, text: String| match result {
             Ok(entry) => view.insert_entry(entry, true),
@@ -213,7 +220,7 @@ impl ChatView {
                 // One worker for every send, so quick messages reach the core
                 // (and the peer) in the order they were typed.
                 serial_in_background(
-                    move || core::send_message(&fingerprint, &sent_text, reply_id, preview_for_core).map(|r| (r.message_id, r.status)),
+                    move || core::send_message(&fingerprint, &sent_text, reply_id, preview_for_core, expire_secs).map(|r| (r.message_id, r.status)),
                     move |result| {
                         let result = result.map(|(id, status)| make_entry(id, status));
                         done(view, result, text);
@@ -242,7 +249,7 @@ impl ChatView {
                 let sent_text = text.clone();
                 serial_in_background(
                     move || {
-                        core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core, mentions)
+                        core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core, mentions, expire_secs)
                     },
                     move |result| {
                         // A group send fans out to every member; the core reports
@@ -634,15 +641,13 @@ impl ChatView {
         buttons.set_homogeneous(true);
         buttons.append(&add);
         buttons.append(&fetch);
-        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        column.append(&scroller);
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        column.append(&buttons);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
         column.append(&header);
+        column.append(&scroller);
+        column.append(&buttons);
         popover.set_child(Some(&column));
 
-        // Listed and decoded off the GTK thread: the list takes the core
-        // lock, and a big GIF froze the window.
         let picker = Rc::new(StickerPopover {
             popover: popover.clone(),
             grid,
@@ -771,6 +776,8 @@ impl ChatView {
             }
         }
 
+        // Listed and decoded off the GTK thread: the list takes the core
+        // lock, and a big GIF froze the window.
         // ponytail: the grid shows an animated sticker's first frame.
         let (tx, rx) = async_channel::unbounded::<StickerLoad>();
         let shown = open.as_ref().map(|f| f.id);

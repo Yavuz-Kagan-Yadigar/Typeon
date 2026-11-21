@@ -167,6 +167,8 @@ internal fun GroupChatActivity.itemFromGroupAttachmentJson(obj: JSONObject, know
         text = "",
         isMine = isMine,
         timestamp = obj.optLong("created_at", System.currentTimeMillis()),
+        expireSecs = Disappear.fromEvent(obj).first,
+        expireAtMs = Disappear.fromEvent(obj).second,
         senderName = sender?.displayName ?: senderIdentityId?.take(8),
         senderAvatarJpeg = sender?.avatarHex?.let { sharedAvatarBytes(it) },
         senderIdentityId = senderIdentityId,
@@ -235,7 +237,9 @@ internal fun GroupChatActivity.itemFromGroupHistoryJson(obj: JSONObject): Simple
         // not only the live edit event.
         isEdited = obj.optBoolean("is_edited", false),
         mentionsMe = obj.optBoolean("mentions_me", false),
-        reactions = obj.optString("reactions", "")
+        reactions = obj.optString("reactions", ""),
+        expireSecs = Disappear.fromEvent(obj).first,
+        expireAtMs = Disappear.fromEvent(obj).second
     )
 }
 

@@ -147,7 +147,7 @@ mod review_oct2026_tests {
     fn a_received_time_is_never_in_the_future() {
         let mut content = MessageContent::Text {
             text: "t".into(), group_id: None, group_message_local_id: None, sent_at_ms: 5_000,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs: None,
         };
         clamp_received_times(&mut content, 1_000);
         assert!(matches!(content, MessageContent::Text { sent_at_ms: 1_000, .. }));
@@ -167,11 +167,11 @@ mod review_oct2026_tests {
         };
         let text = |conv: &str| MessageContent::Text {
             text: "t".into(), group_id: None, group_message_local_id: Some(conv.into()), sent_at_ms: 0,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs: None,
         };
         let echo = |mid: &str| MessageContent::SiblingEcho {
             conversation_identity_id: None, group_id: None,
-            body: SiblingEchoBody::Text { message_id: mid.into(), text: "t".into(), sent_at_ms: 0, reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None },
+            body: SiblingEchoBody::Text { message_id: mid.into(), text: "t".into(), sent_at_ms: 0, reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, expire_secs: None },
         };
         for (id, content) in [("conv", text("conv")), ("copy", text("conv")), ("echo", echo("conv")), ("other", text("keep"))] {
             core.awaiting_confirmation.insert(id.into(), PendingConfirmation {
@@ -922,6 +922,81 @@ mod recovery_tests {
     /// window, below the floor too; a clear forgets the press, so its late
     /// answer is refused.
     #[test]
+    fn disappearing_rows_count_from_read_and_go() {
+        let dir = std::env::temp_dir().join(format!("typeon-disappear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut core = core_on_disk(&dir);
+        let now = current_time_ms();
+        core.archive_message_exp("p", "received", b"a", Some("r1"), None, None, None, now - 5_000, Some(60)).unwrap();
+        core.archive_message("p", "received", b"q", Some("r2"), None, Some("r1"), Some("a"), now - 4_000).unwrap();
+        core.archive_message_exp("p", "sent", b"s", Some("s1"), Some("sent"), None, None, now, Some(60)).unwrap();
+        let at = |core: &P2PCore, id: &str| core.db.as_ref().unwrap()
+            .query_row("SELECT expire_at_ms FROM messages WHERE message_id = ?1", params![id], |r| r.get::<_, Option<i64>>(0)).unwrap();
+        let cap = (now + packet::DISAPPEAR_MAX_SECS as u64 * 1000) as i64;
+        assert!(at(&core, "r1").unwrap() >= cap, "unread: holds the cap");
+        assert!(at(&core, "s1").unwrap() <= (current_time_ms() + 60_000) as i64, "my own copy counts from the send");
+        core.start_expiry(None, ["p", "p"]);
+        let started = at(&core, "r1").unwrap();
+        assert!(started <= (current_time_ms() + 60_000) as i64);
+        core.start_expiry(None, ["p", "p"]);
+        assert_eq!(at(&core, "r1").unwrap(), started, "a later read never extends it");
+        assert!(core.load_message_history("p", 50, None).iter().any(|m| m.message_id.as_deref() == Some("r1") && m.expire_secs == Some(60)));
+        assert!(!core.load_message_history_opt("p", 50, None, false).iter().any(|m| m.expire_secs.is_some()), "never in a history answer");
+
+        core.db.as_ref().unwrap().execute("UPDATE messages SET expire_at_ms = 1 WHERE message_id = 'r1'", []).unwrap();
+        core.expire_due();
+        let h = core.load_message_history("p", 50, None);
+        assert!(!h.iter().any(|m| m.message_id.as_deref() == Some("r1")), "gone, not a deleted placeholder");
+        assert!(h.iter().any(|m| m.message_id.as_deref() == Some("r2") && m.reply_to_preview.is_none()), "the quote loses its text");
+        assert!(h.iter().any(|m| m.message_id.as_deref() == Some("s1")), "the other row stays");
+        assert_eq!(at(&core, "r1"), None, "off the sweep index");
+        core.archive_message_exp("p", "received", b"a", Some("r1"), None, None, None, now, Some(60)).unwrap();
+        assert!(!core.load_message_history("p", 50, None).iter().any(|m| m.message_id.as_deref() == Some("r1")), "a late copy stays gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disappearing_mode_and_files_go_in_steps() {
+        let dir = std::env::temp_dir().join(format!("typeon-disappear-f-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        let mut core = core_on_disk(&dir);
+        core.set_disappear_mode("p", "", 3600);
+        assert_eq!(core.disappear_mode("p", ""), Some(3600));
+        assert_eq!(core.disappear_mode("", "g"), None, "per chat");
+        core.set_disappear_mode("p", "", 0);
+        assert_eq!(core.disappear_mode("p", ""), None, "0 turns it off");
+
+        let now = current_time_ms() as i64;
+        for (id, direction) in [("fs", "sent"), ("fr", "received")] {
+            core.db.as_ref().unwrap().execute(
+                "INSERT INTO files (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size, sha256_hex, encrypted_file_key, key_nonce, status, created_at)
+                 VALUES (?1, 'p', ?2, 'a.jpg', 'image/jpeg', 1, '', x'00', x'00', 'complete', ?3)",
+                params![id, direction, now],
+            ).unwrap();
+            core.set_file_expiry(id, direction, Some(30));
+        }
+        let listed = |core: &P2PCore| core.list_attachments("p").into_iter().map(|a| a.file_id).collect::<Vec<_>>();
+        assert_eq!(listed(&core).len(), 2);
+        core.start_expiry(None, ["p", "p"]);
+        core.db.as_ref().unwrap().execute("UPDATE files SET expire_at_ms = 1", []).unwrap();
+        core.expire_due();
+        assert!(listed(&core).is_empty(), "both off the screen");
+        let row = |core: &P2PCore, id: &str| core.db.as_ref().unwrap().query_row(
+            "SELECT status, expire_secs, expire_at_ms FROM files WHERE file_id = ?1", params![id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<u32>>(1)?, r.get::<_, Option<i64>>(2)?))).unwrap();
+        let (status, secs, at) = row(&core, "fs");
+        assert_eq!((status.as_str(), secs), ("complete", Some(0)), "my copy stays served for an offline receiver");
+        assert!(at.unwrap() > now, "until the unread cap");
+        assert_eq!(row(&core, "fr"), ("expired".to_string(), Some(30), None), "a received one goes at once, as a tombstone");
+        core.db.as_ref().unwrap().execute("UPDATE files SET expire_at_ms = 1 WHERE file_id = 'fs'", []).unwrap();
+        core.expire_due();
+        assert_eq!(row(&core, "fs").0, "expired", "at the cap my copy goes too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn cleared_chat_history_does_not_come_back() {
         let dir = std::env::temp_dir().join(format!("typeon-cclear-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1657,7 +1732,7 @@ mod at_rest_tests {
         core.skipped_key_encryption_key = Some([5u8; 32]);
         let plain = ciborium_bytes(&MessageContent::Text {
             text: "secret-marker".into(), group_id: None, group_message_local_id: None, sent_at_ms: 1,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(),
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs: None,
         }).unwrap();
         let sealed = core.seal_local_blob(&plain).unwrap();
         assert!(!sealed.windows(13).any(|w| w == b"secret-marker"));

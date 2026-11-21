@@ -522,7 +522,7 @@ impl P2PCore {
 
     /// Removes one attachment completely (the DB row, the on-disk `.enc` blob, and any `plain_cache` copy). See `enforce_history_storage_limit`.
     pub(crate) fn delete_attachment_file(&mut self, file_id: &str) {
-        self.remove_attachment_copy_with(file_id, true);
+        self.remove_attachment_copy_with(file_id, true, false);
         self.finish_blob_upload(file_id);
         self.attachment_events.push(serde_json::json!({"type": "file_evicted", "file_id": file_id}).to_string());
     }
@@ -530,12 +530,17 @@ impl P2PCore {
     /// Removes this device's copy of an attachment (`.enc`, decrypted cache,
     /// running transfer); the `files` row is the caller's business.
     pub(crate) fn remove_attachment_copy(&mut self, file_id: &str) {
-        self.remove_attachment_copy_with(file_id, false);
+        self.remove_attachment_copy_with(file_id, false, false);
+    }
+
+    /// Only the decrypted copies of an attachment; the `.enc` and the row stay (my hidden disappearing file, still served, see `expire_due`).
+    pub(crate) fn remove_attachment_plain(&mut self, file_id: &str) {
+        self.remove_attachment_copy_with(file_id, false, true);
     }
 
     /// `drop_row`: the `files` row is deleted too, before the `.enc`: a kill in between leaves an orphan `.enc`
     /// (swept at start), not a 'complete' row with no file.
-    fn remove_attachment_copy_with(&mut self, file_id: &str, drop_row: bool) {
+    fn remove_attachment_copy_with(&mut self, file_id: &str, drop_row: bool, keep_enc: bool) {
         let (file_name, sha): (Option<String>, Option<String>) = self.db.as_ref().and_then(|conn| {
             conn.query_row("SELECT file_name, sha256_hex FROM files WHERE file_id = ?1", params![file_id], |r| Ok((r.get(0)?, r.get(1)?))).ok()
         }).unwrap_or_default();
@@ -556,7 +561,7 @@ impl P2PCore {
                 let _ = conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id]);
             }
         }
-        if let Ok(enc_path) = self.enc_path_for(file_id) {
+        if let Some(enc_path) = self.enc_path_for(file_id).ok().filter(|_| !keep_enc) {
             let _ = std::fs::remove_file(enc_path);
         }
         if let Some(name) = file_name {

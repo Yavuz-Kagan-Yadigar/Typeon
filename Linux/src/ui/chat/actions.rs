@@ -10,6 +10,8 @@ impl ChatView {
         popover.connect_closed(|popover| popover.unparent());
 
         let mut actions: Vec<(&str, String, bool, Box<dyn Fn()>)> = Vec::new();
+        // Disappearing: nothing that copies it out (copy, reply quote, forward, save, add sticker).
+        let locked = entry.expire.is_some();
 
         if !entry.deleted && !entry.id.starts_with("legacy:") {
             let view = self.clone();
@@ -35,7 +37,7 @@ impl ChatView {
         }
 
         // The JPEG XL as it came; opening it gives a PNG.
-        if let Some(attachment) = entry.attachment.as_ref().filter(|a| !entry.deleted && !a.sticker && a.file_name.to_lowercase().ends_with(".jxl")) {
+        if let Some(attachment) = entry.attachment.as_ref().filter(|a| !locked && !entry.deleted && !a.sticker && a.file_name.to_lowercase().ends_with(".jxl")) {
             let view = self.clone();
             let (file_id, name) = (attachment.file_id.clone(), attachment.file_name.clone());
             actions.push((
@@ -56,7 +58,7 @@ impl ChatView {
         }
 
         // Stickers are not offered: sent as a file they would lose the sticker look.
-        if !entry.deleted && !entry.id.starts_with("legacy:") && !entry.attachment.as_ref().is_some_and(|a| a.sticker) {
+        if !locked && !entry.deleted && !entry.id.starts_with("legacy:") && !entry.attachment.as_ref().is_some_and(|a| a.sticker) {
             let view = self.clone();
             let entry = entry.clone();
             actions.push((
@@ -93,7 +95,7 @@ impl ChatView {
             ));
         }
 
-        if !entry.deleted && entry.attachment.is_none() {
+        if !locked && !entry.deleted && entry.attachment.is_none() {
             {
                 let view = self.clone();
                 let entry = entry.clone();
@@ -121,7 +123,7 @@ impl ChatView {
                 // Rust core path, including `purge_attachment_if_exists`, which Android also supports). Before, this condition also
                 // required `entry.attachment.is_none()`. So after an attachment was sent, the Linux user had NO way to delete it: a disk
                 // leak, and no way to take back a file sent by mistake.
-        if let Some(attachment) = entry.attachment.as_ref().filter(|a| a.sticker && !entry.mine && !entry.deleted) {
+        if let Some(attachment) = entry.attachment.as_ref().filter(|a| !locked && a.sticker && !entry.mine && !entry.deleted) {
             let view = self.clone();
             let file_id = attachment.file_id.clone();
             actions.push((
@@ -142,7 +144,8 @@ impl ChatView {
         }
 
         if entry.mine && !entry.deleted && !entry.id.starts_with("legacy:") {
-            if entry.attachment.is_none() {
+            // Editing would show the hidden text in the dialog.
+            if entry.attachment.is_none() && !locked {
                 let view = self.clone();
                 let entry = entry.clone();
                 actions.push((
@@ -250,8 +253,8 @@ impl ChatView {
                             None => {
                                 let text = util::forward_mark(&entry.text);
                                 match &target {
-                                    Conversation::Direct { fingerprint, .. } => core::send_message(fingerprint, &text, None, None).map(|_| ()),
-                                    Conversation::Group { group_id, .. } => core::send_group_message(group_id, &text, None, None, None, Vec::new()).map(|_| ()),
+                                    Conversation::Direct { fingerprint, .. } => core::send_message(fingerprint, &text, None, None, None).map(|_| ()),
+                                    Conversation::Group { group_id, .. } => core::send_group_message(group_id, &text, None, None, None, Vec::new(), None).map(|_| ()),
                                 }
                             }
                             Some(a) => {

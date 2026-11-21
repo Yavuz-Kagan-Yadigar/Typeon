@@ -181,6 +181,7 @@ use tuning::*;
 #[allow(unused_imports)] // only the debug-hooks export uses it from here
 use db::*;
 use recovery::*;
+use archive::first_expiry;
 pub use jni_exports::*;
 
 /// Every source file of the core. The tests scan them.

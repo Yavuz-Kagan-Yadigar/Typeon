@@ -132,6 +132,17 @@
         android:maxWidth="340dp"
         android:textSize="16sp" />
 
+    <!-- Disappearing message: time left, accent bold (SimpleChatAdapter.bindDisappear). -->
+    <TextView
+        android:id="@+id/txtExpire"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:textColor="?attr/colorPrimary"
+        android:visibility="gone" />
+
         <!-- Attachment bubble for a file, photo, video or audio. If item.attachment is set, this is
          shown instead of txtBubbleText (see SimpleChatAdapter.onBindViewHolder). One flexible
          layout, instead of four separate view types. The small image preview appears only for
@@ -400,7 +411,7 @@
                 <!-- Seen indicator: shown only below the most recent seen message (see
              SimpleChatAdapter.applySeen; all earlier messages count as seen implicitly). The
              same row serves 1:1 (one avatar) and groups (the avatars of several viewers). In
-             groups, more than 3 viewers are summarised as +N. -->
+             groups, only the 5 latest viewers show; the rest is +N. A tap lists who saw it, when. -->
         <LinearLayout
             android:id="@+id/rowSeenBy"
             android:layout_width="wrap_content"
@@ -408,6 +419,7 @@
             android:layout_marginTop="2dp"
             android:orientation="horizontal"
             android:gravity="center_vertical"
+            android:background="?attr/selectableItemBackground"
             android:visibility="gone">
 
             <ImageView
@@ -427,6 +439,22 @@
 
             <ImageView
                 android:id="@+id/imgSeenBy3"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginEnd="2dp"
+                android:visibility="gone"
+                android:contentDescription="@null" />
+
+            <ImageView
+                android:id="@+id/imgSeenBy4"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:layout_marginEnd="2dp"
+                android:visibility="gone"
+                android:contentDescription="@null" />
+
+            <ImageView
+                android:id="@+id/imgSeenBy5"
                 android:layout_width="14dp"
                 android:layout_height="14dp"
                 android:layout_marginEnd="2dp"

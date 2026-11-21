@@ -423,6 +423,7 @@
     <string name="action_react">Tepki ver</string>
     <string name="action_remove_reaction">Tepkimi kaldır</string>
     <string name="title_reactions">Tepkiler</string>
+    <string name="title_seen_by">Görenler</string>
     <string name="title_attachment_caption">Açıklama ekle</string>
     <string name="hint_attachment_caption">Açıklama (isteğe bağlı)</string>
     <string name="attachment_hi_res">Kayıpsız</string>
@@ -518,9 +519,9 @@
     <string name="link_device_code_shown">Karşılaştırma kodu: %1$s\nOnaylamadan önce diğer cihazınız aynı kodu gösterir.</string>
     <string name="link_device_code_check">Karşılaştırma kodu: %1$s\nYalnızca yeni cihaz aynı kodu gösteriyorsa onaylayın.</string>
     <string name="notif_new_message">Yeni mesaj</string>
-    <string name="title_scan_qr">QR Tara</string>
     <string name="notif_new_drawing">Yeni çizim</string>
     <string name="notif_new_drawing_from">%1$s sohbetinden yeni çizim</string>
+    <string name="title_scan_qr">QR Tara</string>
     <string name="tor_off_no_network">Tor kapalı: Tor olmadan ağ başlamaz.</string>
     <string name="msg_pairing_contact_limit">Eşleşme başarısız: kişi listeniz dolu.</string>
     <string name="notif_fg_text">Güvenli P2P bağlantısı etkin</string>
@@ -564,7 +565,6 @@
     <string name="msg_sticker_importing">Çıkartmalar aktarılıyor… %1$d/%2$d</string>
     <string name="action_sticker_favorite">Favorilere ekle</string>
     <string name="action_sticker_unfavorite">Favoriden çıkar</string>
-    <string name="msg_sticker_imported">%1$d çıkartma eklendi</string>
     <string name="action_sticker_folder_create">Yeni klasör</string>
     <string name="action_sticker_add_to_folder">Klasöre ekle</string>
     <string name="action_sticker_remove_from_folder">Klasörden çıkar</string>
@@ -573,6 +573,7 @@
     <string name="hint_sticker_folder_name">Klasör adı</string>
     <string name="msg_confirm_delete_sticker_folder">\"%1$s\" klasörü silinsin mi? İçindeki çıkartmalar kalır.</string>
     <string name="msg_sticker_added_to_folder">%1$s klasörüne eklendi</string>
+    <string name="msg_sticker_imported">%1$d çıkartma eklendi</string>
     <string name="storage_voice">Sesli mesajlar</string>
     <string name="storage_stickers">Çıkartmalar</string>
     <string name="storage_prune_button">Eski mesajları sil</string>
@@ -606,4 +607,25 @@
     <string name="update_state_error">Son kontrol başarısız: %1$s</string>
     <string name="update_ready_title">Güncelleme hazır</string>
     <string name="update_ready_text">Typeon %1$s kurmak için dokun</string>
+    <!-- Kaybolan mesajlar (ui/Disappear.kt). -->
+    <string name="disappear_title">Kaybolan mesajlar</string>
+    <string name="disappear_hint">Bu sohbette gönderdiğin her şey okunduktan sonra silinir. Kopyalanamaz, iletilemez, kaydedilemez; Android\'de ekran görüntüsü engellenir.</string>
+    <string name="disappear_turn_on">Aç</string>
+    <string name="disappear_change">Değiştir</string>
+    <string name="disappear_turn_off">Kapat</string>
+    <string name="disappear_cannot_open">Bu türde kaybolan dosya açılamaz: yalnızca fotoğraf ve videolar gösterilir</string>
+    <string name="disappear_notification">Kaybolan mesaj</string>
+    <string name="disappear_left_s">⏱ %1$d sn</string>
+    <string name="disappear_left_min">⏱ %1$d dk</string>
+    <string name="disappear_left_h">⏱ %1$d sa</string>
+    <string name="disappear_left_d">⏱ %1$d gün</string>
+    <string-array name="disappear_stop_labels">
+        <item>30 saniye</item>
+        <item>5 dakika</item>
+        <item>1 saat</item>
+        <item>8 saat</item>
+        <item>1 gün</item>
+        <item>1 hafta</item>
+        <item>4 hafta</item>
+    </string-array>
 </resources>

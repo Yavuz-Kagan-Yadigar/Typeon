@@ -202,6 +202,13 @@ pub struct ArchivedMessage {
     /// column).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mentions_me: bool,
+    /// Disappearing message: the timer in seconds (see `MessageContent::Text.expire_secs`). Local only: such a row never goes to the server archive
+    /// or into a history answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_secs: Option<u32>,
+    /// When the row goes, local clock (ms). An unread received row holds the unread cap here; reading it lowers the value (see `start_expiry`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_at_ms: Option<u64>,
 }
 
 /// Summary for the Groups tab list and detail view. (`list_groups` did not exist before, so the Groups tab never showed a real group list.)
@@ -256,6 +263,11 @@ pub struct AttachmentSummary {
     /// My own file only: the send status of its offer ("pending" | "sent" | "error" | "delivered"); None when not known.
     #[serde(default)]
     pub send_status: Option<String>,
+    /// Disappearing attachment: timer seconds and when it goes (local clock, ms). See `ArchivedMessage.expire_secs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expire_at_ms: Option<u64>,
 }
 
 /// In-memory state of an ongoing download (see `download_file`, `request_next_chunk` and the attachments.rs module note). Chunks are ALWAYS requested in

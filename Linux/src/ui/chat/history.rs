@@ -34,6 +34,7 @@ impl ChatView {
                     view.messages.remove(&child);
                 }
                 view.bubbles.borrow_mut().clear();
+                view.seen_shown.borrow_mut().take();
                 view.order.borrow_mut().clear();
                 view.search_lower.borrow_mut().clear();
                 view.search_matches.borrow_mut().clear();
@@ -44,8 +45,12 @@ impl ChatView {
 
                 let mut entries = page.entries;
                 entries.sort_by_key(|entry| entry.order_key);
+                let seen = newest_seen(&entries);
                 for entry in entries {
                     view.insert_entry(entry, false);
+                }
+                if let Some((id, viewers)) = seen {
+                    view.show_seen_by(&id, viewers);
                 }
                 view.refresh_day_separators();
                 if at_bottom {
@@ -186,6 +191,7 @@ impl ChatView {
                     .as_ref()
                     .and_then(|row| row.compute_bounds(&view.messages))
                     .map(|bounds| adjustment.value() - bounds.y() as f64);
+                let seen = newest_seen(&older);
                 for entry in older {
                     view.insert_entry(entry, false);
                 }
@@ -193,6 +199,10 @@ impl ChatView {
                 // reader), so the view settles at ~MAX_BUBBLES while the page
                 // just loaded stays.
                 view.trim_newest();
+                // Shown only when no newer seen message is on screen.
+                if let Some((id, viewers)) = seen {
+                    view.show_seen_by(&id, viewers);
+                }
                 view.refresh_day_separators();
                 let messages = view.messages.clone();
                 glib::idle_add_local_once(move || {
@@ -315,17 +325,17 @@ pub(super) fn fetch_page(
             } else {
                 message.timestamp
             },
-                        // A missing status is an archive row from before the column existed. Treating it as delivered is the safe reading.
-                        // Ticks describe delivery of MY messages. A received one has none. "delivered" is the core's end-to-end Ack, a
-                        // state between "sent" and "seen" (see `format_meta`).
+            // Delivery of MY messages only; a row without the column counts as sent (see `format_meta`).
             status: mine.then(|| message.status.clone().unwrap_or_else(|| "sent".to_string())),
             reply_preview: message.reply_to_preview.clone(),
             reply_sender: message.reply_to_sender_identity_id.clone(),
+            reply_id: message.reply_to_message_id.clone(),
             deleted: message.is_deleted,
             edited: message.is_edited,
             attachment: None,
-            seen: mine && !message.seen_by.is_empty(),
+            seen_by: if mine { core::parse_seen_by(message.seen_by.clone()) } else { Vec::new() },
             reactions: message.reactions.clone(),
+            expire: message.expire_secs.zip(message.expire_at_ms),
         }));
     }
 
@@ -394,6 +404,15 @@ pub(super) fn sent_attachment_entry(conversation: &Conversation, id: &str) -> Op
     Some(attachment_entry(row, &peer))
 }
 
+/// My newest message in a page that someone has seen (pages are sorted).
+fn newest_seen(entries: &[Entry]) -> Option<(String, Vec<core::SeenEntry>)> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.mine && !entry.deleted && !entry.seen_by.is_empty())
+        .map(|entry| (entry.id.clone(), entry.seen_by.clone()))
+}
+
 /// One archive attachment row as a timeline entry — the core keeps the files
 /// in their own table, but the user sees them inside the conversation.
 pub(super) fn attachment_entry(attachment: &core::AttachmentSummary, peer_fingerprint: &str) -> Entry {
@@ -415,6 +434,7 @@ pub(super) fn attachment_entry(attachment: &core::AttachmentSummary, peer_finger
         status: None,
         reply_preview: attachment.reply_to_preview.clone().filter(|p| !p.is_empty()),
         reply_sender: attachment.reply_to_sender_identity_id.clone(),
+        reply_id: attachment.reply_to_message_id.clone(),
         deleted: false,
         edited: false,
         attachment: Some(Attachment {
@@ -429,9 +449,8 @@ pub(super) fn attachment_entry(attachment: &core::AttachmentSummary, peer_finger
             duration_ms: attachment.duration_ms,
             sticker: attachment.sticker,
         }),
-                // Attachments have no persistent "seen" source (see the `Entry.seen` note: the `message_seen` table is keyed on
-                // `messages.message_id`, not on `files`). Same as before: attachments never show "seen".
-        seen: false,
+        seen_by: Vec::new(),
         reactions: String::new(),
+        expire: attachment.expire_secs.zip(attachment.expire_at_ms),
     }
 }

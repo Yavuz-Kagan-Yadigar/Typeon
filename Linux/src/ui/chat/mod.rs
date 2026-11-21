@@ -35,12 +35,15 @@ mod search;
 mod reactions;
 mod events;
 mod group;
+mod disappear;
 use header::*;
 use message_list::*;
 use attachments::*;
 use composer::*;
 use search::*;
 use group::*;
+use disappear::*;
+pub(crate) use disappear::DISAPPEAR_PULSE_STEPS;
 
 /// How many messages (texts and files together) a page of history holds,
 /// matching the Android chat.
@@ -78,6 +81,9 @@ const SHADE_STEPS: i32 = 24;
 const SEAM_NOTCH_SIZE: i32 = 12;
 /// Diameter of the notch circle, in px. It is FIXED. It does not grow with the real width difference. It is a cheap
 /// visual hint, not exact geometry.
+
+/// Seen-by avatars shown under a message; more viewers show as "+N".
+const SEEN_AVATARS: usize = 5;
 
 /// Idle time after the last keystroke before we say we stopped typing.
 const TYPING_TIMEOUT_MS: u64 = 4_000;
@@ -118,19 +124,20 @@ struct Entry {
     status: Option<String>,
     reply_preview: Option<String>,
     reply_sender: Option<String>,
+    /// Id of the replied-to message: a click on the quote scrolls there.
+    reply_id: Option<String>,
     deleted: bool,
     /// Rendered as an "(edited)" suffix. Comes from the archive, so it
     /// survives a reload instead of only existing while the edit event is
     /// fresh on screen.
     edited: bool,
     attachment: Option<Attachment>,
-        /// Read receipt state of this message ("seen"). It used to be a field that was always `false` at build time. So the
-        /// seen state came only from a live event while the chat was open, and closing and reopening the chat reset the ticks.
-        /// Now the value from the core's persistent table (`ArchivedMessage.seen_by`) is carried here, when it is non-empty
-        /// (see `load_page`).
-    seen: bool,
+    /// Who saw this message, from the archive row (`ArchivedMessage.seen_by`).
+    seen_by: Vec<core::SeenEntry>,
     /// Reaction summary from the core ("😂2 👍"), empty when none.
     reactions: String,
+    /// Disappearing message: (timer seconds, when it goes on this device's clock in ms). See `disappear.rs`.
+    expire: Option<(u32, u64)>,
 }
 
 /// The widgets of one rendered bubble that later events may need to touch.
@@ -164,9 +171,8 @@ struct Bubble {
     attachment_widgets: Option<gtk::Box>,
     order_key: u64,
     mine: bool,
-    /// Set once a `seen` receipt arrives, so a later `status` event cannot
-    /// downgrade the tick back to "sent".
-    seen: Cell<bool>,
+    /// Seen-by avatars under my newest seen message (see `show_seen_by`).
+    seen_row: gtk::Box,
     /// Screen-space shade step currently applied (`shade-N`), -1 = none yet.
     shade: Cell<i32>,
     /// Concave fillets drawn in this bubble's row, with their colour role;
@@ -182,6 +188,8 @@ struct Bubble {
     /// to the time — matching Android's `txtEditedLabel`, which sits beside
     /// the timestamp rather than appended onto the message text itself.
     edited: Cell<bool>,
+    /// Disappearing message: the accent "time left" line under the bubble.
+    expire_label: Option<gtk::Label>,
     /// The message as it is now (live edits, deletes, reactions, status
     /// applied): the context menu acts on this, not on the build-time copy.
     entry: RefCell<Entry>,
@@ -260,6 +268,10 @@ struct ChatView {
     shade_pending: Cell<bool>,
         /// See `send_seen`. Whether a debounced read boundary is pending.
     watermark_pending: Cell<bool>,
+    /// The disappearing-message ticker runs (see `disappear.rs`).
+    disappear_ticking: Cell<bool>,
+    /// This chat's disappearing mode in seconds, 0 = off (held Send button, see `disappear.rs`).
+    disappear_mode: Cell<u32>,
     /// Ascending by `order_key`; mirrors the widget order so an out-of-order
     /// arrival can be slotted in without walking the widget tree.
     order: RefCell<Vec<(u64, String)>>,
@@ -317,6 +329,8 @@ struct ChatView {
     search_index: Cell<usize>,
     /// Group read receipts waiting for the 700 ms flush (device, message id).
     seen_batch: RefCell<Vec<(String, String)>>,
+    /// The bubble whose `seen_row` is showing: only my newest seen message.
+    seen_shown: RefCell<Option<String>>,
     /// Lower-cased bubble text per id for `run_search`; cleared whenever a
     /// bubble's text can change (edit, delete, refresh, reload).
     search_lower: RefCell<HashMap<String, String>>,
@@ -360,6 +374,7 @@ impl ChatView {
         self.search_lower.borrow_mut().clear();
         self.search_matches.borrow_mut().clear();
         self.seen_deferred.borrow_mut().clear();
+        self.seen_shown.borrow_mut().take();
     }
 
     fn is_group(&self) -> bool {
@@ -476,6 +491,8 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         seen_deferred: RefCell::new(Vec::new()),
         read_deferred: Cell::new(false),
         watermark_pending: Cell::new(false),
+        disappear_ticking: Cell::new(false),
+        disappear_mode: Cell::new(0),
         shade_pending: Cell::new(false),
         order: RefCell::new(Vec::new()),
         subtitle: subtitle.clone(),
@@ -502,6 +519,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         search_index: Cell::new(0),
         search_lower: RefCell::new(HashMap::new()),
         seen_batch: RefCell::new(Vec::new()),
+        seen_shown: RefCell::new(None),
         whiteboard: match conversation {
             Conversation::Direct { fingerprint, .. } => crate::ui::whiteboard::Board::new(&main.app, fingerprint, ""),
             Conversation::Group { group_id, .. } => crate::ui::whiteboard::Board::new(&main.app, "", group_id),
@@ -562,7 +580,6 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         .orientation(gtk::Orientation::Vertical)
         .build();
     page_content.append(&search_bar);
-    page_content.append(view.whiteboard.panel());
     page_content.append(&scroller_overlay);
     page_content.append(&typing_indicator);
     reply_island.append(&reply_bar);
@@ -699,6 +716,8 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
             // The user is back (focus, unlock, shown from the tray): the
             // receipts held while away go out now.
             view.flush_deferred_reads();
+            // Back on screen with disappearing bubbles: their ticker stopped while hidden.
+            view.start_disappear_tick();
             glib::ControlFlow::Continue
         });
     }

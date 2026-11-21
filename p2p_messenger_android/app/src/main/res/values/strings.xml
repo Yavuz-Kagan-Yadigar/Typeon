@@ -458,6 +458,7 @@
     <string name="action_react">React</string>
     <string name="action_remove_reaction">Remove my reaction</string>
     <string name="title_reactions">Reactions</string>
+    <string name="title_seen_by">Seen by</string>
     <string name="title_attachment_caption">Add a caption</string>
     <string name="hint_attachment_caption">Caption (optional)</string>
     <string name="attachment_hi_res">Lossless</string>
@@ -553,9 +554,9 @@
     <string name="link_device_code_shown">Compare code: %1$s\nYour other device shows the same code before you approve.</string>
     <string name="link_device_code_check">Compare code: %1$s\nApprove only if the new device shows the same code.</string>
     <string name="notif_new_message">New message</string>
-    <string name="title_scan_qr">Scan QR</string>
     <string name="notif_new_drawing">New drawing</string>
     <string name="notif_new_drawing_from">New drawing from %1$s</string>
+    <string name="title_scan_qr">Scan QR</string>
     <string name="tor_off_no_network">Tor is off: the network will not start without Tor.</string>
     <string name="msg_pairing_contact_limit">Pairing failed: your contact list is full.</string>
     <string name="notif_fg_text">Secure P2P connection active</string>
@@ -599,7 +600,6 @@
     <string name="msg_sticker_importing">Importing stickers… %1$d/%2$d</string>
     <string name="action_sticker_favorite">Favorite</string>
     <string name="action_sticker_unfavorite">Unfavorite</string>
-    <string name="msg_sticker_imported">Added %1$d sticker(s)</string>
     <string name="action_sticker_folder_create">New folder</string>
     <string name="action_sticker_add_to_folder">Add to folder</string>
     <string name="action_sticker_remove_from_folder">Remove from folder</string>
@@ -608,6 +608,7 @@
     <string name="hint_sticker_folder_name">Folder name</string>
     <string name="msg_confirm_delete_sticker_folder">Delete the folder \"%1$s\"? Its stickers stay.</string>
     <string name="msg_sticker_added_to_folder">Added to %1$s</string>
+    <string name="msg_sticker_imported">Added %1$d sticker(s)</string>
     <string name="storage_voice">Voice messages</string>
     <string name="storage_stickers">Stickers</string>
     <string name="storage_prune_button">Delete older messages</string>
@@ -641,4 +642,25 @@
     <string name="update_state_error">Last check failed: %1$s</string>
     <string name="update_ready_title">Update ready</string>
     <string name="update_ready_text">Tap to install Typeon %1$s</string>
+    <!-- Disappearing messages (ui/Disappear.kt). -->
+    <string name="disappear_title">Disappearing messages</string>
+    <string name="disappear_hint">Everything you send in this chat disappears after it is read. It can\'t be copied, forwarded or saved, and screenshots are blocked on Android.</string>
+    <string name="disappear_turn_on">Turn on</string>
+    <string name="disappear_change">Change</string>
+    <string name="disappear_turn_off">Turn off</string>
+    <string name="disappear_cannot_open">A disappearing file of this type can\'t be opened: only pictures and videos are shown</string>
+    <string name="disappear_notification">Disappearing message</string>
+    <string name="disappear_left_s">⏱ %1$d s</string>
+    <string name="disappear_left_min">⏱ %1$d min</string>
+    <string name="disappear_left_h">⏱ %1$d h</string>
+    <string name="disappear_left_d">⏱ %1$d days</string>
+    <string-array name="disappear_stop_labels">
+        <item>30 seconds</item>
+        <item>5 minutes</item>
+        <item>1 hour</item>
+        <item>8 hours</item>
+        <item>1 day</item>
+        <item>1 week</item>
+        <item>4 weeks</item>
+    </string-array>
 </resources>

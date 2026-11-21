@@ -616,6 +616,14 @@ pub struct MessagePacketHeader {
 /// the dedup maps and the DB.
 pub const MAX_HEADER_ID_LEN: usize = 256;
 
+/// Longest disappearing-message timer (4 weeks). Also the cap on an unread disappearing message.
+pub const DISAPPEAR_MAX_SECS: u32 = 4 * 7 * 24 * 3600;
+
+/// A peer's `expire_secs`, kept only when it is in `1..=DISAPPEAR_MAX_SECS`.
+pub fn disappear_secs(v: Option<u32>) -> Option<u32> {
+    v.filter(|s| (1..=DISAPPEAR_MAX_SECS).contains(s))
+}
+
 /// A `MessagePacketHeader` together with the exact CBOR bytes it travels as. The
 /// packet signature and the ratchet AEAD (associated data) cover these bytes and
 /// never a re-encoding. A receiver therefore checks what the sender actually made,
@@ -794,6 +802,12 @@ pub enum MessageContent {
         /// is listed. The text itself is not parsed.
         #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_256")]
         mentions: Vec<String>,
+        /// Disappearing message: seconds the message stays after it is read. Each device
+        /// counts from its OWN read moment on its own clock (the sender's copy from the
+        /// send), so delivery delay and clock skew never shorten the viewing time. The
+        /// receiver clamps it to `1..=DISAPPEAR_MAX_SECS` (see `disappear_secs`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expire_secs: Option<u32>,
     },
     /// For group messages, `target_message_id` in Edit and Delete is actually the
     /// `Text.group_message_local_id`. The pairwise fan-out copies carry a different
@@ -969,6 +983,9 @@ pub enum MessageContent {
         /// local copy instead of downloading again.
         #[serde(default)]
         sticker_origin: Option<String>,
+        /// See `Text.expire_secs`: a disappearing attachment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expire_secs: Option<u32>,
     },
     /// Typing indicator ("is typing"). It is deliberately not archived, and it does not go
     /// into the retry queue (`awaiting_confirmation`). Retrying an indicator that goes stale
@@ -1628,6 +1645,9 @@ pub enum SiblingEchoBody {
         reply_to_preview: Option<String>,
         #[serde(default)]
         reply_to_sender_identity_id: Option<String>,
+        /// See `MessageContent::Text.expire_secs`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expire_secs: Option<u32>,
     },
     Edit { target_message_id: String, new_text: String, #[serde(default)] edited_at_ms: u64 },
     Delete { target_message_id: String },
@@ -1847,7 +1867,7 @@ mod parse_limit_tests {
             group_id: None, file_id: "f".into(), file_name: "n".into(), mime_type: "m".into(), total_size: 1,
             file_key: [0; 32], sha256_hex: String::new(), preview_jpeg: None, duration_ms: None,
             caption: String::new(), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, chunk_size: None, chunk_hashes: Vec::new(), sticker: false, sticker_origin: None,
+            reply_to_sender_identity_id: None, chunk_size: None, chunk_hashes: Vec::new(), sticker: false, sticker_origin: None, expire_secs: None,
         };
         let echo = |inner| MessageContent::SiblingEcho {
             conversation_identity_id: None, group_id: None,
@@ -1975,7 +1995,7 @@ mod signing_input_tests {
         let text = |n: usize| MessageContent::Text {
             group_id: Some("g".into()), text: String::new(), group_message_local_id: None, sent_at_ms: 0,
             reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None,
-            mentions: vec![String::new(); n],
+            mentions: vec![String::new(); n], expire_secs: None,
         };
         assert!(MessageContent::from_cbor(&to_cbor(&text(256)).unwrap()).is_ok());
         assert!(MessageContent::from_cbor(&to_cbor(&text(257)).unwrap()).is_err());

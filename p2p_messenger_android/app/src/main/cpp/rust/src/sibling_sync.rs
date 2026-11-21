@@ -563,6 +563,7 @@ impl P2PCore {
     /// `group_id`: the group chat (empty for 1:1).
     pub(crate) fn sync_read_state(&mut self, peer_fp: &str, group_id: &str, read_at_ms: u64) {
         let is_group = !group_id.is_empty();
+        self.start_expiry_on_screen(peer_fp, group_id);
         // the reader compares the boundary with the SENDER's clock
         // (`sent_at_ms` of its own messages). With our clock behind theirs
         // their newest messages never counted as seen; the newest
@@ -1294,7 +1295,7 @@ impl P2PCore {
             "SELECT file_id, direction, file_name, mime_type, total_size, sha256_hex, encrypted_file_key, key_nonce,
                     preview_jpeg, duration_ms, chunk_size, caption, reply_to_message_id, reply_to_preview,
                     reply_to_sender_identity_id, sticker, sticker_origin, chunk_hashes, created_at, sender_identity_id
-             FROM files WHERE status = 'complete' AND {} AND created_at >= {} AND created_at < {}
+             FROM files WHERE status = 'complete' AND expire_secs IS NULL AND {} AND created_at >= {} AND created_at < {}
              ORDER BY created_at DESC LIMIT {}",
             chat, lo, hi, limit
         );
@@ -1355,6 +1356,7 @@ impl P2PCore {
                     reply_to_sender_identity_id,
                     sticker: sticker.unwrap_or(false),
                     sticker_origin,
+                    expire_secs: None,
                 })),
                 reactions,
             });

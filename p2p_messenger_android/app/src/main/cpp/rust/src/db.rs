@@ -490,6 +490,10 @@ impl P2PCore {
         migrate("ALTER TABLE messages ADD COLUMN author_proof TEXT")?;
         // Group rows: my identity id was in the sender's @mention list.
         migrate("ALTER TABLE messages ADD COLUMN mentions_me INTEGER NOT NULL DEFAULT 0")?;
+        // Disappearing messages: the timer (seconds) and when this row goes (local clock, ms). See `Core::expire_due`.
+        migrate("ALTER TABLE messages ADD COLUMN expire_secs INTEGER")?;
+        migrate("ALTER TABLE messages ADD COLUMN expire_at_ms INTEGER")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_messages_expire ON messages(expire_at_ms) WHERE expire_at_ms IS NOT NULL")?;
         // one row per message id (per group; 1:1 rows share the scope
         // ''). Once, before the index: a deleted copy wins (the user's delete),
         // then an edited one, one with an author proof, then the earliest.
@@ -533,6 +537,11 @@ impl P2PCore {
         migrate("UPDATE stickers SET origin_id = 'jxl:' || id WHERE origin_id IS NULL")?;
         migrate("CREATE UNIQUE INDEX IF NOT EXISTS idx_stickers_origin ON stickers(origin_id)")?;
         migrate("ALTER TABLE files ADD COLUMN sticker_origin TEXT")?;
+        // Disappearing attachments, as `messages`. `expire_secs = 0`: my own sent file, hidden, its `.enc` kept until `expire_at_ms` so a
+        // receiver still offline can download it (see `Core::expire_due`).
+        migrate("ALTER TABLE files ADD COLUMN expire_secs INTEGER")?;
+        migrate("ALTER TABLE files ADD COLUMN expire_at_ms INTEGER")?;
+        migrate("CREATE INDEX IF NOT EXISTS idx_files_expire ON files(expire_at_ms) WHERE expire_at_ms IS NOT NULL")?;
         migrate("CREATE INDEX IF NOT EXISTS idx_files_sticker_origin ON files(sticker_origin)")?;
         // `FileOffer.chunk_hashes`: each received chunk is checked against it.
         migrate("ALTER TABLE files ADD COLUMN chunk_hashes BLOB")?;

@@ -49,6 +49,8 @@ impl P2PCore {
             }
         }
         self.call_sweep();
+        // Disappearing messages whose time is up. The open chat screens slide them out on their own clock; this clears the archive.
+        self.expire_due();
         // Prerequisite for reachability: the identity may have been created after the network layer started. See `ensure_own_mailbox_subscription`.
         self.ensure_own_mailbox_subscription();
         // See `pairing_mailbox_subs`. Drop pairing subscriptions whose ratchet is established or whose TTL has passed.

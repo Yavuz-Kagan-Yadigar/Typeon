@@ -162,6 +162,8 @@ class ChatActivity : AppCompatActivity() {
     /** The send key is no longer a `Button` with a text glyph. It is a circular `ImageButton` that uses the app's cloud logo as a mask
      *  (see activity_chat.xml btnSend and drawable/ic_send_cloud). */
     internal lateinit var btnSend: ImageButton
+    /** This chat's disappearing mode in seconds, 0 = off (Send held for 3 s, see ui/Disappear.kt). */
+    internal var disappearSecs = 0
     /** Until a ratchet session exists, the send, attach, camera and voice buttons and `btnSend` are disabled (see `sessionPollRunnable` and `updateComposerLock`).
      *  The text box stays editable, and the banner states the reason. */
     private lateinit var btnAttach: ImageButton
@@ -255,7 +257,7 @@ class ChatActivity : AppCompatActivity() {
 
     internal val stickerPicker = StickerPicker(this, { id, quote -> P2PLib.sendSticker(peerDeviceFingerprint, id, quote?.id ?: "", quote?.preview ?: "") }, ::takeQuote) { item ->
         item.replyToSenderLabel = resolveReplyLabel(item.replyToMessageId)
-        adapter.addMessage(item)
+        adapter.addMessage(Disappear.stamp(item, disappearSecs))
         scrollToBottomNow()
     }
 
@@ -449,11 +451,21 @@ class ChatActivity : AppCompatActivity() {
 
         adapter = SimpleChatAdapter(localMessages)
         adapter.onItemLongPress = { item -> showEditDeleteDialog(item) }
+        adapter.onDisappearStarted = {
+            val peer = peerDeviceFingerprint
+            Thread { try { P2PLib.startDisappearCountdown(peer, "") } catch (e: Throwable) { } }.start()
+        }
+        // A disappearing message on screen: screenshots, screen recording and the recents thumbnail come out black.
+        adapter.onDisappearPresent = { on ->
+            if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
         selection = MessageSelection(this, adapter, { saveAttachmentToDownloads(it) }) { P2PLib.deleteMessage(peerDeviceFingerprint, it) }
         adapter.onAttachmentClick = { item -> onAttachmentClicked(item) }
         adapter.onAttachmentLongClick = { item -> onAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
         adapter.onItemDoubleTap = { item, bubble -> showReactionPicker(item, bubble) }
+        adapter.onSeenByClick = { item -> showSeenByDialog(item.messageId) }
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
         adapter.peerName = { txtToolbarTitle.text?.toString() }
         stickerPicker.provideBubbleImages(adapter)
@@ -527,6 +539,23 @@ class ChatActivity : AppCompatActivity() {
                 input.text.clear()
                 sendNewMessage(text)
             }
+        }
+        // Held for 3 s: the chat's disappearing mode (ui/Disappear.kt). Turned on with text typed, the text goes out at once.
+        Disappear.attachHold(btnSend, { disappearSecs }) { secs ->
+            disappearSecs = secs
+            Disappear.showMode(btnSend, secs)
+            val peer = peerDeviceFingerprint
+            lifecycleScope.launch(Dispatchers.IO) { try { P2PLib.setDisappearMode(peer, "", secs.toLong()) } catch (e: Throwable) { } }
+            val text = input.text.toString()
+            if (secs > 0 && text.isNotBlank() && ensureHandshakeReadyOrWarn()) {
+                input.text.clear()
+                sendNewMessage(text)
+            }
+        }
+        lifecycleScope.launch {
+            val peer = peerDeviceFingerprint
+            disappearSecs = withContext(Dispatchers.IO) { try { P2PLib.getDisappearMode(peer, "").toInt() } catch (e: Throwable) { 0 } }
+            Disappear.showMode(btnSend, disappearSecs)
         }
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -757,6 +786,7 @@ class ChatActivity : AppCompatActivity() {
         // Tell the other side the 'read up to here' boundary as soon as the chat opens. Doing it only in onPause, and only to sibling devices,
         // meant messages delivered by store-and-forward and loaded as history never got a receipt.
         if (resumedUnlocked) scheduleReadWatermark()
+        adapter.setOnScreen(resumedUnlocked)
     }
 
     internal val readWatermarkHandler = Handler(Looper.getMainLooper())
@@ -779,6 +809,7 @@ class ChatActivity : AppCompatActivity() {
             syncReadStateAsync()
         }
         resumedUnlocked = false
+        adapter.setOnScreen(false)
         sessionPollHandler.removeCallbacks(sessionPollRunnable)
         ownStatusPollHandler.removeCallbacks(ownStatusPollRunnable)
         peerStatusDot.cancelPulse()

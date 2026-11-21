@@ -70,10 +70,40 @@ impl ChatView {
         let bubbles = self.bubbles.borrow();
         let Some(bubble) = bubbles.get(&id) else { return };
         bubble.root.add_css_class("bubble-match");
+        self.scroll_into_view(&bubble.root);
+    }
 
-        // Scroll the hit into view. Bounds are relative to the message box, so
-        // this has to wait for a layout pass after any highlight reflow.
+    /// A click on `widget` (a quote) jumps to message `target`.
+    pub(super) fn click_to_scroll(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>, target: String) {
+        let click = gtk::GestureClick::new();
+        let view = Rc::downgrade(self);
+        click.connect_released(move |_, _, _, _| {
+            if let Some(view) = view.upgrade() {
+                view.scroll_to_message(&target);
+            }
+        });
+        widget.add_controller(click);
+        widget.set_cursor_from_name(Some("pointer"));
+    }
+
+    /// Scrolls to a quoted message and flashes it, like the phone.
+    pub(super) fn scroll_to_message(&self, id: &str) {
+        let bubbles = self.bubbles.borrow();
+        let Some(bubble) = bubbles.get(id) else {
+            self.app().toast("Original message isn't loaded. Scroll up to find it.");
+            return;
+        };
         let root = bubble.root.clone();
+        root.add_css_class("bubble-match");
+        self.follow_bottom.set(false);
+        self.scroll_into_view(&root);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || root.remove_css_class("bubble-match"));
+    }
+
+    fn scroll_into_view(&self, root: &gtk::Widget) {
+        // Bounds are relative to the message box, so this has to wait for a
+        // layout pass after any highlight reflow.
+        let root = root.clone();
         let messages = self.messages.clone();
         let adjustment = self.scroller.vadjustment();
         glib::idle_add_local_once(move || {

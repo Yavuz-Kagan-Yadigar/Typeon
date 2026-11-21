@@ -391,7 +391,21 @@ impl App {
             "message" => {
                 let peer = event.string("peer");
                 if !peer.is_empty() {
-                    self.notify_if_away(&peer, &self.contact_name(&peer), &event.string("text"));
+                    self.notify_if_away(&peer, &self.contact_name(&peer), &shown_text(event, event.string("text")));
+                }
+            }
+            // A new drawing (the core sets "new" only for someone else's strokes, not erases).
+            "whiteboard" if event.flag("new") => {
+                let (conv, name) = match event.optional("group_id") {
+                    Some(gid) => (format!("group:{}", gid), self.group_name(&gid)),
+                    None => {
+                        let peer = event.string("peer");
+                        let name = self.contact_name(&peer);
+                        (peer, name)
+                    }
+                };
+                if !conv.is_empty() {
+                    self.notify_if_away_text(&conv, &format!("wb:{}", conv), "Typeon", &format!("New drawing from {}", name), "New drawing", gio::NotificationPriority::Normal);
                 }
             }
             "group_message" => {
@@ -401,9 +415,9 @@ impl App {
                     let sender = self.identity_name(&event.string("sender_identity_id"));
                     if event.value.get("mentions_me").and_then(|v| v.as_bool()).unwrap_or(false) {
                         let title = format!("{} mentioned you in {}", sender, title);
-                        self.notify_if_away_as(&format!("group:{}", group_id), &title, &event.string("text"), true);
+                        self.notify_if_away_as(&format!("group:{}", group_id), &title, &shown_text(event, event.string("text")), true);
                     } else {
-                        let body = format!("{}: {}", sender, event.string("text"));
+                        let body = format!("{}: {}", sender, shown_text(event, event.string("text")));
                         self.notify_if_away(&format!("group:{}", group_id), &title, &body);
                     }
                 }
@@ -411,11 +425,11 @@ impl App {
             // Attachments notify too — a photo arriving with no alert at all
             // was a real gap on Android before this was added there.
             "file_offer" => {
-                let label = util::attachment_label(
+                let label = shown_text(event, util::attachment_label(
                     &event.string("mime_type"),
                     &event.string("file_name"),
                     event.flag("sticker"),
-                );
+                ));
                 match event.optional("group_id") {
                     Some(group_id) => {
                         let title = self.group_name(&group_id);
@@ -533,37 +547,32 @@ impl App {
     /// `mention`: a group message that @mentions me, shown at high priority.
     fn notify_if_away_as(self: &Rc<Self>, conversation_id: &str, title: &str, body: &str, mention: bool) {
         let body = util::quote_plain(body);
-        let body = body.as_str();
+        let priority = if mention { gio::NotificationPriority::High } else { gio::NotificationPriority::Normal };
+        // The setting hides who wrote and what: the title is a contact or group name.
+        let hidden = if mention { "You were mentioned in a group" } else { "New message" };
+        // One notification id per conversation, so a burst of messages
+        // replaces itself instead of stacking up a wall of popups.
+        self.notify_if_away_text(conversation_id, conversation_id, title, &body, hidden, priority);
+    }
+
+    /// `conversation_id` decides "already looking at it"; `notification_id` is the replace slot.
+    fn notify_if_away_text(self: &Rc<Self>, conversation_id: &str, notification_id: &str, title: &str, body: &str, hidden_body: &str, priority: gio::NotificationPriority) {
         let is_open = self
             .active_conversation
             .borrow()
             .as_deref()
             .map(|open| open == conversation_id)
             .unwrap_or(false);
-        let is_focused = self
-            .window
-            .borrow()
-            .as_ref()
-            .map(|window| window.is_active())
-            .unwrap_or(false);
+        // Any app window counts (the whiteboard has its own).
+        let is_focused = self.application.windows().iter().any(|window| window.is_active());
         // Visible and focused means the user is already looking at it.
         // A locked window is not: the content is hidden behind the lock
         // page, so a message that arrives then must still be announced.
         if is_open && is_focused && !self.locked.get() {
             return;
         }
-
-        // The setting hides who wrote and what: the title is a contact or
-        // group name.
-        let (title, body) = if self.prefs.borrow().hide_notification_content {
-            ("Typeon", if mention { "You were mentioned in a group" } else { "New message" })
-        } else {
-            (title, body)
-        };
-        // One notification id per conversation, so a burst of messages
-        // replaces itself instead of stacking up a wall of popups.
-        let priority = if mention { gio::NotificationPriority::High } else { gio::NotificationPriority::Normal };
-        post_notification(&self.application, conversation_id, title, body, priority);
+        let (title, body) = if self.prefs.borrow().hide_notification_content { ("Typeon", hidden_body) } else { (title, body) };
+        post_notification(&self.application, notification_id, title, body, priority);
     }
 
     // --- name resolution ---
@@ -813,6 +822,11 @@ pub fn set_metered(metered: bool) {
 /// One desktop notification, replacing any earlier one with the same `id`.
 /// Windows: a balloon on Typeon's own tray icon (`win::notify`); GLib's win32
 /// backend would put a second, menu-less icon in the tray.
+/// A disappearing message's content never goes into a notification (it would outlive the message there).
+fn shown_text(event: &Event, text: String) -> String {
+    if event.number("expire_secs") > 0 { "Disappearing message".to_string() } else { text }
+}
+
 pub fn post_notification(
     application: &adw::Application,
     id: &str,

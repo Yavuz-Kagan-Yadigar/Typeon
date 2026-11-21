@@ -274,6 +274,7 @@ internal fun ChatActivity.sendVoiceMessage(file: File, durationMs: Long, caption
                             messageId = obj.optString("message_id"),
                             text = "",
                             isMine = true,
+                            expireSecs = disappearSecs, expireAtMs = Disappear.atFor(disappearSecs),
                             caption = caption,
                             replyToMessageId = quote?.id,
                             replyToPreview = quote?.preview,

@@ -32,11 +32,12 @@ impl ChatView {
             // reload races an event. Refresh in place instead of doubling it.
             {
                 let mut current = existing.entry.borrow_mut();
-                let (deleted, seen) = (current.deleted || entry.deleted, current.seen || entry.seen);
+                let deleted = current.deleted || entry.deleted;
+                let seen_by = if entry.seen_by.is_empty() { current.seen_by.clone() } else { entry.seen_by.clone() };
                 let reactions = if entry.reactions.is_empty() { current.reactions.clone() } else { entry.reactions.clone() };
                 *current = entry.clone();
                 current.deleted = deleted;
-                current.seen = seen;
+                current.seen_by = seen_by;
                 current.reactions = reactions;
             }
             existing.text.set_markup(&display_text(&entry));
@@ -50,18 +51,10 @@ impl ChatView {
             };
             *existing.status.borrow_mut() = status.clone();
             existing.entry.borrow_mut().status = status.clone();
-            existing.meta.set_markup(&format_meta(
-                entry.order_key,
-                status.as_deref(),
-                existing.seen.get(),
-                entry.edited,
-            ));
+            existing.meta.set_markup(&format_meta(entry.order_key, status.as_deref(), entry.edited));
             // Shared borrows only, so these are safe under the lookup above.
             if entry.deleted {
                 self.apply_delete(&entry.id);
-            }
-            if entry.seen {
-                self.apply_seen(&entry.id);
             }
             if !entry.reactions.is_empty() {
                 self.apply_reactions(&entry.id, &entry.reactions);
@@ -284,7 +277,9 @@ impl ChatView {
             column.append(&sender);
         }
 
-        if let Some(preview) = &entry.reply_preview {
+        // Disappearing: only the placeholder (see `DISAPPEAR_HIDDEN`), no quote, file or forwarded mark around it.
+        let hidden = entry.expire.is_some();
+        if let Some(preview) = entry.reply_preview.as_ref().filter(|_| !hidden) {
             let who = entry
                 .reply_sender
                 .as_ref()
@@ -297,21 +292,24 @@ impl ChatView {
             let reply = gtk::Label::builder().label(quoted.as_str()).xalign(0.0).wrap(true).build();
             reply.add_css_class("caption");
             reply.add_css_class("dim-label");
+            if let Some(target) = entry.reply_id.clone() {
+                self.click_to_scroll(&reply, target);
+            }
             column.append(&reply);
         }
 
         // An inline (Android-style) quote at the start of the message is a
         // block of its own, like on the phone: darker rounded box over the text.
         let (forwarded, own_text) = util::split_forwarded(&entry.text);
-        if forwarded && !entry.deleted {
+        if forwarded && !entry.deleted && !hidden {
             let label = gtk::Label::builder().label("↪ Forwarded").xalign(0.0).build();
             label.add_css_class("caption");
             label.add_css_class("dim-label");
             label.add_css_class("forwarded-label");
             column.append(&label);
         }
-        if !entry.deleted {
-            if let (Some(preview), _) = crate::util::split_leading_quote(own_text) {
+        if !entry.deleted && !hidden {
+            if let (Some((target, preview)), _) = crate::util::split_leading_quote(own_text) {
                 let quote = gtk::Label::builder()
                     .label(util::preview_text(&preview, 120).as_str())
                     .xalign(0.0)
@@ -321,18 +319,30 @@ impl ChatView {
                     .halign(gtk::Align::Start)
                     .build();
                 quote.add_css_class("quote-block");
+                self.click_to_scroll(&quote, target);
                 column.append(&quote);
             }
         }
 
         let text = bubble_text_label(&display_text(entry));
+        // Quotes further down the text are links (see `util::quote_markup`).
+        {
+            let view = Rc::downgrade(self);
+            text.connect_activate_link(move |_, uri| {
+                let Some(target) = uri.strip_prefix(crate::util::QUOTE_LINK) else { return glib::Propagation::Proceed };
+                if let Some(view) = view.upgrade() {
+                    view.scroll_to_message(target);
+                }
+                glib::Propagation::Stop
+            });
+        }
         if entry.deleted {
             text.add_css_class("dim-label");
         }
 
         let mut attachment_state = None;
         let mut attachment_widgets = None;
-        if let Some(attachment) = &entry.attachment {
+        if let Some(attachment) = entry.attachment.as_ref().filter(|_| !hidden) {
             let (widgets, state) = self.build_attachment(attachment);
             // An attachment message freshly loaded from the archive is never
             // itself the deleted one — a deletion purges its `files` row
@@ -352,10 +362,34 @@ impl ChatView {
         let meta = gtk::Label::builder().xalign(1.0).build();
         meta.add_css_class("caption");
         meta.add_css_class("dim-label");
-        // Markup, not plain text: the delivered double tick carries its own
-        // grey (see `format_meta`).
-        meta.set_markup(&meta_text(entry, entry.seen));
+        meta.set_markup(&meta_text(entry));
         column.append(&meta);
+        // Disappearing: time left in accent bold, under the time.
+        let expire_label = expire_label(entry);
+        if let Some(label) = &expire_label {
+            column.append(label);
+        }
+
+        // Filled by `show_seen_by`; a click lists who saw it and when.
+        let seen_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(2)
+            .halign(gtk::Align::End)
+            .visible(false)
+            .build();
+        seen_row.set_cursor_from_name(Some("pointer"));
+        {
+            let click = gtk::GestureClick::new();
+            let view = Rc::downgrade(self);
+            let id = entry.id.clone();
+            click.connect_released(move |_, _, _, _| {
+                if let Some(view) = view.upgrade() {
+                    view.show_seen_list(&id);
+                }
+            });
+            seen_row.add_controller(click);
+        }
+        column.append(&seen_row);
 
         let reactions = gtk::Label::builder()
             .label(entry.reactions.as_str())
@@ -366,13 +400,17 @@ impl ChatView {
         column.append(&reactions);
 
         let (overlay, skin) = place_bubble(&column, entry.mine);
-        if entry.attachment.as_ref().is_some_and(|a| a.sticker) {
+        if !hidden && entry.attachment.as_ref().is_some_and(|a| a.sticker) {
             skin.remove_css_class("bubble");
             skin.remove_css_class(if entry.mine { "bubble-mine" } else { "bubble-theirs" });
         }
                 // If `insert_entry` decided this bubble is in the same group as the one before, its top corners shrink and the gap
                 // narrows. The same class also overrides the tail corner that `.bubble-mine` carries on its own (see theme.rs), with
                 // higher specificity, so `continued-bottom` does not need to remove anything.
+        if expire_label.is_some() {
+            skin.add_css_class("disappear");
+            self.start_disappear_tick();
+        }
         if continued_top {
             overlay.add_css_class("bubble-row-continued");
         } else {
@@ -435,12 +473,13 @@ impl ChatView {
             attachment_widgets,
             order_key: entry.order_key,
             mine: entry.mine,
-            seen: Cell::new(entry.seen),
+            seen_row,
             shade: Cell::new(-1),
             fillets: RefCell::new(Vec::new()),
             reactions,
             status: RefCell::new(entry.status.clone()),
             edited: Cell::new(entry.edited),
+            expire_label,
             entry: RefCell::new(entry.clone()),
         })
     }
@@ -604,36 +643,32 @@ pub(super) fn seam_radius(delta: i32, height: i32) -> i32 {
     (r / 2 * 2).max(2)
 }
 
+/// A disappearing message is never shown on the desktop: it cannot block screenshots. The phone can, and shows it there.
+pub(super) const DISAPPEAR_HIDDEN: &str = "Disappearing message, view on primary device";
+
 pub(super) fn display_text(entry: &Entry) -> String {
     if entry.deleted {
         "Message deleted".to_string()
+    } else if entry.expire.is_some() {
+        format!("<i>{DISAPPEAR_HIDDEN}</i>")
     } else {
         let text = crate::util::split_forwarded(&entry.text).1;
         crate::util::quote_markup(crate::util::split_leading_quote(text).1)
     }
 }
 
-pub(super) fn meta_text(entry: &Entry, seen: bool) -> String {
-    format_meta(entry.order_key, entry.status.as_deref(), seen, entry.edited)
+pub(super) fn meta_text(entry: &Entry) -> String {
+    format_meta(entry.order_key, entry.status.as_deref(), entry.edited)
 }
 
-/// Time plus a delivery tick, and, small and right beside the time (matching Android's `txtEditedLabel`), an "edited" marker
-/// instead of the old inline suffix on the message text. The ticks mean what the core can actually promise. One tick means
-/// "handed to the network". Two GREY ticks mean "the peer's device acknowledged it" (delivered). Two plain ticks mean "the
-/// peer's app told us it displayed this" (seen).
-/// The result is Pango markup (the meta label is set with `set_markup`), so a tick can carry its own colour. The delivered
-/// tick is grey, and the seen tick keeps the label's own tone. Everything here is generated by us (a timestamp and fixed
-/// glyphs), so there is no user text to escape.
-pub(super) fn format_meta(timestamp: u64, status: Option<&str>, seen: bool, edited: bool) -> String {
+/// Time, an "edited" marker beside it (like Android's `txtEditedLabel`), and a mark only for a message that is not out yet
+/// or failed, as on the phone: a sent message shows nothing, its read state is the seen-by avatars (`show_seen_by`).
+/// Pango markup (the meta label uses `set_markup`); everything here is generated by us, so nothing needs escaping.
+pub(super) fn format_meta(timestamp: u64, status: Option<&str>, edited: bool) -> String {
     let time = util::format_bubble_time(timestamp);
-    // No "seen" tick: the highest mark is the delivered double tick.
-    let _ = seen;
     let tick = match status {
         Some("pending") => " ⏱",
         Some("error") => " ⚠",
-        // The end-to-end Ack (the core's `delivered` status).
-        Some("delivered") => "<span foreground=\"grey\"> ✓✓</span>",
-        Some("sent") => " ✓",
         _ => "",
     };
     if edited {

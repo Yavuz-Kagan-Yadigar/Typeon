@@ -1610,14 +1610,15 @@ impl P2PCore {
         if sent { Ok(true) } else { Err("No copy could be sent".to_string()) }
     }
 
-    pub(crate) fn send_group_message(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>) -> Result<String, String> {
-        self.send_group_message_with_status(group_id, plaintext, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, mentions).map(|(id, _)| id)
+    pub(crate) fn send_group_message(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>, expire_secs: Option<u32>) -> Result<String, String> {
+        self.send_group_message_with_status(group_id, plaintext, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, mentions, expire_secs).map(|(id, _)| id)
     }
 
     /// `send_group_message` with the send status of the bubble, as `send_message` returns it: "sent" when a copy reached the network for at
     /// least one member (or there is nobody else), "pending" when every copy is only queued. A pending row is set "sent" by the first later
     /// publish (`retry_unconfirmed_messages`) or "delivered" by the first Ack.
-    pub(crate) fn send_group_message_with_status(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>) -> Result<(String, String), String> {
+    pub(crate) fn send_group_message_with_status(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>, expire_secs: Option<u32>) -> Result<(String, String), String> {
+        let expire_secs = packet::disappear_secs(expire_secs).or_else(|| self.disappear_mode("", group_id));
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if !group.is_member(&own_identity_id) {
@@ -1643,6 +1644,7 @@ impl P2PCore {
             reply_to_message_id, reply_to_preview, reply_to_sender_identity_id,
             author_proof: Some(author_proof.clone()),
             mentions: filter_mentions(&group, Some(&own_identity_id), mentions),
+            expire_secs,
         };
         // Archive ONCE, as a single row, BEFORE the fan-out loop, not inside it. `send_message_content` is called separately for each member, and passing
         // `archive_plaintext: Some(...)` there would create N rows for N members (with the WRONG key, see that function's old note). Our own message's
@@ -1654,7 +1656,7 @@ impl P2PCore {
             _ => (None, None, None),
         };
         // Not sent when our own copy cannot be kept (see the 1:1 twin).
-        self.archive_group_message(group_id, &own_identity_id, "sent", plaintext.as_bytes(), Some(&local_id), reply_to_id, reply_to_prev, reply_to_sender, sent_at_ms, Some(&author_proof))
+        self.archive_group_message_exp(group_id, &own_identity_id, "sent", plaintext.as_bytes(), Some(&local_id), reply_to_id, reply_to_prev, reply_to_sender, sent_at_ms, Some(&author_proof), expire_secs)
             .map_err(|e| format!("Could not save message: {}", e))?;
         let others = group.other_members(&own_identity_id);
         let mut published = others.is_empty();
@@ -1675,7 +1677,7 @@ impl P2PCore {
         self.echo_group_to_siblings(group_id, SiblingEchoBody::Text {
             message_id: local_id.clone(), text: plaintext.to_string(), sent_at_ms,
             reply_to_message_id: echo_reply_id, reply_to_preview: echo_reply_prev,
-            reply_to_sender_identity_id: echo_reply_sender,
+            reply_to_sender_identity_id: echo_reply_sender, expire_secs,
         });
         Ok((local_id, status.as_str().to_string()))
     }

@@ -395,16 +395,24 @@ fn marker_ok(id: &str, preview: &str) -> bool {
 }
 
 pub fn quote_plain(text: &str) -> String {
-    quote_render(text, |quote| format!("> {quote}"), |plain| plain.to_string())
+    quote_render(text, |_, quote| format!("> {quote}"), |plain| plain.to_string())
 }
 
+/// URI prefix of a quote link in bubble markup; the quoted message id follows.
+pub const QUOTE_LINK: &str = "quote:";
+
 /// Same walk as `quote_plain`, but as Pango markup for a bubble label: the
-/// quoted preview is a dimmed italic line behind a vertical bar, everything
-/// else is escaped plain text.
+/// quoted preview is a dimmed italic line behind a vertical bar, a link to the
+/// quoted message (`QUOTE_LINK`); everything else is escaped plain text.
 pub fn quote_markup(text: &str) -> String {
     quote_render(
         text,
-        |quote| format!("<span alpha=\"70%\"><i>\u{258E} {}</i></span>", glib::markup_escape_text(&unquote_preview(quote))),
+        |id, quote| format!(
+            "<a href=\"{}{}\"><span alpha=\"70%\"><i>\u{258E} {}</i></span></a>",
+            QUOTE_LINK,
+            glib::markup_escape_text(id),
+            glib::markup_escape_text(&unquote_preview(quote)),
+        ),
         |plain| glib::markup_escape_text(plain).to_string(),
     )
 }
@@ -415,10 +423,11 @@ fn unquote_preview(preview: &str) -> String {
     preview.replace('\n', " ").trim_start_matches(|c| c == '>' || c == ' ').to_string()
 }
 
-/// A quote marker at the very start of the text, split off: the quoted preview
-/// (for a block of its own above the bubble text) and the rest of the text.
-/// `None` when the text does not begin with a well-formed marker.
-pub fn split_leading_quote(text: &str) -> (Option<String>, &str) {
+/// A quote marker at the very start of the text, split off: the quoted
+/// message id and preview (for a block of its own above the bubble text) and
+/// the rest of the text. `None` when the text does not begin with a
+/// well-formed marker.
+pub fn split_leading_quote(text: &str) -> (Option<(String, String)>, &str) {
     const START: &str = "\u{2062}\u{2064}";
     const END: &str = "\u{2064}\u{2062}";
     // Whitespace before the marker (a newline typed first) must not hide it.
@@ -427,14 +436,14 @@ pub fn split_leading_quote(text: &str) -> (Option<String>, &str) {
             let (id, preview) = (&body[..sep], &body[sep + '\u{2063}'.len_utf8()..end]);
             if sep < end && marker_ok(id, preview) {
                 let rest = &body[end + END.len()..];
-                return (Some(unquote_preview(preview)), rest.strip_prefix('\n').unwrap_or(rest));
+                return (Some((id.to_string(), unquote_preview(preview))), rest.strip_prefix('\n').unwrap_or(rest));
             }
         }
     }
     (None, text)
 }
 
-fn quote_render(text: &str, quote: impl Fn(&str) -> String, plain: impl Fn(&str) -> String) -> String {
+fn quote_render(text: &str, quote: impl Fn(&str, &str) -> String, plain: impl Fn(&str) -> String) -> String {
     const START: &str = "\u{2062}\u{2064}";
     const END: &str = "\u{2064}\u{2062}";
     let mut out = String::new();
@@ -444,7 +453,7 @@ fn quote_render(text: &str, quote: impl Fn(&str) -> String, plain: impl Fn(&str)
         match (body.find('\u{2063}'), body.find(END)) {
             (Some(sep), Some(end)) if sep < end && marker_ok(&body[..sep], &body[sep + '\u{2063}'.len_utf8()..end]) => {
                 out.push_str(&plain(&rest[..a]));
-                out.push_str(&quote(&body[sep + '\u{2063}'.len_utf8()..end].replace('\n', " ")));
+                out.push_str(&quote(&body[..sep], &body[sep + '\u{2063}'.len_utf8()..end].replace('\n', " ")));
                 rest = &body[end + END.len()..];
             }
             _ => {

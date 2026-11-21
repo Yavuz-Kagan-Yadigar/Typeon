@@ -99,6 +99,7 @@ impl P2PCore {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_outgoing_file(&mut self, peer_device_fingerprint: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, chunk_hashes: Vec<u8>, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, sticker_origin: Option<String>) -> Result<(String, String), String> {
         let sticker = sticker_origin.is_some();
+        let expire_secs = self.disappear_mode(&peer_device_fingerprint, "");
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
             // The column list has 18 entries, matching VALUES. `caption`, `reply_to_message_id` and `reply_to_preview` were in VALUES but missing from the column list. SQLite rejects the mismatch and `let _ =` hid the error, so the sender never stored its own 1:1 attachment. `serve_chunk_request` then answered "no record" and the bubble vanished on reopen. Keep the two lists in step.
@@ -122,6 +123,7 @@ impl P2PCore {
                 return Err(format!("Could not write file record: {}", e));
             }
         }
+        self.set_file_expiry(&file_id, "sent", expire_secs);
         // Our own sent file also counts toward total storage. See the `enforce_history_storage_limit` note.
         self.enforce_history_storage_limit();
 
@@ -145,6 +147,7 @@ impl P2PCore {
             reply_to_sender_identity_id: None,
             sticker,
             sticker_origin,
+            expire_secs,
         };
         // If a server is configured (see `server_client`), upload the encrypted file there too. Recipients already speak the filexfer protocol
         // that the server serves, so nothing changes on their side: the server is just an always-on source peer.
@@ -179,6 +182,7 @@ impl P2PCore {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_outgoing_group_file(&mut self, group_id: String, file_id: String, file_key: [u8; 32], total_size: u64, sha256_hex: String, chunk_hashes: Vec<u8>, file_name: String, mime_type: String, preview_jpeg: Option<Vec<u8>>, duration_ms: Option<u32>, caption: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, sticker_origin: Option<String>) -> Result<String, String> {
         let sticker = sticker_origin.is_some();
+        let expire_secs = self.disappear_mode("", &group_id);
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(&group_id).cloned_group()?;
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
@@ -204,6 +208,7 @@ impl P2PCore {
                 return Err(format!("Could not write file record: {}", e));
             }
         }
+        self.set_file_expiry(&file_id, "sent", expire_secs);
         self.enforce_history_storage_limit();
 
         let content = MessageContent::FileOffer {
@@ -224,6 +229,7 @@ impl P2PCore {
             reply_to_sender_identity_id: reply_to_sender_identity_id.clone(),
             sticker,
             sticker_origin,
+            expire_secs,
         };
         for member_identity_id in group.other_members(&own_identity_id) {
             // Like every other group send: all active devices, queued when no
@@ -1357,11 +1363,11 @@ impl P2PCore {
         // row's `created_at` comes with it, or the next `< before_ms` page
         // skipped the rest of them.
         let filter = format!(
-            "peer_device_fingerprint IN ({}) AND group_id IS NULL AND created_at < {}",
-            placeholders, before_ms.map_or(i64::MAX, |b| b.min(i64::MAX as u64) as i64)
+            "peer_device_fingerprint IN ({}) AND group_id IS NULL AND created_at < {} {}",
+            placeholders, before_ms.map_or(i64::MAX, |b| b.min(i64::MAX as u64) as i64), file_expiry_filter()
         );
         let sql = format!(
-            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, COALESCE(NULLIF(sent_at_ms, 0), created_at), send_status
+            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, COALESCE(NULLIF(sent_at_ms, 0), created_at), send_status, expire_secs, expire_at_ms
              FROM files WHERE {f} AND created_at >= COALESCE(
                  (SELECT created_at FROM files WHERE {f} ORDER BY created_at DESC LIMIT 1 OFFSET {o}), {min})
              ORDER BY created_at DESC",
@@ -1410,6 +1416,8 @@ impl P2PCore {
                 sticker: r.get(14)?,
                 sent_at_ms: r.get::<_, i64>(15)?.max(0) as u64,
                 send_status: r.get(16)?,
+                expire_secs: r.get(17)?,
+                expire_at_ms: r.get::<_, Option<i64>>(18)?.map(|v| v.max(0) as u64),
             })
         });
         newest_first_rows(rows)
@@ -1433,12 +1441,13 @@ impl P2PCore {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let mut stmt = match conn.prepare(
-            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, peer_device_fingerprint, sender_identity_id, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, COALESCE(NULLIF(sent_at_ms, 0), created_at), send_status
-             FROM files WHERE group_id = ?1 AND created_at < ?2 AND created_at >= COALESCE(
-                 (SELECT created_at FROM files WHERE group_id = ?1 AND created_at < ?2 ORDER BY created_at DESC LIMIT 1 OFFSET ?3), ?4)
+        let e = file_expiry_filter();
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT file_id, file_name, mime_type, total_size, direction, status, bytes_transferred, created_at, preview_jpeg, duration_ms, peer_device_fingerprint, sender_identity_id, caption, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sticker, COALESCE(NULLIF(sent_at_ms, 0), created_at), send_status, expire_secs, expire_at_ms
+             FROM files WHERE group_id = ?1 AND created_at < ?2 {e} AND created_at >= COALESCE(
+                 (SELECT created_at FROM files WHERE group_id = ?1 AND created_at < ?2 {e} ORDER BY created_at DESC LIMIT 1 OFFSET ?3), ?4)
              ORDER BY created_at DESC"
-        ) {
+        )) {
             Ok(s) => s,
             Err(e) => {
                 warn!("Could not prepare attachment list query: {}", e);
@@ -1477,6 +1486,8 @@ impl P2PCore {
                 sticker: r.get(16)?,
                 sent_at_ms: r.get::<_, i64>(17)?.max(0) as u64,
                 send_status: r.get(18)?,
+                expire_secs: r.get(19)?,
+                expire_at_ms: r.get::<_, Option<i64>>(20)?.map(|v| v.max(0) as u64),
             })
         });
         newest_first_rows(rows)
@@ -1529,4 +1540,9 @@ fn scan_resumable(enc_path: &std::path::Path, chunk_hashes: &[u8], per_hash: u32
         }
     }
     received
+}
+
+/// The attachment-list clause for disappearing files: a gone one (expired, my hidden sent copy, or its time up) is never listed.
+fn file_expiry_filter() -> String {
+    format!("AND NOT (expire_secs IS NOT NULL AND (expire_secs = 0 OR status = 'expired' OR expire_at_ms <= {}))", current_time_ms())
 }

@@ -335,6 +335,25 @@ pub fn sync_read_state(peer_device_fingerprint: &str, group_id: &str, read_at_ms
     });
 }
 
+/// Disappearing messages on screen start counting down (see `start_expiry_on_screen`). Local only.
+pub fn start_disappear_countdown(peer_device_fingerprint: &str, group_id: &str) {
+    let peer = peer_device_fingerprint.to_string();
+    let gid = group_id.to_string();
+    let _ = catch_panic(move || crate::core_lock_read().start_expiry_on_screen(&peer, &gid));
+}
+
+/// The chat's disappearing mode in seconds, 0 = off (see `disappear_mode`). `peer_device_fingerprint` for 1:1, `group_id` for a group.
+pub fn disappear_mode(peer_device_fingerprint: &str, group_id: &str) -> u32 {
+    let (peer, gid) = (peer_device_fingerprint.to_string(), group_id.to_string());
+    catch_panic(move || crate::core_lock_read().disappear_mode(&peer, &gid).unwrap_or(0)).unwrap_or(0)
+}
+
+/// Turns the chat's disappearing mode on (`secs`) or off (0).
+pub fn set_disappear_mode(peer_device_fingerprint: &str, group_id: &str, secs: u32) {
+    let (peer, gid) = (peer_device_fingerprint.to_string(), group_id.to_string());
+    let _ = catch_panic(move || crate::core_lock_read().set_disappear_mode(&peer, &gid, secs));
+}
+
 // --- Device change warnings ---
 
 pub fn list_pending_device_alerts() -> String {
@@ -443,12 +462,13 @@ pub fn send_message(
     message: &str,
     reply_to_message_id: Option<String>,
     reply_to_preview: Option<String>,
+    expire_secs: Option<u32>,
 ) -> String {
     let target = target_device_fingerprint.to_string();
     let msg = message.to_string();
     send_result(catch_panic(move || {
         let _guard = RUNTIME.enter();
-        core_lock().send_message(target, msg, reply_to_message_id, reply_to_preview)
+        core_lock().send_message(target, msg, reply_to_message_id, reply_to_preview, expire_secs)
     }))
 }
 
@@ -878,6 +898,7 @@ pub fn send_group_message(
     reply_to_preview: Option<String>,
     reply_to_sender_identity_id: Option<String>,
     mentions: Vec<String>,
+    expire_secs: Option<u32>,
 ) -> String {
     let gid = group_id.to_string();
     let msg = message.to_string();
@@ -890,6 +911,7 @@ pub fn send_group_message(
             reply_to_preview,
             reply_to_sender_identity_id,
             mentions,
+            expire_secs,
         )
     }))
 }
@@ -1061,6 +1083,12 @@ pub fn list_reactions(target_message_id: &str) -> String {
 /// My 5 most used reaction emojis (JSON string array), for the quick-reaction bar.
 pub fn top_reactions() -> String {
     json_list(catch_panic(move || crate::core_lock_read().top_reactions()))
+}
+
+/// Who has seen a message and when (`[{"identity_id":..,"seen_at_ms":..}]`, first viewer first), for the "seen by" list.
+pub fn list_seen_by(message_id: &str) -> String {
+    let id = message_id.to_string();
+    json_list(catch_panic(move || crate::core_lock_read().seen_by_json(&id)))
 }
 
 fn json_list(result: Result<String, String>) -> String {
@@ -1347,12 +1375,6 @@ pub fn set_sticker_favorite(id: &str, favorite: bool) -> String {
     ok_result(catch_panic(move || core_lock().set_sticker_favorite(&id, favorite)))
 }
 
-// --- Storage (this device only, as Android's Settings → Storage) ---
-
-/// See JNI `storageUsage`.
-pub fn storage_usage() -> String {
-    catch_panic(|| crate::core_lock_read().storage_usage().to_string()).unwrap_or_else(|_| "{}".to_string())
-}
 /// JSON `[{"id","name","stickers":[sticker id]}]`: this device's sticker folders, oldest first.
 pub fn list_sticker_folders() -> String {
     catch_panic(|| crate::core_lock_read().list_sticker_folders()).unwrap_or_else(|_| "[]".to_string())
@@ -1384,6 +1406,12 @@ pub fn remove_stickers_from_folder(id: i64, sticker_ids: &[String]) -> String {
     ok_result(catch_panic(move || core_lock().remove_stickers_from_folder(id, &ids)))
 }
 
+// --- Storage (this device only, as Android's Settings → Storage) ---
+
+/// See JNI `storageUsage`.
+pub fn storage_usage() -> String {
+    catch_panic(|| crate::core_lock_read().storage_usage().to_string()).unwrap_or_else(|_| "{}".to_string())
+}
 
 /// See JNI `chatPruneStats`; `kind` is "contact" or "group".
 pub fn chat_prune_stats(kind: &str, id: &str, before_ms: i64) -> String {

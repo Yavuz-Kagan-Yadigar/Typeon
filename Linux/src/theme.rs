@@ -308,6 +308,12 @@ pub fn stylesheet(appearance: &Appearance) -> String {
             fillet_css.push_str(&format!(".fshade-{role}-{n} {{ color: {colour}; }}\n"));
         }
     }
+    // Disappearing-message edge: an accent ring that fades in and out (see ui/chat/disappear.rs `disappear_step`).
+    let steps = crate::ui::chat::DISAPPEAR_PULSE_STEPS;
+    for n in 0..steps {
+        let alpha = 0.25 + 0.75 * n as f64 / (steps - 1) as f64;
+        fillet_css.push_str(&format!(".bubble.disappear.dpulse-{n} {{ box-shadow: inset 0 0 0 2px alpha(@m3_primary, {alpha:.2}); }}\n"));
+    }
     format!(
         r#"
 /* ===================== Material 3 colour roles ===================== */
@@ -658,11 +664,20 @@ avatar {{ border-radius: 9999px; }}
 .sticker {{ border-radius: 8px; }}
 /* Current in-chat search hit. */
 .bubble-match {{ outline: 2px solid @m3_primary; outline-offset: 2px; }}
+/* A quote inside the text is a link to the quoted message: drawn as text. */
+.bubble label link {{ color: inherit; }}
 /* Day of the top visible message, over the timeline while it scrolls. */
 .date-pill {{ background: @m3_surface_high; color: @m3_on_surface; border: 1px solid @m3_outline_variant; border-radius: 9999px; padding: 3px 12px; }}
 .msg-pop {{ animation: msg-pop 220ms cubic-bezier(0.2, 0.8, 0.2, 1); transform-origin: 0% 100%; }}
 .msg-pop.msg-pop-mine {{ transform-origin: 100% 100%; }}
 @keyframes msg-pop {{ from {{ opacity: 0; transform: translateY(12px) scale(0.85); }} to {{ opacity: 1; transform: none; }} }}
+/* Disappearing message: time left, and the slide off to its own side when it is gone. */
+.disappear-time {{ color: @m3_primary; font-weight: bold; }}
+.bubble.disappear {{ box-shadow: inset 0 0 0 2px alpha(@m3_primary, 0.6); }}
+.msg-gone {{ animation: msg-gone-left 300ms ease-in forwards; }}
+.msg-gone-mine {{ animation: msg-gone-right 300ms ease-in forwards; }}
+@keyframes msg-gone-left {{ to {{ opacity: 0; transform: translateX(-700px); }} }}
+@keyframes msg-gone-right {{ to {{ opacity: 0; transform: translateX(700px); }} }}
 "#
     )
 }

@@ -160,8 +160,10 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setGroupProfilePicture<'loc
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, reply_to_sender_identity_id: JString<'local>, mentions_json: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, reply_to_sender_identity_id: JString<'local>, mentions_json: JString<'local>, expire_secs: jlong) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
+    // See `sendMessage`: 0 = not disappearing.
+    let expire_secs = u32::try_from(expire_secs).ok().filter(|s| *s > 0);
     let msg_str: String = jstr(&mut env, &msg).unwrap_or_default();
     // JSON array of mentioned identity ids; anything else means none.
     let mentions: Vec<String> = optional_jstring(&mut env, &mentions_json)
@@ -173,7 +175,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mu
     let result = catch_panic(move || {
         let _guard = RUNTIME.enter();
         let mut core = core_lock();
-        core.send_group_message_with_status(&gid, &msg_str, reply_id_opt, reply_preview_opt, reply_sender_opt, mentions)
+        core.send_group_message_with_status(&gid, &msg_str, reply_id_opt, reply_preview_opt, reply_sender_opt, mentions, expire_secs)
     });
     // The same shape as `sendMessage`.
     let out = match result {

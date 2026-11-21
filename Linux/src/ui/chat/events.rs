@@ -32,11 +32,13 @@ impl ChatView {
                         status: None,
                         reply_preview: event.optional("reply_to_preview"),
                         reply_sender: None,
+                        reply_id: event.optional("reply_to_message_id"),
                         deleted: false,
                         edited: false,
                         attachment: None,
-                        seen: false,
+                        seen_by: Vec::new(),
                         reactions: String::new(),
+                        expire: event_expiry(event),
                     },
                     true,
                 );
@@ -60,11 +62,13 @@ impl ChatView {
                         status: None,
                         reply_preview: event.optional("reply_to_preview"),
                         reply_sender: event.optional("reply_to_sender_identity_id"),
+                        reply_id: event.optional("reply_to_message_id"),
                         deleted: false,
                         edited: false,
                         attachment: None,
-                        seen: false,
+                        seen_by: Vec::new(),
                         reactions: String::new(),
+                        expire: event_expiry(event),
                     },
                     true,
                 );
@@ -94,11 +98,13 @@ impl ChatView {
                         status: Some("sent".to_string()),
                         reply_preview: event.optional("reply_to_preview"),
                         reply_sender: None,
+                        reply_id: event.optional("reply_to_message_id"),
                         deleted: false,
                         edited: false,
                         attachment: None,
-                        seen: false,
+                        seen_by: Vec::new(),
                         reactions: String::new(),
+                        expire: event_expiry(event),
                     },
                     true,
                 );
@@ -120,11 +126,13 @@ impl ChatView {
                         status: Some("sent".to_string()),
                         reply_preview: event.optional("reply_to_preview"),
                         reply_sender: event.optional("reply_to_sender_identity_id"),
+                        reply_id: event.optional("reply_to_message_id"),
                         deleted: false,
                         edited: false,
                         attachment: None,
-                        seen: false,
+                        seen_by: Vec::new(),
                         reactions: String::new(),
+                        expire: event_expiry(event),
                     },
                     true,
                 );
@@ -165,14 +173,12 @@ impl ChatView {
             (_, "reaction") if self.event_belongs_here(event) => {
                 self.apply_reactions(&event.string("message_id"), &event.string("reactions"));
             }
-            // 1:1 read boundary (ReadStateSync): every message it covers, oldest first.
-            (Conversation::Direct { .. }, "seen_bulk")
-                if event.optional("group_id").is_none() && self.event_belongs_here(event) =>
-            {
-                if let Some(ids) = event.value.get("message_ids").and_then(|v| v.as_array()) {
-                    for id in ids.iter().filter_map(|v| v.as_str()) {
-                        self.apply_seen(id);
-                    }
+            // Read boundary (ReadStateSync): every message it covers, oldest
+            // first. Only the newest one can carry the seen-by row.
+            (_, "seen_bulk") if self.event_belongs_here(event) => {
+                let ids = event.value.get("message_ids").and_then(|v| v.as_array());
+                if let Some(id) = ids.and_then(|ids| ids.iter().rev().find_map(|v| v.as_str())) {
+                    self.refresh_seen(id);
                 }
             }
             (_, "seen") => {
@@ -180,7 +186,7 @@ impl ChatView {
                     event.optional("group_message_local_id"),
                     event.string("message_id"),
                 );
-                self.apply_seen(&id);
+                self.refresh_seen(&id);
             }
 
             // --- typing ---
@@ -244,11 +250,13 @@ impl ChatView {
                         status: None,
                         reply_preview: event.optional("reply_to_preview"),
                         reply_sender: event.optional("reply_to_sender_identity_id"),
+                        reply_id: event.optional("reply_to_message_id"),
                         deleted: false,
                         edited: false,
                         attachment,
-                        seen: false,
+                        seen_by: Vec::new(),
                         reactions: String::new(),
+                        expire: event_expiry(event),
                     },
                     true,
                 );
@@ -331,15 +339,10 @@ impl ChatView {
                 entry.text = new_text.to_string();
                 entry.edited = true;
             }
-            bubble.text.set_markup(&crate::util::quote_markup(crate::util::split_leading_quote(new_text).1));
+            bubble.text.set_markup(&display_text(&bubble.entry.borrow()));
             self.search_lower.borrow_mut().clear();
             bubble.edited.set(true);
-            bubble.meta.set_markup(&format_meta(
-                bubble.order_key,
-                bubble.status.borrow().as_deref(),
-                bubble.seen.get(),
-                true,
-            ));
+            bubble.meta.set_markup(&format_meta(bubble.order_key, bubble.status.borrow().as_deref(), true));
         }
     }
 
@@ -367,6 +370,7 @@ impl ChatView {
             if let Some(widgets) = &bubble.attachment_widgets {
                 widgets.set_visible(false);
             }
+            bubble.seen_row.set_visible(false);
         }
     }
 
@@ -388,18 +392,91 @@ impl ChatView {
         bubble.entry.borrow_mut().status = Some(status.to_string());
         bubble
             .meta
-            .set_markup(&format_meta(bubble.order_key, Some(status), false, bubble.edited.get()));
+            .set_markup(&format_meta(bubble.order_key, Some(status), bubble.edited.get()));
     }
 
-    pub(super) fn apply_seen(&self, id: &str) {
-        let bubbles = self.bubbles.borrow();
-        let Some(bubble) = bubbles.get(id) else { return };
-        if !bubble.mine {
+    /// A seen receipt for one of my messages: the core has stored it, so
+    /// the full viewer list is read back (off the GTK thread).
+    pub(super) fn refresh_seen(self: &Rc<Self>, id: &str) {
+        if !self.bubbles.borrow().get(id).is_some_and(|bubble| bubble.mine) {
             return;
         }
-        // Remembered, but not shown: there is no "seen" tick.
-        bubble.seen.set(true);
-        bubble.entry.borrow_mut().seen = true;
+        let (view, id) = (self.clone(), id.to_string());
+        let message_id = id.clone();
+        crate::app::run_in_background(
+            move || core::list_seen_by(&message_id),
+            move |viewers| view.show_seen_by(&id, viewers),
+        );
+    }
+
+    /// Seen-by avatars, like the phone: only under my newest seen message,
+    /// the last `SEEN_AVATARS` viewers, the rest as "+N".
+    pub(super) fn show_seen_by(&self, id: &str, viewers: Vec<core::SeenEntry>) {
+        if viewers.is_empty() {
+            return;
+        }
+        let bubbles = self.bubbles.borrow();
+        let Some(bubble) = bubbles.get(id) else { return };
+        if !bubble.mine || bubble.entry.borrow().deleted {
+            return;
+        }
+        let previous = self.seen_shown.borrow().clone();
+        if let Some(shown) = previous.as_deref().filter(|shown| *shown != id).and_then(|shown| bubbles.get(shown)) {
+            if shown.order_key > bubble.order_key {
+                return;
+            }
+            shown.seen_row.set_visible(false);
+        }
+        let row = &bubble.seen_row;
+        while let Some(child) = row.first_child() {
+            row.remove(&child);
+        }
+        let hidden = viewers.len().saturating_sub(SEEN_AVATARS);
+        for viewer in &viewers[hidden..] {
+            let name = self.app().identity_name(&viewer.identity_id);
+            let avatar = adw::Avatar::new(16, Some(&name), true);
+            if let Some(texture) = self.app().identity_avatar(&viewer.identity_id).as_deref().and_then(util::texture_from_hex) {
+                avatar.set_custom_image(Some(&texture));
+            }
+            row.append(&avatar);
+        }
+        if hidden > 0 {
+            let more = gtk::Label::new(Some(&format!("+{hidden}")));
+            more.add_css_class("caption");
+            more.add_css_class("dim-label");
+            row.append(&more);
+        }
+        row.set_visible(true);
+        bubble.entry.borrow_mut().seen_by = viewers;
+        *self.seen_shown.borrow_mut() = Some(id.to_string());
+    }
+
+    /// Who saw a message and when, read fresh from the core.
+    pub(super) fn show_seen_list(self: &Rc<Self>, id: &str) {
+        let (view, message_id) = (self.clone(), id.to_string());
+        crate::app::run_in_background(
+            move || core::list_seen_by(&message_id),
+            move |viewers| {
+                let body = viewers
+                    .iter()
+                    .rev()
+                    .map(|viewer| {
+                        format!(
+                            "{}  {}, {}",
+                            view.app().identity_name(&viewer.identity_id),
+                            util::format_day_separator(viewer.seen_at_ms),
+                            util::format_bubble_time(viewer.seen_at_ms),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let Some(window) = view.app().window() else { return };
+                let dialog = adw::MessageDialog::new(Some(&window), Some("Seen by"), Some(if body.is_empty() { "Nobody yet" } else { body.as_str() }));
+                dialog.add_response("close", "Close");
+                dialog.set_close_response("close");
+                dialog.present();
+            },
+        );
     }
 
     /// Shows/hides the typing bubble and (re)arms its auto-hide timeout — see
