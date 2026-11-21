@@ -172,6 +172,31 @@ object NotificationHelper {
         show(context, ("group:$groupId").hashCode(), context.getString(R.string.app_name), body, intent)
     }
 
+    /** "New drawing" alert for a shared whiteboard. Own slot, so it does not replace a message notification. With the
+     *  "show messages" switch off, the body does not name the chat. */
+    fun showWhiteboardNotification(context: Context, peerDeviceFingerprint: String, groupId: String) {
+        val intent: Intent
+        val chatName: String
+        if (groupId.isNotEmpty()) {
+            chatName = resolveGroupName(groupId) ?: groupId.take(8)
+            intent = Intent(context, GroupChatActivity::class.java).apply {
+                putExtra(GroupChatActivity.EXTRA_GROUP_ID, groupId)
+                putExtra(GroupChatActivity.EXTRA_GROUP_NAME, chatName)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+        } else {
+            chatName = resolveContactNameByFingerprint(peerDeviceFingerprint) ?: peerDeviceFingerprint.take(8)
+            intent = Intent(context, ChatActivity::class.java).apply {
+                putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
+                putExtra(ChatActivity.EXTRA_PEER_DISPLAY_NAME, chatName)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+        }
+        val body = if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_drawing_from, chatName)
+        else context.getString(R.string.notif_new_drawing)
+        show(context, ("wb:$groupId:$peerDeviceFingerprint").hashCode(), context.getString(R.string.app_name), body, intent)
+    }
+
     /**
      * Clears ALL message notifications when the app comes to the foreground or the main screen is entered. The user has
      * opened the app, so they should not stay in the notification bar. Called from `MainActivity.onResume`.

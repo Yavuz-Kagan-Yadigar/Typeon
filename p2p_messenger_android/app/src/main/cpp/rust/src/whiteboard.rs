@@ -991,10 +991,10 @@ impl P2PCore {
         }
         let pages: Vec<u8> = pages.iter().copied().collect();
         match (&board.group_id, &board.conversation_identity_id) {
-            (Some(gid), _) => serde_json::json!({"type": "whiteboard", "group_id": gid, "pages": pages, "unread": mask}),
+            (Some(gid), _) => serde_json::json!({"type": "whiteboard", "group_id": gid, "pages": pages, "unread": mask, "new": mark_unread}),
             (None, Some(id)) => serde_json::json!({
                 "type": "whiteboard", "peer": self.canonical_device_for_identity(id).unwrap_or_default(),
-                "pages": pages, "unread": mask
+                "pages": pages, "unread": mask, "new": mark_unread
             }),
             (None, None) => noop(),
         }
@@ -1016,6 +1016,7 @@ impl P2PCore {
             erased
         };
         let mut pages = BTreeSet::new();
+        let mut drew = false;
         let tx = self.wb_tx();
         let signed = self.wb_verified_sigs(&board, &sigs);
         // One SUM per page of the packet, not one per stroke.
@@ -1029,6 +1030,7 @@ impl P2PCore {
             }
             if self.wb_insert_counted(&board.key, stroke, &sender, used) {
                 pages.insert(stroke.page);
+                drew = true;
             }
         }
         let mut touched = BTreeSet::new();
@@ -1043,7 +1045,7 @@ impl P2PCore {
             self.wb_trim_tombstones(&board.key, &touched);
         }
         Self::wb_commit(tx);
-        self.wb_changed(&board, &pages, !from_self)
+        self.wb_changed(&board, &pages, !from_self && drew)
     }
 
     /// Their board summary: pull every page that differs from mine.
@@ -1160,7 +1162,6 @@ impl P2PCore {
             // The stroke may live on another page here: that page changed.
             if let Some(live_page) = self.wb_erase(&board.key, page, id) {
                 changed.insert(live_page);
-                foreign = true;
             }
         }
         if !tombstones.is_empty() {

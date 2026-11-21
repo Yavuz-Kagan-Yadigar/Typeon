@@ -554,6 +554,8 @@
     <string name="link_device_code_check">Compare code: %1$s\nApprove only if the new device shows the same code.</string>
     <string name="notif_new_message">New message</string>
     <string name="title_scan_qr">Scan QR</string>
+    <string name="notif_new_drawing">New drawing</string>
+    <string name="notif_new_drawing_from">New drawing from %1$s</string>
     <string name="tor_off_no_network">Tor is off: the network will not start without Tor.</string>
     <string name="msg_pairing_contact_limit">Pairing failed: your contact list is full.</string>
     <string name="notif_fg_text">Secure P2P connection active</string>

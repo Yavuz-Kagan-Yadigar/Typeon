@@ -591,6 +591,15 @@ class P2PService : Service() {
                     NotificationHelper.showMessageNotification(applicationContext, peer, obj.optString("text"), obj.optString("message_id"))
                 }
             }
+            // A new drawing (not an erase): the core sets "new" only when a stroke from someone else was stored.
+            "whiteboard" -> if (obj.optBoolean("new")) {
+                val peer = obj.optString("peer")
+                val groupId = obj.optString("group_id")
+                val conv = if (groupId.isNotEmpty()) "group:$groupId" else peer
+                if (conv.isNotEmpty() && activeConversationId != conv) {
+                    NotificationHelper.showWhiteboardNotification(applicationContext, peer, groupId)
+                }
+            }
             "group_message" -> {
                 val groupId = obj.optString("group_id")
                 if (groupId.isNotEmpty() && activeConversationId != "group:$groupId") {

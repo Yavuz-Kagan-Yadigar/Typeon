@@ -519,6 +519,8 @@
     <string name="link_device_code_check">Karşılaştırma kodu: %1$s\nYalnızca yeni cihaz aynı kodu gösteriyorsa onaylayın.</string>
     <string name="notif_new_message">Yeni mesaj</string>
     <string name="title_scan_qr">QR Tara</string>
+    <string name="notif_new_drawing">Yeni çizim</string>
+    <string name="notif_new_drawing_from">%1$s sohbetinden yeni çizim</string>
     <string name="tor_off_no_network">Tor kapalı: Tor olmadan ağ başlamaz.</string>
     <string name="msg_pairing_contact_limit">Eşleşme başarısız: kişi listeniz dolu.</string>
     <string name="notif_fg_text">Güvenli P2P bağlantısı etkin</string>
