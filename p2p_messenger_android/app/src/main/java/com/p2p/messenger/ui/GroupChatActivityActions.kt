@@ -246,8 +246,8 @@ internal fun GroupChatActivity.showReactionsDialog(item: SimpleChatAdapter.Item)
 }
 
 /** Same pattern as ChatActivity.showReactionPicker, for groups. */
-internal fun GroupChatActivity.showReactionPicker(item: SimpleChatAdapter.Item) {
-    ReactionPicker.show(this, item.reactions.isNotBlank()) { emoji ->
+internal fun GroupChatActivity.showReactionPicker(item: SimpleChatAdapter.Item, quickAnchor: View? = null) {
+    val pick: (String) -> Unit = { emoji ->
         lifecycleScope.launch(Dispatchers.IO) {
             val summary = try {
                 P2PLib.reactToGroupMessage(groupId, item.messageId, emoji)
@@ -263,6 +263,8 @@ internal fun GroupChatActivity.showReactionPicker(item: SimpleChatAdapter.Item) 
             }
         }
     }
+    if (quickAnchor != null) ReactionPicker.showQuick(quickAnchor, item.reactions.isNotBlank(), pick)
+    else ReactionPicker.show(this, item.reactions.isNotBlank(), pick)
 }
 
 /** Same pattern as ChatActivity.copyMessageText. */

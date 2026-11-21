@@ -674,6 +674,11 @@ pub fn list_reactions(message_id: &str) -> Vec<ReactionEntry> {
     parse_list(api::list_reactions(message_id))
 }
 
+/// My 5 most used reaction emojis, for the quick-reaction bar.
+pub fn top_reactions() -> Vec<String> {
+    parse_list(api::top_reactions())
+}
+
 /// 1 = sent again to the group devices that missed it, 0 = nothing to send, -1 = failed.
 pub fn retry_group_message_copies(group_id: &str, local_id: &str) -> i32 {
     api::retry_group_message_copies(group_id, local_id)

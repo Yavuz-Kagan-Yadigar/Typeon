@@ -86,6 +86,13 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_listReactions<'local>(mut e
     safe_new_jstring(&mut env, json)
 }
 
+/// See `P2PCore::top_reactions`. The emojis of the double-tap quick-reaction bar.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_topReactions<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let json = crate::api::top_reactions();
+    safe_new_jstring(&mut env, json)
+}
+
 /// See `reactToMessage`: group counterpart.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_reactToGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, target_message_id: JString<'local>, emoji: JString<'local>) -> jstring {

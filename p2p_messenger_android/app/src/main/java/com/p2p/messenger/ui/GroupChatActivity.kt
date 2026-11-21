@@ -477,6 +477,7 @@ class GroupChatActivity : AppCompatActivity() {
         // (see ChatActivity.onAttachmentLongClicked, same pattern).
         adapter.onAttachmentLongClick = { item -> onGroupAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
+        adapter.onItemDoubleTap = { item, bubble -> showReactionPicker(item, bubble) }
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
         stickerPicker.provideBubbleImages(adapter)
         setupSwipeToReply()

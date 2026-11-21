@@ -1,14 +1,25 @@
 package com.p2p.messenger.util
 
 import android.content.Context
+import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.TextView
 import androidx.emoji2.emojipicker.EmojiPickerView
 import androidx.appcompat.app.AlertDialog
+import androidx.lifecycle.findViewTreeLifecycleOwner
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.color.MaterialColors
+import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Long-pressing a message opens the full SYSTEM emoji picker, as in WhatsApp.
@@ -32,6 +43,76 @@ object ReactionPicker {
      * the summary string (see Rust `reactions_summary`) does not say which emoji is MINE. It carries only totals. To know that, the protocol would need a
      * per-person list. An explicit "remove" button does the same job without growing the protocol.
      */
+    /**
+     * Double tap on a message: a bar with my 5 most used emojis (see Rust `top_reactions`) and a "+" that opens the full picker ([show]).
+     * Shown above [anchor] (the bubble), or below it when there is no room above.
+     */
+    fun showQuick(anchor: View, showRemove: Boolean, onPick: (String) -> Unit) {
+        val owner = anchor.findViewTreeLifecycleOwner() ?: return
+        owner.lifecycleScope.launch {
+            // The core read lock can wait on network work: never on the main thread.
+            val emojis = withContext(Dispatchers.IO) {
+                try {
+                    val array = org.json.JSONArray(P2PLib.topReactions())
+                    List(array.length()) { array.getString(it) }
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
+            if (anchor.isAttachedToWindow) showQuickBar(anchor, emojis, showRemove, onPick)
+        }
+    }
+
+    private fun showQuickBar(anchor: View, emojis: List<String>, showRemove: Boolean, onPick: (String) -> Unit) {
+        val context = anchor.context
+        val density = context.resources.displayMetrics.density
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val pad = (6 * density).toInt()
+            setPadding(pad, pad / 2, pad, pad / 2)
+        }
+        val popup = PopupWindow(row, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
+            setBackgroundDrawable(GradientDrawable().apply {
+                cornerRadius = 28 * density
+                setColor(MaterialColors.getColor(anchor, com.google.android.material.R.attr.colorSurfaceContainerHigh))
+            })
+            elevation = 8 * density
+        }
+        val ripple = TypedValue().also {
+            context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, it, true)
+        }.resourceId
+        fun cell(label: String, action: () -> Unit) = TextView(context).apply {
+            text = label
+            textSize = 26f
+            gravity = Gravity.CENTER
+            val pad = (8 * density).toInt()
+            setPadding(pad, pad, pad, pad)
+            if (ripple != 0) setBackgroundResource(ripple)
+            setOnClickListener {
+                popup.dismiss()
+                action()
+            }
+            row.addView(this)
+        }
+        emojis.forEach { emoji -> cell(emoji) { onPick(emoji) } }
+        cell("+") { show(context, showRemove, onPick) }.apply {
+            contentDescription = context.getString(R.string.title_pick_reaction)
+            setTextColor(MaterialColors.getColor(anchor, com.google.android.material.R.attr.colorOnSurfaceVariant))
+        }
+
+        row.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val (w, h) = row.measuredWidth to row.measuredHeight
+        val root = anchor.rootView
+        val at = IntArray(2).also { anchor.getLocationInWindow(it) }
+        val gap = (8 * density).toInt()
+        // ponytail: fixed allowance for status bar + toolbar; read the real toolbar bottom if the bar ever hides behind it.
+        val minTop = (96 * density).toInt()
+        val x = (at[0] + anchor.width / 2 - w / 2).coerceIn(gap, maxOf(gap, root.width - w - gap))
+        val above = at[1] - h - gap
+        val y = (if (above >= minTop) above else at[1] + anchor.height + gap).coerceIn(minTop, maxOf(minTop, root.height - h - gap))
+        popup.showAtLocation(anchor, Gravity.NO_GRAVITY, x, y)
+    }
+
     fun show(context: Context, showRemove: Boolean, onPick: (String) -> Unit) {
         val density = context.resources.displayMetrics.density
         val metrics = context.resources.displayMetrics

@@ -403,6 +403,26 @@ impl ChatView {
         }
         column.add_controller(gesture);
 
+        // Double click: quick-reaction bar. Capture phase and never claimed, so a selectable label still gets the clicks.
+        if !entry.deleted && entry.attachment.is_none() && !entry.id.starts_with("legacy:") {
+            let double = gtk::GestureClick::new();
+            double.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let view = Rc::downgrade(self);
+            let id = entry.id.clone();
+            double.connect_pressed(move |gesture, n_press, x, y| {
+                if n_press != 2 {
+                    return;
+                }
+                let Some(view) = view.upgrade() else { return };
+                let Some(anchor) = gesture.widget().and_downcast::<gtk::Box>() else { return };
+                let current = view.bubbles.borrow().get(&id).map(|bubble| bubble.entry.borrow().clone());
+                if let Some(entry) = current.filter(|entry| !entry.deleted) {
+                    view.quick_reactions(&anchor, &entry, x, y);
+                }
+            });
+            column.add_controller(double);
+        }
+
         Rc::new(Bubble {
             root,
             overlay,

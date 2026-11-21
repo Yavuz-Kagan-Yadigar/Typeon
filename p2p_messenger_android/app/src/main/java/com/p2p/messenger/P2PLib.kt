@@ -198,6 +198,8 @@ object P2PLib {
     /** Returns the "who reacted with what" list, shown when the reaction pill is tapped. JSON: [{"identity_id":"...","emoji":"👍"}, ...], newest reaction first.
      *  The summary on the pill (see the return of `reactToMessage`) carries only totals and no person information, so this is a separate call. */
     external fun listReactions(targetMessageId: String): String
+    /** My 5 most used reaction emojis, for the double-tap quick-reaction bar. JSON string array, padded with defaults. */
+    external fun topReactions(): String
     /** Group counterpart of `editMessage` and `deleteMessage`: it is sent to ALL reachable other members (the same fan-out pattern as `sendGroupMessage`).
      *  `targetGroupMessageLocalId` is the `messageId` of the group message to edit or delete (the `group_message_local_id` returned when it was sent).
      *  Returns "OK" or "Error: ...". */

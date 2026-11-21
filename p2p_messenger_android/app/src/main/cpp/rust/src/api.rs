@@ -1058,6 +1058,11 @@ pub fn list_reactions(target_message_id: &str) -> String {
     json_list(catch_panic(move || crate::core_lock_read().list_reactions(&id)))
 }
 
+/// My 5 most used reaction emojis (JSON string array), for the quick-reaction bar.
+pub fn top_reactions() -> String {
+    json_list(catch_panic(move || crate::core_lock_read().top_reactions()))
+}
+
 fn json_list(result: Result<String, String>) -> String {
     result.unwrap_or_else(|_| "[]".to_string())
 }

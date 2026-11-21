@@ -195,6 +195,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** Called on long press of one of my own messages. The Edit / Delete menu is shown by
      *  ChatActivity / GroupChatActivity; the adapter only passes the item. */
     var onItemLongPress: ((Item) -> Unit)? = null
+    /** Called on double tap of a text message (not while selecting). The view is the bubble, to anchor the quick-reaction bar. */
+    var onItemDoubleTap: ((Item, View) -> Unit)? = null
     /** Called when the "Download" button of an attachment bubble, or a completed attachment, is tapped. */
     var onAttachmentClick: ((Item) -> Unit)? = null
     /** Called on long press of a completed attachment bubble (for example to open the
@@ -272,8 +274,22 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val taps = android.view.GestureDetector(rv.context, object : android.view.GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: android.view.MotionEvent) = true
         })
+        // Separate detector: a double-tap listener on `taps` would swallow the second tap's
+        // `onSingleTapUp`, so quick taps while selecting would toggle only once.
+        val doubleTaps = android.view.GestureDetector(rv.context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: android.view.MotionEvent): Boolean {
+                if (selecting) return false
+                val child = rv.findChildViewUnder(e.x, e.y) ?: return false
+                val holder = rv.getChildViewHolder(child) as? BubbleViewHolder ?: return false
+                val item = items.getOrNull(holder.bindingAdapterPosition) ?: return false
+                if (item.isDeleted || item.attachment != null) return false
+                onItemDoubleTap?.invoke(item, holder.bubble)
+                return true
+            }
+        })
         rv.addOnItemTouchListener(object : RecyclerView.SimpleOnItemTouchListener() {
             override fun onInterceptTouchEvent(rv: RecyclerView, e: android.view.MotionEvent): Boolean {
+                doubleTaps.onTouchEvent(e)
                 val tap = taps.onTouchEvent(e) && e.actionMasked == android.view.MotionEvent.ACTION_UP
                 if (!tap || !selecting) return false
                 val child = rv.findChildViewUnder(e.x, e.y) ?: return true

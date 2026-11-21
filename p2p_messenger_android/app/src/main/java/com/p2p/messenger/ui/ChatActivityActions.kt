@@ -227,8 +227,9 @@ internal fun ChatActivity.showReactionsDialog(item: SimpleChatAdapter.Item) {
  * (see Rust `react_to_message`), written straight into the pill. Delivery to the other side is guaranteed by `needs_delivery_confirmation`,
  * so there is no need to wait here.
  */
-internal fun ChatActivity.showReactionPicker(item: SimpleChatAdapter.Item) {
-    ReactionPicker.show(this, item.reactions.isNotBlank()) { emoji ->
+/** [quickAnchor] set (double tap): the quick-reaction bar above that bubble, its "+" opens the full picker. */
+internal fun ChatActivity.showReactionPicker(item: SimpleChatAdapter.Item, quickAnchor: View? = null) {
+    val pick: (String) -> Unit = { emoji ->
         lifecycleScope.launch(Dispatchers.IO) {
             val summary = try {
                 P2PLib.reactToMessage(peerDeviceFingerprint, item.messageId, emoji)
@@ -244,6 +245,8 @@ internal fun ChatActivity.showReactionPicker(item: SimpleChatAdapter.Item) {
             }
         }
     }
+    if (quickAnchor != null) ReactionPicker.showQuick(quickAnchor, item.reactions.isNotBlank(), pick)
+    else ReactionPicker.show(this, item.reactions.isNotBlank(), pick)
 }
 
 internal fun ChatActivity.copyMessageText(item: SimpleChatAdapter.Item) {

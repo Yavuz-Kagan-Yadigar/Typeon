@@ -21,6 +21,47 @@ impl ChatView {
         chooser.popup();
     }
 
+    /// Double click on a message: my 5 most used emojis plus "+" for the full chooser, pointing at the click.
+    pub(super) fn quick_reactions(self: &Rc<Self>, anchor: &gtk::Box, entry: &Entry, x: f64, y: f64) {
+        // Takes the core lock: read off the GTK thread.
+        let (view, anchor, entry) = (self.clone(), anchor.clone(), entry.clone());
+        crate::app::run_in_background(core::top_reactions, move |emojis| {
+            if anchor.root().is_none() {
+                return;
+            }
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            let popover = gtk::Popover::builder().child(&row).build();
+            popover.set_parent(&anchor);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.set_position(gtk::PositionType::Top);
+            popover.connect_closed(|popover| popover.unparent());
+            for emoji in emojis {
+                let button = gtk::Button::with_label(&emoji);
+                button.add_css_class("flat");
+                button.add_css_class("title-2");
+                let (view, popover, id) = (view.clone(), popover.clone(), entry.id.clone());
+                button.connect_clicked(move |_| {
+                    popover.popdown();
+                    view.send_reaction(&id, &emoji);
+                });
+                row.append(&button);
+            }
+            let more = gtk::Button::from_icon_name("list-add-symbolic");
+            more.add_css_class("flat");
+            more.set_valign(gtk::Align::Center);
+            more.set_tooltip_text(Some("More emojis"));
+            {
+                let (view, popover, anchor, entry) = (view.clone(), popover.clone(), anchor.clone(), entry.clone());
+                more.connect_clicked(move |_| {
+                    popover.popdown();
+                    view.pick_reaction(&anchor, &entry);
+                });
+            }
+            row.append(&more);
+            popover.popup();
+        });
+    }
+
     /// `emoji` empty removes my reaction.
     pub(super) fn send_reaction(self: &Rc<Self>, id: &str, emoji: &str) {
         let (direct, target) = match &self.conversation {

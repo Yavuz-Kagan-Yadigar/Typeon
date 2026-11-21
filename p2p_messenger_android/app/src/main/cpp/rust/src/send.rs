@@ -492,6 +492,28 @@ impl P2PCore {
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// The quick-reaction bar (double tap on a message): my 5 most used emojis, as a JSON string array. Counts my reactions that are still stored;
+    /// ties go to the most recent. Padded with common defaults, so a new account also gets 5.
+    pub(crate) fn top_reactions(&self) -> String {
+        const DEFAULTS: [&str; 5] = ["👍", "❤️", "😂", "😮", "😢"];
+        let mut out: Vec<String> = Vec::new();
+        if let (Some(conn), Some(identity)) = (&self.db, &self.identity) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT emoji FROM message_reactions WHERE reactor_identity_id = ?1 AND emoji != ''
+                 GROUP BY emoji ORDER BY COUNT(*) DESC, MAX(reacted_at_ms) DESC LIMIT 5"
+            ) {
+                if let Ok(rows) = stmt.query_map(params![identity.identity_id], |row| row.get::<_, String>(0)) {
+                    out.extend(rows.flatten());
+                }
+            }
+        }
+        for emoji in DEFAULTS {
+            if out.len() >= 5 { break }
+            if !out.iter().any(|e| e == emoji) { out.push(emoji.to_string()) }
+        }
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// See the `message_seen` table docs. Persists a "seen" receipt when one arrives (1:1 or group). `message_id` has the same column and meaning in
     /// both cases (see `load_message_history`/`load_group_message_history`). Same out-of-order protection as `apply_reaction`: an older timestamp does not
     /// overwrite a newer record from the same viewer.

@@ -453,6 +453,7 @@ class ChatActivity : AppCompatActivity() {
         adapter.onAttachmentClick = { item -> onAttachmentClicked(item) }
         adapter.onAttachmentLongClick = { item -> onAttachmentLongClicked(item) }
         adapter.onReactionsClick = { item -> showReactionsDialog(item) }
+        adapter.onItemDoubleTap = { item, bubble -> showReactionPicker(item, bubble) }
         adapter.onReplyPreviewClick = { targetMessageId -> scrollToMessage(targetMessageId) }
         adapter.peerName = { txtToolbarTitle.text?.toString() }
         stickerPicker.provideBubbleImages(adapter)
