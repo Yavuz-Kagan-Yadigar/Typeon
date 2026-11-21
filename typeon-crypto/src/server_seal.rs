@@ -90,6 +90,54 @@ fn open(mut key: [u8; 32], aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, String>
 }
 
 // ---------------------------------------------------------------------------
+// Length padding
+// ---------------------------------------------------------------------------
+
+/// Smallest padded plaintext. Acks, receipts and short texts all look the same.
+const MIN_PADDED_LEN: usize = 512;
+/// AEAD tag added by `seal`.
+const TAG_LEN: usize = 16;
+/// Largest padded plaintext of a mailbox item: its sealed form still fits `MAX_DEPOSIT_BYTES`.
+const ENVELOPE_PAD_CAP: usize = crate::server_proto::MAX_DEPOSIT_BYTES - NONCE_LEN - TAG_LEN;
+/// Same for one archive record, whose budget is half the wire cap (`server_client/archive.rs`).
+const ARCHIVE_PAD_CAP: usize = crate::server_proto::MAX_DEPOSIT_BYTES / 2 - NONCE_LEN - TAG_LEN;
+
+/// Padmé (Nikitin et al., "Reducing Metadata Leakage from Encrypted Files and
+/// Communication with PURBs", 2019). Rounds `len` up so that only O(log log len)
+/// bits of it remain. The overhead is at most about 12 %, and smaller for big items.
+fn padme(len: usize) -> usize {
+    if len < 2 {
+        return len;
+    }
+    let e = usize::BITS - 1 - len.leading_zeros(); // floor(log2 len)
+    let s = u32::BITS - e.leading_zeros(); // floor(log2 e) + 1
+    let mask = (1usize << (e - s)) - 1;
+    (len + mask) & !mask
+}
+
+/// `plaintext || 0x80 || 0x00..`, padded to the Padmé size (at least
+/// `MIN_PADDED_LEN`), but never past `cap` unless the data alone is longer.
+fn pad(plaintext: &[u8], cap: usize) -> Vec<u8> {
+    let len = plaintext.len() + 1;
+    let target = padme(len).max(MIN_PADDED_LEN).min(cap).max(len);
+    let mut out = Vec::with_capacity(target);
+    out.extend_from_slice(plaintext);
+    out.push(0x80);
+    out.resize(target, 0);
+    out
+}
+
+/// Inverse of `pad`.
+fn unpad(mut padded: Vec<u8>) -> Result<Vec<u8>, String> {
+    let end = padded.iter().rposition(|&b| b != 0).ok_or("Bad padding")?;
+    if padded[end] != 0x80 {
+        return Err("Bad padding".to_string());
+    }
+    padded.truncate(end);
+    Ok(padded)
+}
+
+// ---------------------------------------------------------------------------
 // Identity blinding
 // ---------------------------------------------------------------------------
 
@@ -230,7 +278,7 @@ pub fn server_archive_purge_secret(archive_root_key: &[u8; 32], conv_key: &str, 
 /// without this binding the server could return a deposit to its own sender or
 /// move it to the session's other mailbox.
 pub fn seal_envelope(root_key: &[u8], mailbox_id: &str, sender_fp: &str, envelope_cbor: &[u8]) -> Result<Vec<u8>, String> {
-    seal(derive(root_key, b"p2pmsg-v0.1-server-seal")?, &envelope_aad(mailbox_id, sender_fp), envelope_cbor)
+    seal(derive(root_key, b"p2pmsg-v0.1-server-seal")?, &envelope_aad(mailbox_id, sender_fp), &pad(envelope_cbor, ENVELOPE_PAD_CAP))
 }
 
 /// Neither part may contain a 0 byte (`mb_<hex>`, hex fingerprint).
@@ -248,7 +296,7 @@ fn envelope_aad(mailbox_id: &str, sender_fp: &str) -> Vec<u8> {
 /// `mailbox_id` is the mailbox the item was fetched from. `sender_fp` is the
 /// device at the other end of the session that owns `root_key`.
 pub fn open_envelope(root_key: &[u8], mailbox_id: &str, sender_fp: &str, sealed: &[u8]) -> Result<Vec<u8>, String> {
-    open(derive(root_key, b"p2pmsg-v0.1-server-seal")?, &envelope_aad(mailbox_id, sender_fp), sealed)
+    unpad(open(derive(root_key, b"p2pmsg-v0.1-server-seal")?, &envelope_aad(mailbox_id, sender_fp), sealed)?)
 }
 
 /// Seals an envelope for a first-contact mailbox (`Handshake`,
@@ -272,7 +320,7 @@ pub fn seal_first_contact(secret: &[u8], mailbox_id: &str, recipient_kem: Option
         }
         None => [&[0u8][..], envelope_cbor].concat(),
     };
-    seal(derive(secret, b"p2pmsg-v0.5-first-contact-seal")?, mailbox_id.as_bytes(), &inner)
+    seal(derive(secret, b"p2pmsg-v0.5-first-contact-seal")?, mailbox_id.as_bytes(), &pad(&inner, ENVELOPE_PAD_CAP))
 }
 
 /// Inverse of `seal_first_contact`. `own_x25519_secret` and `own_kyber_secret`
@@ -284,7 +332,7 @@ pub fn open_first_contact(
     own_kyber_secret: &crate::ratchet::MlKem1024DecapsulationKey,
     sealed: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let inner = open(derive(secret, b"p2pmsg-v0.5-first-contact-seal")?, mailbox_id.as_bytes(), sealed)?;
+    let inner = unpad(open(derive(secret, b"p2pmsg-v0.5-first-contact-seal")?, mailbox_id.as_bytes(), sealed)?)?;
     match inner.split_first() {
         Some((&0, envelope)) => Ok(envelope.to_vec()),
         Some((&1, rest)) if rest.len() > crate::ratchet::KEM_HEADER_LEN => {
@@ -350,7 +398,7 @@ pub fn seal_archive_record(
     sent_at_ms: u64,
     record_cbor: &[u8],
 ) -> Result<Vec<u8>, String> {
-    seal(archive_record_key(archive_root_key, conv_key, record_id, rev)?, &archive_record_aad(bucket, sent_at_ms), record_cbor)
+    seal(archive_record_key(archive_root_key, conv_key, record_id, rev)?, &archive_record_aad(bucket, sent_at_ms), &pad(record_cbor, ARCHIVE_PAD_CAP))
 }
 
 /// Bound with the tag, besides the body: the bucket (key generation,
@@ -380,7 +428,7 @@ pub fn open_archive_record(
     sent_at_ms: u64,
     sealed: &[u8],
 ) -> Result<Vec<u8>, String> {
-    open(archive_record_key(archive_root_key, conv_key, record_id, rev)?, &archive_record_aad(bucket, sent_at_ms), sealed)
+    unpad(open(archive_record_key(archive_root_key, conv_key, record_id, rev)?, &archive_record_aad(bucket, sent_at_ms), sealed)?)
 }
 
 #[cfg(test)]
@@ -517,4 +565,52 @@ mod tests {
         assert_eq!(archive_epoch_for(ARCHIVE_EPOCH_MS), 1);
     }
 
+
+    #[test]
+    fn padme_rounds_up_with_bounded_overhead() {
+        let mut last = 0;
+        for n in 0..200_000usize {
+            let p = padme(n);
+            assert!(p >= n && p >= last, "padme must grow and never shrink data: {n}");
+            if n >= 256 {
+                assert!((p - n) * 100 <= n * 12, "overhead over 12 % at {n}");
+            }
+            last = p;
+        }
+    }
+
+    #[test]
+    fn padding_roundtrips_all_seal_kinds() {
+        let fc_secret = [9u8; 16];
+        let x = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
+        let (kyber_sk, _) = crate::ratchet::mlkem_generate();
+        for len in [0usize, 1, 100, 511, 512, 1000, 65_537] {
+            // Trailing zeros in the data itself must survive.
+            let data: Vec<u8> = (0..len).map(|i| if i + 3 >= len { 0 } else { i as u8 | 1 }).collect();
+            let s = seal_envelope(&[7u8; 32], "mb", "fp", &data).unwrap();
+            assert_eq!(open_envelope(&[7u8; 32], "mb", "fp", &s).unwrap(), data);
+            let s = seal_first_contact(&fc_secret, "mb_fc", None, &data).unwrap();
+            assert_eq!(open_first_contact(&fc_secret, "mb_fc", &x, &kyber_sk, &s).unwrap(), data);
+            let s = seal_archive_record(&[3u8; 32], "conv", "rec", 1, "bk", 5, &data).unwrap();
+            assert_eq!(open_archive_record(&[3u8; 32], "conv", "rec", 1, "bk", 5, &s).unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn small_items_share_one_size_and_caps_hold() {
+        let size = |n: usize| seal_envelope(&[7u8; 32], "mb", "fp", &vec![1u8; n]).unwrap().len();
+        assert!((0..=400).all(|n| size(n) == size(0)), "short items must look alike");
+        let max = crate::server_proto::MAX_DEPOSIT_BYTES;
+        assert!(size(ENVELOPE_PAD_CAP - 1) <= max, "padding must not push an item past the wire cap");
+        let rec = seal_archive_record(&[3u8; 32], "c", "r", 0, "b", 0, &vec![1u8; ARCHIVE_PAD_CAP - 1]).unwrap();
+        assert!(rec.len() <= max / 2);
+    }
+
+    #[test]
+    fn unpad_rejects_bad_input() {
+        assert!(unpad(vec![]).is_err());
+        assert!(unpad(vec![0; 64]).is_err());
+        assert!(unpad(vec![1, 2, 3, 0, 0]).is_err());
+        assert_eq!(unpad(vec![1, 0, 0x80, 0, 0]).unwrap(), vec![1, 0]);
+    }
 }
