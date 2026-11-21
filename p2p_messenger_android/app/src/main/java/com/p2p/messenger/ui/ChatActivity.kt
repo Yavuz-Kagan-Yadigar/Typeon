@@ -552,11 +552,6 @@ class ChatActivity : AppCompatActivity() {
                 sendNewMessage(text)
             }
         }
-        lifecycleScope.launch {
-            val peer = peerDeviceFingerprint
-            disappearSecs = withContext(Dispatchers.IO) { try { P2PLib.getDisappearMode(peer, "").toInt() } catch (e: Throwable) { 0 } }
-            Disappear.showMode(btnSend, disappearSecs)
-        }
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -637,6 +632,16 @@ class ChatActivity : AppCompatActivity() {
 
         peerDeviceFingerprint = newPeer
         whiteboard.bind(peerDeviceFingerprint, "")
+        // This chat's disappearing mode. Here, not in onCreate: the peer is only known from this point (and changes with a new contact).
+        disappearSecs = 0
+        Disappear.showMode(btnSend, 0)
+        lifecycleScope.launch {
+            val secs = withContext(Dispatchers.IO) { try { P2PLib.getDisappearMode(newPeer, "").toInt() } catch (e: Throwable) { 0 } }
+            if (peerDeviceFingerprint == newPeer) {
+                disappearSecs = secs
+                Disappear.showMode(btnSend, secs)
+            }
+        }
         P2PService.activeConversationId = peerDeviceFingerprint
         localMessages.clear()
         adapter.notifyDataSetChanged()

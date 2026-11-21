@@ -570,11 +570,6 @@ class GroupChatActivity : AppCompatActivity() {
                 sendNewMessage(text)
             }
         }
-        lifecycleScope.launch {
-            val gid = groupId
-            disappearSecs = withContext(Dispatchers.IO) { try { P2PLib.getDisappearMode("", gid).toInt() } catch (e: Throwable) { 0 } }
-            Disappear.showMode(btnSend, disappearSecs)
-        }
         // Only sends on false->true/true->false transitions (see ChatActivity).
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -627,6 +622,16 @@ class GroupChatActivity : AppCompatActivity() {
 
         groupId = newGroupId
         whiteboard.bind("", groupId)
+        // The group's disappearing mode: here, since the group is only known from this point.
+        disappearSecs = 0
+        Disappear.showMode(btnSend, 0)
+        lifecycleScope.launch {
+            val secs = withContext(Dispatchers.IO) { try { P2PLib.getDisappearMode("", newGroupId).toInt() } catch (e: Throwable) { 0 } }
+            if (groupId == newGroupId) {
+                disappearSecs = secs
+                Disappear.showMode(btnSend, secs)
+            }
+        }
         refreshCallOffer()
         P2PService.activeConversationId = "group:$groupId"
         localMessages.clear()
