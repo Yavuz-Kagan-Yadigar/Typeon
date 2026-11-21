@@ -563,7 +563,8 @@ class StickerPicker(
         // Cell-sized pictures: a 600 px sticker decoded whole filled the cache
         // with ~11 animations, so scrolling back showed blank cells again.
         // ponytail: one fixed size; tablets with wide cells may want more.
-        private val maxPx = (128 * activity.resources.displayMetrics.density).toInt()
+        // Lazy: the picker (and this adapter) is built in the Activity's field initializers, before it has resources.
+        private val maxPx by lazy { (128 * activity.resources.displayMetrics.density).toInt() }
         private val cache = object : android.util.LruCache<String, Drawable>(2 * STICKER_CACHE_BYTES) {
             override fun sizeOf(key: String, value: Drawable): Int = stickerDrawableBytes(value)
         }
