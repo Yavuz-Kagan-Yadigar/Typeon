@@ -169,9 +169,11 @@ pub(crate) fn restore_conversion(out: &std::path::Path, kind: &str, owner: &str,
 /// Keeps an encrypted copy of the conversion `out`, replacing an older one.
 /// A failure only costs a conversion after the next lock.
 pub(crate) fn keep_conversion(out: &std::path::Path, kind: &str, owner: &str, file_key: &[u8; 32]) {
-    // ponytail: size cap instead of a sticker flag; a hi-res photo's PNG would
-    // be a second full-size copy the Storage screen does not show.
-    if std::fs::metadata(out).map_or(true, |m| m.len() > 4 << 20) {
+    // A hi-res photo's PNG would be a second full-size copy the Storage screen
+    // does not show: 4 MB. A sticker's GIF is often bigger, and converting it
+    // again after every start was the slow part of the picker: 64 MB.
+    let cap: u64 = if kind.starts_with("sticker-") { 64 << 20 } else { 4 << 20 };
+    if std::fs::metadata(out).map_or(true, |m| m.len() > cap) {
         return;
     }
     let Some(dir) = conversion_cache_dir(out) else { return };

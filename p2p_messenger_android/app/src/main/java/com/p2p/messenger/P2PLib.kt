@@ -290,6 +290,17 @@ object P2PLib {
     external fun setStickerFavorite(id: String, favorite: Boolean): String
     /** Sends a sticker to a contact's device. Returns the attachment's `file_id`, or "Error: ...". */
     external fun sendSticker(peerFp: String, stickerId: String, replyToMessageId: String, replyToPreview: String): String
+    /** This device's sticker folders: JSON [{"id","name","stickers":[sticker id]}], oldest first. */
+    external fun listStickerFolders(): String
+    /** Returns the new folder's id, or "Error: ...". */
+    external fun createStickerFolder(name: String): String
+    external fun renameStickerFolder(id: Long, name: String): String
+    /** Deletes the folder only; its stickers stay. "OK" or "Error: ...". */
+    external fun deleteStickerFolder(id: Long): String
+    /** [idsJson]: JSON array of sticker ids. "OK" or "Error: ...". */
+    external fun addStickersToFolder(id: Long, idsJson: String): String
+    /** Takes stickers out of a folder; they stay in the store. "OK" or "Error: ...". */
+    external fun removeStickersFromFolder(id: Long, idsJson: String): String
     /** Group counterpart of `sendSticker`. */
     external fun sendGroupSticker(groupId: String, stickerId: String, replyToMessageId: String, replyToPreview: String, replyToSenderIdentityId: String): String
     /** Copies a received (downloaded) sticker into this device's own sticker store. Returns the sticker id, or "Error: ...". */

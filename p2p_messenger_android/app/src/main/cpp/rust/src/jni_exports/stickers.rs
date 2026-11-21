@@ -207,6 +207,57 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setStickerFavorite<'local>(
     sticker_reply(&mut env, result)
 }
 
+/// JSON `[{id, name, stickers: [sticker id]}]`: this device's sticker folders.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_listStickerFolders<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jstring {
+    let json = catch_panic(|| core_lock_read().list_sticker_folders()).unwrap_or_else(|_| "[]".to_string());
+    safe_new_jstring(&mut env, json)
+}
+
+/// New folder: its id, or "Error: ...".
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_createStickerFolder<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, name: JString<'local>) -> jstring {
+    let name: String = jstr(&mut env, &name).unwrap_or_default();
+    let result = catch_panic(move || core_lock().create_sticker_folder(&name).map(|id| id.to_string()));
+    sticker_reply(&mut env, result)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_renameStickerFolder<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, id: jni::sys::jlong, name: JString<'local>) -> jstring {
+    let name: String = jstr(&mut env, &name).unwrap_or_default();
+    let result = catch_panic(move || core_lock().rename_sticker_folder(id, &name).map(|()| "OK".to_string()));
+    sticker_reply(&mut env, result)
+}
+
+/// Deletes the folder only, not its stickers.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_deleteStickerFolder<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, id: jni::sys::jlong) -> jstring {
+    let result = catch_panic(move || core_lock().delete_sticker_folder(id).map(|()| "OK".to_string()));
+    sticker_reply(&mut env, result)
+}
+
+/// `ids_json`: JSON array of sticker ids.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_addStickersToFolder<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, id: jni::sys::jlong, ids_json: JString<'local>) -> jstring {
+    let ids_json: String = jstr(&mut env, &ids_json).unwrap_or_default();
+    let result = catch_panic(move || {
+        let ids: Vec<String> = serde_json::from_str(&ids_json).map_err(|e| format!("Bad id list: {e}"))?;
+        core_lock().add_stickers_to_folder(id, &ids).map(|()| "OK".to_string())
+    });
+    sticker_reply(&mut env, result)
+}
+
+/// Takes stickers (`ids_json`: JSON array) out of a folder; they stay in the store.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_removeStickersFromFolder<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, id: jni::sys::jlong, ids_json: JString<'local>) -> jstring {
+    let ids_json: String = jstr(&mut env, &ids_json).unwrap_or_default();
+    let result = catch_panic(move || {
+        let ids: Vec<String> = serde_json::from_str(&ids_json).map_err(|e| format!("Bad id list: {e}"))?;
+        core_lock().remove_stickers_from_folder(id, &ids).map(|()| "OK".to_string())
+    });
+    sticker_reply(&mut env, result)
+}
+
 /// Sends a sticker to a contact device. Returns the attachment's file id.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendSticker<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, peer: JString<'local>, sticker_id: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>) -> jstring {

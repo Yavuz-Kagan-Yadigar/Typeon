@@ -59,8 +59,21 @@ class StickerPicker(
     private val scope = activity.lifecycleScope
     private var dialog: BottomSheetDialog? = null
     private var progressDialog: AlertDialog? = null
+    /** Every sticker in the store, favorites first. */
+    private val allIds = mutableListOf<String>()
+    /** The stickers the grid shows: all, or the open folder's. */
     private val ids = mutableListOf<String>()
     private val favorites = mutableSetOf<String>()
+    /** Animated stickers: only these get a first-frame placeholder. */
+    private val animatedIds = mutableSetOf<String>()
+    private class Folder(val id: Long, val name: String, val stickers: Set<String>)
+    private val folders = mutableListOf<Folder>()
+    /** The folder the grid shows, or null: folders first, then every sticker. */
+    private var openFolder: Folder? = null
+    /** Folder cells ahead of the stickers in the grid. */
+    private val folderCount get() = if (openFolder == null) folders.size else 0
+    private var bar: View? = null
+    private var backCallback: androidx.activity.OnBackPressedCallback? = null
     /** Long-press starts a selection; while it is not empty a tap selects too. */
     private val selected = mutableSetOf<String>()
     private var selectAllButton: View? = null
@@ -91,6 +104,16 @@ class StickerPicker(
         val grid = sheet.findViewById<RecyclerView>(R.id.recyclerStickers)
         grid.layoutManager = GridLayoutManager(activity, 3)
         grid.adapter = gridAdapter
+        bar = sheet
+        openFolder = null
+        sheet.findViewById<View>(R.id.btnStickerFolderBack).setOnClickListener { showFolder(null) }
+        sheet.findViewById<View>(R.id.btnStickerFolderRename).setOnClickListener { renameOpenFolder() }
+        sheet.findViewById<View>(R.id.btnStickerFolderDelete).setOnClickListener { confirmDeleteOpenFolder() }
+        sheet.findViewById<View>(R.id.btnStickerNewFolder).setOnClickListener {
+            askFolderName(R.string.action_sticker_folder_create, "") { name -> coreCall({ P2PLib.createStickerFolder(name) }) { refresh() } }
+        }
+        sheet.findViewById<View>(R.id.btnStickerAddToFolder).setOnClickListener { chooseFolderForSelected() }
+        sheet.findViewById<View>(R.id.btnStickerRemoveFromFolder).setOnClickListener { removeSelectedFromFolder() }
         sheet.findViewById<View>(R.id.btnStickerAdd).setOnClickListener {
             // The system picker runs in another process.
             AppLock.beginTrustedExcursion()
@@ -119,12 +142,17 @@ class StickerPicker(
         grid.layoutParams.height = height - (64 * activity.resources.displayMetrics.density).toInt()
         dialog = BottomSheetDialog(activity).apply {
             setContentView(sheet)
+            // Back closes an open folder first, then the sheet.
+            backCallback = object : androidx.activity.OnBackPressedCallback(false) {
+                override fun handleOnBackPressed() = showFolder(null)
+            }.also { onBackPressedDispatcher.addCallback(it) }
             behavior.peekHeight = height
             behavior.state = com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED
             behavior.skipCollapsed = true
             // The shared adapter would keep every dismissed sheet's grid and bitmaps alive.
             setOnDismissListener {
                 grid.adapter = null
+                if (bar === sheet) bar = null
                 if (dialog === this) dialog = null
             }
             show()
@@ -168,14 +196,133 @@ class StickerPicker(
                 emptyList()
             }
             val list = rows.map { it.optString("id") }
+            val folderList = try {
+                val array = JSONArray(P2PLib.listStickerFolders())
+                (0 until array.length()).mapNotNull { i ->
+                    val o = array.optJSONObject(i) ?: return@mapNotNull null
+                    val stickers = o.optJSONArray("stickers")
+                    Folder(o.optLong("id"), o.optString("name"), (0 until (stickers?.length() ?: 0)).mapTo(mutableSetOf()) { stickers!!.optString(it) })
+                }
+            } catch (e: Exception) {
+                emptyList()
+            }
             withContext(Dispatchers.Main) {
-                ids.clear()
-                ids.addAll(list)
+                allIds.clear()
+                allIds.addAll(list)
                 favorites.clear()
                 rows.filter { it.optBoolean("favorite") }.mapTo(favorites) { it.optString("id") }
-                selected.retainAll(list.toSet())
-                selectionChanged()
+                animatedIds.clear()
+                rows.filter { it.optBoolean("animated") }.mapTo(animatedIds) { it.optString("id") }
+                folders.clear()
+                folders.addAll(folderList)
+                // The open folder, refreshed (null when it is gone).
+                openFolder = openFolder?.let { o -> folders.firstOrNull { it.id == o.id } }
+                showGrid()
             }
+        }
+    }
+
+    /** Shows [folder]'s stickers, or (null) the folders and every sticker. */
+    private fun showFolder(folder: Folder?) {
+        openFolder = folder
+        selected.clear()
+        showGrid()
+        bar?.findViewById<RecyclerView>(R.id.recyclerStickers)?.scrollToPosition(0)
+    }
+
+    private fun showGrid() {
+        ids.clear()
+        val folder = openFolder
+        if (folder == null) ids.addAll(allIds) else allIds.filterTo(ids) { it in folder.stickers }
+        selected.retainAll(ids.toSet())
+        selectionChanged()
+    }
+
+    /** Grid position of the sticker [id], or -1. */
+    private fun positionOf(id: String): Int = ids.indexOf(id).let { if (it < 0) -1 else it + folderCount }
+
+    private fun chooseFolderForSelected() {
+        val chosen = selected.toList()
+        val list = folders.toList()
+        val names = list.map { it.name } + activity.getString(R.string.action_sticker_folder_create)
+        AlertDialog.Builder(activity)
+            .setTitle(R.string.action_sticker_add_to_folder)
+            .setItems(names.toTypedArray()) { _, which ->
+                val folder = list.getOrNull(which)
+                if (folder != null) {
+                    addToFolder(folder.id, folder.name, chosen)
+                } else {
+                    askFolderName(R.string.action_sticker_folder_create, "") { name ->
+                        coreCall({ P2PLib.createStickerFolder(name) }) { id -> addToFolder(id.toLong(), name, chosen) }
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun addToFolder(id: Long, name: String, chosen: List<String>) {
+        coreCall({ P2PLib.addStickersToFolder(id, JSONArray(chosen).toString()) }) {
+            toast(activity.getString(R.string.msg_sticker_added_to_folder, name))
+            selected.clear()
+            refresh()
+        }
+    }
+
+    private fun removeSelectedFromFolder() {
+        val folder = openFolder ?: return
+        val chosen = selected.toList()
+        coreCall({ P2PLib.removeStickersFromFolder(folder.id, JSONArray(chosen).toString()) }) {
+            selected.clear()
+            refresh()
+        }
+    }
+
+    private fun renameOpenFolder() {
+        val folder = openFolder ?: return
+        askFolderName(R.string.action_sticker_folder_rename, folder.name) { name ->
+            coreCall({ P2PLib.renameStickerFolder(folder.id, name) }) { refresh() }
+        }
+    }
+
+    /** Deletes the open folder only: its stickers stay. */
+    private fun confirmDeleteOpenFolder() {
+        val folder = openFolder ?: return
+        AlertDialog.Builder(activity)
+            .setMessage(activity.getString(R.string.msg_confirm_delete_sticker_folder, folder.name))
+            .setPositiveButton(R.string.action_sticker_folder_delete) { _, _ ->
+                coreCall({ P2PLib.deleteStickerFolder(folder.id) }) {
+                    showFolder(null)
+                    refresh()
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun askFolderName(title: Int, initial: String, done: (String) -> Unit) {
+        val input = android.widget.EditText(activity).apply {
+            setText(initial)
+            setSelection(initial.length)
+            hint = activity.getString(R.string.hint_sticker_folder_name)
+            isSingleLine = true
+            filters = arrayOf(android.text.InputFilter.LengthFilter(64))
+        }
+        AlertDialog.Builder(activity)
+            .setTitle(title)
+            .setView(input)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isNotEmpty()) done(name)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** Runs [f] off the main thread; an error is a toast, else [ok] gets the result on the main thread. */
+    private fun coreCall(f: () -> String, ok: (String) -> Unit) {
+        scope.launch(Dispatchers.IO) {
+            val result = call(f)
+            withContext(Dispatchers.Main) { if (result.startsWith("Error:")) toast(coreErrorText(activity, result)) else ok(result) }
         }
     }
 
@@ -219,6 +366,20 @@ class StickerPicker(
      */
     private fun selectionChanged(changed: List<String>? = null) {
         val any = selected.isNotEmpty()
+        val folder = openFolder
+        bar?.let { b ->
+            fun show(id: Int, on: Boolean) { b.findViewById<View>(id).visibility = if (on) View.VISIBLE else View.GONE }
+            show(R.id.btnStickerFolderBack, folder != null)
+            show(R.id.btnStickerFolderRename, folder != null && !any)
+            show(R.id.btnStickerFolderDelete, folder != null && !any)
+            show(R.id.btnStickerAdd, folder == null)
+            show(R.id.btnStickerImportWhatsapp, folder == null)
+            show(R.id.btnStickerNewFolder, folder == null && !any)
+            show(R.id.btnStickerAddToFolder, any)
+            show(R.id.btnStickerRemoveFromFolder, folder != null && any)
+            b.findViewById<android.widget.Button>(R.id.btnStickerFolderBack).text = "‹ ${folder?.name.orEmpty()}"
+        }
+        backCallback?.isEnabled = folder != null
         selectAllButton?.visibility = if (any) View.VISIBLE else View.GONE
         deleteSelectedButton?.visibility = if (any) View.VISIBLE else View.GONE
         favoriteButton?.visibility = if (any) View.VISIBLE else View.GONE
@@ -231,7 +392,7 @@ class StickerPicker(
             gridAdapter.notifyDataSetChanged()
         } else {
             for (id in changed) {
-                val idx = ids.indexOf(id)
+                val idx = positionOf(id)
                 if (idx >= 0) gridAdapter.notifyItemChanged(idx, SELECTION_PAYLOAD)
             }
         }
@@ -392,33 +553,69 @@ class StickerPicker(
 
     private fun call(f: () -> String): String = try { f() } catch (e: Exception) { "Error: ${e.message}" }
 
-    /** The picture at the path [path] returns (a `.png`, or a `.gif` that plays). */
-    private fun drawableAt(path: () -> String): Drawable? {
+    /** The picture at the path [path] returns (a `.png`, or a `.gif` that plays), at most [maxPx] a side (0 = as stored). */
+    private fun drawableAt(maxPx: Int = 0, path: () -> String): Drawable? {
         val p = call(path)
-        return if (p.startsWith("Error:")) null else loadStickerDrawable(activity, File(p))
+        return if (p.startsWith("Error:")) null else loadStickerDrawable(activity, File(p), maxPx)
     }
 
-    private inner class StickerGridAdapter : RecyclerView.Adapter<StickerGridAdapter.Holder>() {
-        private val cache = object : android.util.LruCache<String, Drawable>(STICKER_CACHE_BYTES) {
+    private inner class StickerGridAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        // Cell-sized pictures: a 600 px sticker decoded whole filled the cache
+        // with ~11 animations, so scrolling back showed blank cells again.
+        // ponytail: one fixed size; tablets with wide cells may want more.
+        private val maxPx = (128 * activity.resources.displayMetrics.density).toInt()
+        private val cache = object : android.util.LruCache<String, Drawable>(2 * STICKER_CACHE_BYTES) {
             override fun sizeOf(key: String, value: Drawable): Int = stickerDrawableBytes(value)
         }
+        /** Cached as the first frame only: the animation is still to load. */
+        private val partial = mutableSetOf<String>()
         /** Being decoded: no second request for the same sticker. */
         private val pending = mutableSetOf<String>()
+        /** The cell each shown sticker is bound to (main thread). */
+        private val boundHolders = HashMap<String, Holder>()
         /** Few grid decodes at once: a fling must not decode 64 animations in parallel. */
         private val decodeGate = Semaphore(3)
+        /** Animation conversions (slow) wait here, not in front of the stills and first frames. */
+        private val animationGate = Semaphore(2)
 
         inner class Holder(view: View) : RecyclerView.ViewHolder(view) {
             val image: ImageView = view.findViewById(R.id.imgStickerCell)
             val star: View = view.findViewById(R.id.txtStickerFavorite)
+            var boundId: String? = null
         }
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder =
-            Holder(LayoutInflater.from(parent.context).inflate(R.layout.item_sticker, parent, false))
+        override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+            if (holder is Holder) holder.boundId?.let { if (boundHolders[it] === holder) boundHolders.remove(it) }
+        }
 
-        override fun getItemCount(): Int = ids.size
+        /** Main thread: [id] still has a cell; else it stops pending (a re-bind asks again). */
+        private fun wanted(id: String): Boolean =
+            (boundHolders[id]?.boundId == id).also { if (!it) pending.remove(id) }
 
-        override fun onBindViewHolder(holder: Holder, position: Int, payloads: MutableList<Any>) {
-            if (payloads.isEmpty()) onBindViewHolder(holder, position) else bindSelection(holder, ids[position])
+        /** Main thread: caches [d] and puts it in [id]'s cell, no rebind (no change animation). */
+        private fun show(id: String, d: Drawable, firstFrame: Boolean) {
+            cache.put(id, d)
+            if (firstFrame) partial.add(id) else partial.remove(id)
+            boundHolders[id]?.takeIf { it.boundId == id }?.image?.setImageDrawable(d)
+        }
+
+        inner class FolderHolder(view: View) : RecyclerView.ViewHolder(view) {
+            val label: android.widget.TextView = view.findViewById(R.id.txtStickerFolder)
+        }
+
+        override fun getItemViewType(position: Int): Int = if (position < folderCount) FOLDER_CELL else STICKER_CELL
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            val inflater = LayoutInflater.from(parent.context)
+            return if (viewType == FOLDER_CELL) FolderHolder(inflater.inflate(R.layout.item_sticker_folder, parent, false))
+                else Holder(inflater.inflate(R.layout.item_sticker, parent, false))
+        }
+
+        override fun getItemCount(): Int = folderCount + ids.size
+
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int, payloads: MutableList<Any>) {
+            if (payloads.isEmpty() || holder !is Holder) onBindViewHolder(holder, position)
+            else bindSelection(holder, ids[position - folderCount])
         }
 
         private fun bindSelection(holder: Holder, id: String) {
@@ -440,8 +637,18 @@ class StickerPicker(
             }
         }
 
-        override fun onBindViewHolder(holder: Holder, position: Int) {
-            val id = ids[position]
+        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+            if (holder is FolderHolder) {
+                val folder = folders[position]
+                holder.label.text = "📁\n${folder.name}\n(${folder.stickers.size})"
+                holder.itemView.setOnClickListener { showFolder(folder) }
+                return
+            }
+            holder as Holder
+            val id = ids[position - folderCount]
+            holder.boundId?.let { if (boundHolders[it] === holder) boundHolders.remove(it) }
+            holder.boundId = id
+            boundHolders[id] = holder
             val cached = cache.get(id)
             holder.image.setImageDrawable(cached)
             bindSelection(holder, id)
@@ -451,36 +658,32 @@ class StickerPicker(
                 toggle(id)
                 true
             }
-            if (cached != null || !pending.add(id)) return
+            if ((cached != null && id !in partial) || !pending.add(id)) return
+            val animated = id in animatedIds
+            val needFirst = animated && cached == null
             scope.launch(Dispatchers.IO) {
-              decodeGate.withPermit {
-                // Scrolled away while waiting: skip; a re-bind asks again.
-                if (!holder.itemView.isAttachedToWindow) {
-                    withContext(Dispatchers.Main) { pending.remove(id) }
-                    return@withPermit
+                // A still's first frame is the still itself: one decode, not two.
+                if (needFirst) decodeGate.withPermit {
+                    if (!withContext(Dispatchers.Main) { wanted(id) }) return@launch
+                    drawableAt(maxPx) { P2PLib.stickerFirstFrame(id) }?.let { p -> withContext(Dispatchers.Main) { show(id, p, true) } }
                 }
-                drawableAt { P2PLib.stickerFirstFrame(id) }?.let { p ->
+                (if (animated) animationGate else decodeGate).withPermit {
+                    // Scrolled away while waiting: skip; a re-bind asks again.
+                    if (!withContext(Dispatchers.Main) { wanted(id) }) return@launch
+                    val drawable = drawableAt(maxPx) { P2PLib.stickerPlainPath(id) }
                     withContext(Dispatchers.Main) {
-                        cache.put(id, p)
-                        val idx = ids.indexOf(id)
-                        if (idx >= 0) notifyItemChanged(idx)
+                        pending.remove(id)
+                        if (drawable != null) show(id, drawable, false)
                     }
                 }
-                val drawable = drawableAt { P2PLib.stickerPlainPath(id) }
-                withContext(Dispatchers.Main) {
-                    pending.remove(id)
-                    if (drawable == null) return@withContext
-                    cache.put(id, drawable)
-                    val idx = ids.indexOf(id)
-                    if (idx >= 0) notifyItemChanged(idx)
-                }
-              }
             }
         }
     }
 }
 
 private const val SELECTION_PAYLOAD = "selection"
+private const val STICKER_CELL = 0
+private const val FOLDER_CELL = 1
 
 /** Byte budget of a sticker drawable cache. */
 internal const val STICKER_CACHE_BYTES = 32 * 1024 * 1024
@@ -495,10 +698,29 @@ internal fun stickerDrawableBytes(d: Drawable): Int {
     return n.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
 }
 
-/** A sticker picture: a `.gif` plays (API 28+), anything else is a still. */
-private fun loadStickerDrawable(context: Context, file: File): Drawable? {
+/** A sticker picture: a `.gif` plays, anything else is a still. At most [maxPx] a side (0 = as stored). */
+private fun loadStickerDrawable(context: Context, file: File, maxPx: Int = 0): Drawable? {
     if (!file.exists()) return null
     return try {
+        if (maxPx > 0) {
+            val scaled = ImageDecoder.OnHeaderDecodedListener { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                val (w, h) = info.size.width to info.size.height
+                val big = maxOf(w, h)
+                if (big > maxPx) decoder.setTargetSize(maxOf(1, w * maxPx / big), maxOf(1, h * maxPx / big))
+            }
+            val source = ImageDecoder.createSource(file)
+            return if (file.extension.equals("gif", true)) {
+                ImageDecoder.decodeDrawable(source, scaled).also {
+                    (it as? AnimatedImageDrawable)?.apply {
+                        repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+                        start()
+                    }
+                }
+            } else {
+                BitmapDrawable(context.resources, ImageDecoder.decodeBitmap(source, scaled))
+            }
+        }
         if (file.extension.equals("gif", true) && Build.VERSION.SDK_INT >= 28) {
             ImageDecoder.decodeDrawable(ImageDecoder.createSource(file)).also {
                 (it as? AnimatedImageDrawable)?.apply {

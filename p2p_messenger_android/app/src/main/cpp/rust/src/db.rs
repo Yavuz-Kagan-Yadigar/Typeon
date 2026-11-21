@@ -525,6 +525,9 @@ impl P2PCore {
         // My sticker store: `stickers/<id>.enc`, keyed like attachments.
         migrate("CREATE TABLE IF NOT EXISTS stickers (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, animated INTEGER NOT NULL, encrypted_key BLOB NOT NULL, key_nonce BLOB NOT NULL)")?;
         migrate("ALTER TABLE stickers ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")?;
+        // Sticker folders: this device only, like `favorite`. A sticker can sit in several folders.
+        migrate("CREATE TABLE IF NOT EXISTS sticker_folders (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at INTEGER NOT NULL)")?;
+        migrate("CREATE TABLE IF NOT EXISTS sticker_folder_items (folder_id INTEGER NOT NULL, sticker_id TEXT NOT NULL, PRIMARY KEY (folder_id, sticker_id))")?;
         // Stable identity across devices, see `FileOffer.sticker_origin`.
         migrate("ALTER TABLE stickers ADD COLUMN origin_id TEXT")?;
         migrate("UPDATE stickers SET origin_id = 'jxl:' || id WHERE origin_id IS NULL")?;

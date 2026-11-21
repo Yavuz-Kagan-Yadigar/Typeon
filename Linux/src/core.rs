@@ -796,6 +796,41 @@ pub fn retry_pending_message_now(message_id: &str) -> bool {
 // --- server (store-and-forward) option ---
 // See the core's `server_client` module. Unlike relays, a server stores envelopes: a relay stores nothing and builds a live circuit only
 // while BOTH sides are connected. A server writes the envelope to disk when the recipient is offline, and delivers it when the recipient
+/// A sticker folder of this device (not synced to my other devices).
+#[derive(Debug, Clone, Deserialize)]
+pub struct StickerFolder {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub stickers: Vec<String>,
+}
+
+pub fn list_sticker_folders() -> Vec<StickerFolder> {
+    parse_list(api::list_sticker_folders())
+}
+
+/// Returns the new folder's id.
+pub fn create_sticker_folder(name: &str) -> Result<i64, String> {
+    parse(api::create_sticker_folder(name))?.parse().map_err(|e| format!("bad folder id: {e}"))
+}
+
+pub fn rename_sticker_folder(id: i64, name: &str) -> Result<(), String> {
+    parse_unit(api::rename_sticker_folder(id, name))
+}
+
+/// Deletes the folder only; its stickers stay.
+pub fn delete_sticker_folder(id: i64) -> Result<(), String> {
+    parse_unit(api::delete_sticker_folder(id))
+}
+
+pub fn add_stickers_to_folder(id: i64, sticker_ids: &[String]) -> Result<(), String> {
+    parse_unit(api::add_stickers_to_folder(id, sticker_ids))
+}
+
+pub fn remove_stickers_from_folder(id: i64, sticker_ids: &[String]) -> Result<(), String> {
+    parse_unit(api::remove_stickers_from_folder(id, sticker_ids))
+}
+
 // returns. The server cannot read the content: envelopes are already end-to-end encrypted and sealed a second time.
 
 #[derive(Debug, Clone, Deserialize)]

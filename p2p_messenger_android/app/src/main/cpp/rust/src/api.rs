@@ -1348,6 +1348,37 @@ pub fn set_sticker_favorite(id: &str, favorite: bool) -> String {
 pub fn storage_usage() -> String {
     catch_panic(|| crate::core_lock_read().storage_usage().to_string()).unwrap_or_else(|_| "{}".to_string())
 }
+/// JSON `[{"id","name","stickers":[sticker id]}]`: this device's sticker folders, oldest first.
+pub fn list_sticker_folders() -> String {
+    catch_panic(|| crate::core_lock_read().list_sticker_folders()).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Returns the new folder's id.
+pub fn create_sticker_folder(name: &str) -> String {
+    let name = name.to_string();
+    string_result(catch_panic(move || core_lock().create_sticker_folder(&name).map(|id| id.to_string())))
+}
+
+pub fn rename_sticker_folder(id: i64, name: &str) -> String {
+    let name = name.to_string();
+    ok_result(catch_panic(move || core_lock().rename_sticker_folder(id, &name)))
+}
+
+/// Deletes the folder only; its stickers stay.
+pub fn delete_sticker_folder(id: i64) -> String {
+    ok_result(catch_panic(move || core_lock().delete_sticker_folder(id)))
+}
+
+pub fn add_stickers_to_folder(id: i64, sticker_ids: &[String]) -> String {
+    let ids = sticker_ids.to_vec();
+    ok_result(catch_panic(move || core_lock().add_stickers_to_folder(id, &ids)))
+}
+
+pub fn remove_stickers_from_folder(id: i64, sticker_ids: &[String]) -> String {
+    let ids = sticker_ids.to_vec();
+    ok_result(catch_panic(move || core_lock().remove_stickers_from_folder(id, &ids)))
+}
+
 
 /// See JNI `chatPruneStats`; `kind` is "contact" or "group".
 pub fn chat_prune_stats(kind: &str, id: &str, before_ms: i64) -> String {

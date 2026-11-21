@@ -588,9 +588,11 @@ impl ChatView {
         );
     }
 
-    /// My stickers in a popover: click sends, right click deletes, "Add"
-    /// imports a picture. Rebuilt on every open; the pictures are converted
-    /// one by one off the GTK thread and stop when the popover closes.
+    /// My stickers in a popover: click sends, right click opens the sticker
+    /// menu (favorite, folders, delete), "Add" imports a picture. Folders come
+    /// first; a folder shows only its stickers, Back or Escape leaves it. The
+    /// pictures are converted one by one off the GTK thread and stop when the
+    /// popover closes or shows something else.
     pub(super) fn sticker_picker(self: &Rc<Self>, anchor: &gtk::Button) {
         let popover = gtk::Popover::new();
         popover.set_parent(anchor);
@@ -634,107 +636,383 @@ impl ChatView {
         buttons.append(&fetch);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
         column.append(&scroller);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         column.append(&buttons);
+        column.append(&header);
         popover.set_child(Some(&column));
 
         // Listed and decoded off the GTK thread: the list takes the core
-        // lock, and a big GIF froze the window. `None` = no stickers at all.
+        // lock, and a big GIF froze the window.
+        let picker = Rc::new(StickerPopover {
+            popover: popover.clone(),
+            grid,
+            header,
+            folder: RefCell::new(None),
+            folders: RefCell::new(Vec::new()),
+            generation: Cell::new(0),
+        });
+        // Escape in a folder goes back to all stickers; at the top it closes.
+        // Weak: the popover owns this closure, and the picker owns the popover.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        {
+            let (view, weak) = (self.clone(), Rc::downgrade(&picker));
+            keys.connect_key_pressed(move |_, key, _, _| {
+                let Some(picker) = weak.upgrade() else { return glib::Propagation::Proceed };
+                if key == gtk::gdk::Key::Escape && picker.folder.borrow().is_some() {
+                    picker.folder.replace(None);
+                    view.fill_sticker_picker(&picker);
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        popover.add_controller(keys);
+        self.fill_sticker_picker(&picker);
+        popover.popup();
+    }
+
+    /// Fills the popover again if it is still open (after a folder change).
+    fn refill_sticker_picker(self: &Rc<Self>, weak: &std::rc::Weak<StickerPopover>) {
+        if let Some(picker) = weak.upgrade() {
+            if picker.popover.parent().is_some() {
+                self.fill_sticker_picker(&picker);
+            }
+        }
+    }
+
+    /// The header (New folder, or Back / Rename / Delete in a folder), then
+    /// the folders (at the top only) and the stickers shown.
+    fn fill_sticker_picker(self: &Rc<Self>, picker: &Rc<StickerPopover>) {
+        let generation = picker.generation.get() + 1;
+        picker.generation.set(generation);
+        while let Some(child) = picker.grid.first_child() {
+            picker.grid.remove(&child);
+        }
+        while let Some(child) = picker.header.first_child() {
+            picker.header.remove(&child);
+        }
+        let open = picker.folder.borrow().clone();
+        let weak = Rc::downgrade(picker);
+        match &open {
+            None => {
+                let new = gtk::Button::builder().label("New folder…").build();
+                let (view, weak) = (self.clone(), weak.clone());
+                new.connect_clicked(move |_| {
+                    let (view_for_name, weak) = (view.clone(), weak.clone());
+                    dialogs::prompt(view.app(), "New folder", "", "Folder name", "", "Create", move |name| {
+                        let (view, weak) = (view_for_name.clone(), weak.clone());
+                        app::run_in_background(move || core::create_sticker_folder(&name), move |result| match result {
+                            Ok(_) => {
+                                view.app().toast("Folder created");
+                                view.refill_sticker_picker(&weak);
+                            }
+                            Err(error) => view.app().toast(&format!("Could not create the folder: {}", error)),
+                        });
+                    });
+                });
+                picker.header.append(&new);
+            }
+            Some(folder) => {
+                let back = gtk::Button::builder().label(format!("‹ {}", folder.name)).hexpand(true).build();
+                {
+                    let (view, weak) = (self.clone(), weak.clone());
+                    back.connect_clicked(move |_| {
+                        let Some(picker) = weak.upgrade() else { return };
+                        picker.folder.replace(None);
+                        view.fill_sticker_picker(&picker);
+                    });
+                }
+                let rename = gtk::Button::builder().label("Rename folder").build();
+                {
+                    let (view, weak, folder) = (self.clone(), weak.clone(), folder.clone());
+                    rename.connect_clicked(move |_| {
+                        let (view_for_name, weak, id) = (view.clone(), weak.clone(), folder.id);
+                        dialogs::prompt(view.app(), "Rename folder", "", "Folder name", &folder.name, "Rename", move |name| {
+                            let (view, weak, shown) = (view_for_name.clone(), weak.clone(), name.clone());
+                            app::run_in_background(move || core::rename_sticker_folder(id, &name), move |result| match result {
+                                Ok(()) => {
+                                    if let Some(picker) = weak.upgrade() {
+                                        if let Some(open) = picker.folder.borrow_mut().as_mut() {
+                                            open.name = shown;
+                                        }
+                                    }
+                                    view.refill_sticker_picker(&weak);
+                                }
+                                Err(error) => view.app().toast(&format!("Could not rename the folder: {}", error)),
+                            });
+                        });
+                    });
+                }
+                let delete = gtk::Button::builder().label("Delete folder").build();
+                delete.add_css_class("destructive-action");
+                {
+                    let (view, weak, folder) = (self.clone(), weak.clone(), folder.clone());
+                    delete.connect_clicked(move |_| {
+                        let (view_for_delete, weak, id) = (view.clone(), weak.clone(), folder.id);
+                        let body = format!("The folder \"{}\" is removed. Its stickers stay.", folder.name);
+                        dialogs::confirm(view.app(), "Delete this folder?", &body, "Delete", true, move || {
+                            let (view, weak) = (view_for_delete.clone(), weak.clone());
+                            app::run_in_background(move || core::delete_sticker_folder(id), move |result| match result {
+                                Ok(()) => {
+                                    if let Some(picker) = weak.upgrade() {
+                                        picker.folder.replace(None);
+                                    }
+                                    view.refill_sticker_picker(&weak);
+                                }
+                                Err(error) => view.app().toast(&format!("Could not delete the folder: {}", error)),
+                            });
+                        });
+                    });
+                }
+                picker.header.append(&back);
+                picker.header.append(&rename);
+                picker.header.append(&delete);
+            }
+        }
+
         // ponytail: the grid shows an animated sticker's first frame.
-        let (tx, rx) = async_channel::unbounded::<Option<(String, bool, Option<gtk::gdk::Texture>)>>();
+        let (tx, rx) = async_channel::unbounded::<StickerLoad>();
+        let shown = open.as_ref().map(|f| f.id);
         std::thread::spawn(move || {
-            let stickers = core::list_stickers();
+            let folders = core::list_sticker_folders();
+            let only: Option<HashSet<String>> =
+                shown.map(|id| folders.iter().find(|f| f.id == id).map(|f| f.stickers.iter().cloned().collect()).unwrap_or_default());
+            let stickers: Vec<core::StickerEntry> =
+                core::list_stickers().into_iter().filter(|s| only.as_ref().map_or(true, |only| only.contains(&s.id))).collect();
+            if tx.send_blocking(StickerLoad::Folders(folders)).is_err() {
+                return;
+            }
             if stickers.is_empty() {
-                let _ = tx.send_blocking(None);
+                let _ = tx.send_blocking(StickerLoad::Empty);
             }
             for sticker in stickers {
                 let path = if sticker.animated { core::sticker_first_frame(&sticker.id) } else { core::sticker_plain_path(&sticker.id) };
                 let texture = path.ok().and_then(|p| gtk::gdk::Texture::from_filename(p).ok());
-                if tx.send_blocking(Some((sticker.id, sticker.favorite, texture))).is_err() {
-                    break; // popover closed
+                if tx.send_blocking(StickerLoad::Sticker(sticker.id, sticker.favorite, texture)).is_err() {
+                    break; // popover closed or refilled
                 }
             }
         });
         let view = self.clone();
-        let (grid_for_load, popover_for_load) = (grid.clone(), popover.clone());
         glib::spawn_future_local(async move {
             while let Ok(item) = rx.recv().await {
-                if popover_for_load.parent().is_none() {
+                let Some(picker) = weak.upgrade() else { break };
+                if picker.generation.get() != generation || picker.popover.parent().is_none() {
                     break;
                 }
-                let Some((id, favorite, texture)) = item else {
-                    grid_for_load.append(&gtk::Label::new(Some("No stickers yet")));
-                    continue;
-                };
-                let Some(texture) = texture else { continue };
-                let picture = gtk::Picture::for_paintable(&texture);
-                picture.set_size_request(64, 64);
-                picture.set_content_fit(gtk::ContentFit::Contain);
-                let button = gtk::Button::builder().child(&picture).build();
-                button.add_css_class("flat");
-                {
-                    let (view, id, popover) = (view.clone(), id.clone(), popover_for_load.clone());
-                    button.connect_clicked(move |_| {
-                        popover.popdown();
-                        view.send_sticker(&id);
-                    });
-                }
-                let right = gtk::GestureClick::builder().button(gtk::gdk::BUTTON_SECONDARY).build();
-                {
-                    let (view, id, button_ref) = (view.clone(), id.clone(), button.clone());
-                    let favorite = Rc::new(Cell::new(favorite));
-                    right.connect_pressed(move |_, _, x, y| {
-                        let (menu, items) = crate::ui::widgets::menu_popover();
-                        menu.set_parent(&button_ref);
-                        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-                        menu.connect_closed(|menu| menu.unparent());
-                        let fav = crate::ui::widgets::menu_item(
-                            "starred-symbolic",
-                            if favorite.get() { "Unfavorite" } else { "Favorite" },
-                        );
-                        {
-                            let (id, favorite, menu, app) = (id.clone(), favorite.clone(), menu.clone(), view.app().clone());
-                            fav.connect_clicked(move |_| {
-                                menu.popdown();
-                                let want = !favorite.get();
-                                let (id, favorite, app) = (id.clone(), favorite.clone(), app.clone());
-                                app::run_in_background(
-                                    move || core::set_sticker_favorite(&id, want),
-                                    move |result| match result {
-                                        // Shown first from the next opening on.
-                                        Ok(()) => favorite.set(want),
-                                        Err(error) => app.toast(&format!("Could not change the sticker: {}", error)),
-                                    },
-                                );
-                            });
+                match item {
+                    StickerLoad::Folders(folders) => {
+                        let open = picker.folder.borrow().as_ref().map(|f| f.id);
+                        match open {
+                            // The folder is gone (deleted meanwhile): back to the top.
+                            Some(id) if !folders.iter().any(|f| f.id == id) => {
+                                picker.folder.replace(None);
+                                view.fill_sticker_picker(&picker);
+                                break;
+                            }
+                            Some(_) => {}
+                            None => {
+                                for folder in &folders {
+                                    picker.grid.append(&view.sticker_folder_cell(&picker, folder));
+                                }
+                            }
                         }
-                        let delete = crate::ui::widgets::menu_item("edit-delete-symbolic", "Delete");
-                        delete.add_css_class("destructive-action");
-                        items.append(&fav);
-                        items.append(&delete);
-                        let (id, button_ref, menu_ref) = (id.clone(), button_ref.clone(), menu.clone());
-                        let app = view.app().clone();
-                        delete.connect_clicked(move |_| {
-                        menu_ref.popdown();
-                        let (id, button_ref, app, owner) = (id.clone(), button_ref.clone(), app.clone(), app.clone());
-                        dialogs::confirm(&owner, "Delete this sticker?", "It is removed from all your devices.", "Delete", true, move || {
-                            let (id, button_ref, app) = (id.clone(), button_ref.clone(), app.clone());
-                            app::run_in_background(
-                                move || core::delete_sticker(&id),
-                                move |result| match result {
-                                    Ok(()) => button_ref.parent().unwrap_or_else(|| button_ref.clone().upcast()).set_visible(false),
-                                    Err(error) => app.toast(&format!("Could not delete the sticker: {}", error)),
-                                },
-                            );
-                        });
-                        });
-                        menu.popup();
-                    });
+                        picker.folders.replace(folders);
+                    }
+                    StickerLoad::Empty => {
+                        let text = if open.is_some() { "No stickers in this folder" } else { "No stickers yet" };
+                        picker.grid.append(&gtk::Label::new(Some(text)));
+                    }
+                    StickerLoad::Sticker(id, favorite, Some(texture)) => {
+                        picker.grid.append(&view.sticker_cell(&picker, id, favorite, &texture));
+                    }
+                    StickerLoad::Sticker(_, _, None) => {}
                 }
-                button.add_controller(right);
-                grid_for_load.append(&button);
             }
         });
-        popover.popup();
+    }
+
+    fn sticker_folder_cell(self: &Rc<Self>, picker: &Rc<StickerPopover>, folder: &core::StickerFolder) -> gtk::Button {
+        let label = gtk::Label::builder()
+            .label(format!("📁\n{}\n({})", folder.name, folder.stickers.len()))
+            .justify(gtk::Justification::Center)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .max_width_chars(8)
+            .build();
+        let button = gtk::Button::builder().child(&label).tooltip_text(folder.name.as_str()).build();
+        button.set_size_request(64, 64);
+        let (view, weak, folder) = (self.clone(), Rc::downgrade(picker), folder.clone());
+        button.connect_clicked(move |_| {
+            let Some(picker) = weak.upgrade() else { return };
+            picker.folder.replace(Some(folder.clone()));
+            view.fill_sticker_picker(&picker);
+        });
+        button
+    }
+
+    /// A sticker: click sends, right click opens its menu.
+    fn sticker_cell(self: &Rc<Self>, picker: &Rc<StickerPopover>, id: String, favorite: bool, texture: &gtk::gdk::Texture) -> gtk::Button {
+        let picture = gtk::Picture::for_paintable(texture);
+        picture.set_size_request(64, 64);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        let button = gtk::Button::builder().child(&picture).build();
+        button.add_css_class("flat");
+        {
+            let (view, id, popover) = (self.clone(), id.clone(), picker.popover.clone());
+            button.connect_clicked(move |_| {
+                popover.popdown();
+                view.send_sticker(&id);
+            });
+        }
+        let right = gtk::GestureClick::builder().button(gtk::gdk::BUTTON_SECONDARY).build();
+        {
+            let (view, weak, button_ref) = (self.clone(), Rc::downgrade(picker), button.downgrade());
+            let favorite = Rc::new(Cell::new(favorite));
+            right.connect_pressed(move |_, _, x, y| {
+                let (Some(picker), Some(button)) = (weak.upgrade(), button_ref.upgrade()) else { return };
+                view.sticker_menu(&picker, &button, &id, &favorite, x, y);
+            });
+        }
+        button.add_controller(right);
+        button
+    }
+
+    fn sticker_menu(
+        self: &Rc<Self>,
+        picker: &Rc<StickerPopover>,
+        button: &gtk::Button,
+        id: &str,
+        favorite: &Rc<Cell<bool>>,
+        x: f64,
+        y: f64,
+    ) {
+        let (menu, items) = crate::ui::widgets::menu_popover();
+        menu.set_parent(button);
+        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu.connect_closed(|menu| menu.unparent());
+        let app = self.app().clone();
+        // The cell leaves the grid: deleted, or taken out of the shown folder.
+        let hide = {
+            let button = button.clone();
+            move || button.parent().unwrap_or_else(|| button.clone().upcast()).set_visible(false)
+        };
+
+        let fav = crate::ui::widgets::menu_item("starred-symbolic", if favorite.get() { "Unfavorite" } else { "Favorite" });
+        {
+            let (id, favorite, menu, app) = (id.to_string(), favorite.clone(), menu.clone(), app.clone());
+            fav.connect_clicked(move |_| {
+                menu.popdown();
+                let want = !favorite.get();
+                let (id, favorite, app) = (id.clone(), favorite.clone(), app.clone());
+                app::run_in_background(
+                    move || core::set_sticker_favorite(&id, want),
+                    move |result| match result {
+                        // Shown first from the next opening on.
+                        Ok(()) => favorite.set(want),
+                        Err(error) => app.toast(&format!("Could not change the sticker: {}", error)),
+                    },
+                );
+            });
+        }
+        items.append(&fav);
+
+        let to_folder = crate::ui::widgets::menu_item("folder-symbolic", "Add to folder…");
+        {
+            let (view, picker, button, id, menu) = (self.clone(), picker.clone(), button.clone(), id.to_string(), menu.clone());
+            to_folder.connect_clicked(move |_| {
+                menu.popdown();
+                view.sticker_folder_menu(&picker, &button, &id);
+            });
+        }
+        items.append(&to_folder);
+
+        if let Some(folder) = picker.folder.borrow().clone() {
+            let out = crate::ui::widgets::menu_item("list-remove-symbolic", "Remove from folder");
+            let (id, menu, app, hide) = (id.to_string(), menu.clone(), app.clone(), hide.clone());
+            out.connect_clicked(move |_| {
+                menu.popdown();
+                let (ids, app, hide) = (vec![id.clone()], app.clone(), hide.clone());
+                app::run_in_background(
+                    move || core::remove_stickers_from_folder(folder.id, &ids),
+                    move |result| match result {
+                        Ok(()) => hide(),
+                        Err(error) => app.toast(&format!("Could not remove the sticker from the folder: {}", error)),
+                    },
+                );
+            });
+            items.append(&out);
+        }
+
+        let delete = crate::ui::widgets::menu_item("edit-delete-symbolic", "Delete");
+        delete.add_css_class("destructive-action");
+        {
+            let (id, menu) = (id.to_string(), menu.clone());
+            delete.connect_clicked(move |_| {
+                menu.popdown();
+                let (id, app, hide) = (id.clone(), app.clone(), hide.clone());
+                dialogs::confirm(&app.clone(), "Delete this sticker?", "It is removed from all your devices.", "Delete", true, move || {
+                    let (id, app, hide) = (id.clone(), app.clone(), hide.clone());
+                    app::run_in_background(
+                        move || core::delete_sticker(&id),
+                        move |result| match result {
+                            Ok(()) => hide(),
+                            Err(error) => app.toast(&format!("Could not delete the sticker: {}", error)),
+                        },
+                    );
+                });
+            });
+        }
+        items.append(&delete);
+        menu.popup();
+    }
+
+    /// "Add to folder…": every folder, then "New folder…".
+    fn sticker_folder_menu(self: &Rc<Self>, picker: &Rc<StickerPopover>, button: &gtk::Button, id: &str) {
+        let (menu, items) = crate::ui::widgets::menu_popover();
+        menu.set_parent(button);
+        menu.connect_closed(|menu| menu.unparent());
+        let app = self.app().clone();
+        let add = {
+            let (id, app) = (id.to_string(), app.clone());
+            move |folder_id: i64, name: String| {
+                let (ids, app) = (vec![id.clone()], app.clone());
+                app::run_in_background(
+                    move || core::add_stickers_to_folder(folder_id, &ids),
+                    move |result| match result {
+                        Ok(()) => app.toast(&format!("Added to {}", name)),
+                        Err(error) => app.toast(&format!("Could not add the sticker to the folder: {}", error)),
+                    },
+                );
+            }
+        };
+        for folder in picker.folders.borrow().iter() {
+            let item = crate::ui::widgets::menu_item("folder-symbolic", &folder.name);
+            let (add, menu, folder_id, name) = (add.clone(), menu.clone(), folder.id, folder.name.clone());
+            item.connect_clicked(move |_| {
+                menu.popdown();
+                add(folder_id, name.clone());
+            });
+            items.append(&item);
+        }
+        let new = crate::ui::widgets::menu_item("folder-new-symbolic", "New folder…");
+        {
+            let menu = menu.clone();
+            new.connect_clicked(move |_| {
+                menu.popdown();
+                let (add, app_for_create) = (add.clone(), app.clone());
+                dialogs::prompt(&app, "New folder", "", "Folder name", "", "Create", move |name| {
+                    let (add, app) = (add.clone(), app_for_create.clone());
+                    let folder_name = name.clone();
+                    app::run_in_background(move || core::create_sticker_folder(&name), move |result| match result {
+                        Ok(folder_id) => add(folder_id, folder_name),
+                        Err(error) => app.toast(&format!("Could not create the folder: {}", error)),
+                    });
+                });
+            });
+        }
+        items.append(&new);
+        menu.popup();
     }
 
     pub(super) fn send_sticker(self: &Rc<Self>, sticker_id: &str) {
@@ -871,4 +1149,23 @@ pub(super) fn mentioned_ids(text: &str, candidates: &[(String, String)]) -> Vec<
         }
     }
     ids
+}
+
+/// The open sticker popover: the folder it shows, and a generation that stops
+/// an older fill's loader.
+pub(super) struct StickerPopover {
+    popover: gtk::Popover,
+    grid: gtk::FlowBox,
+    header: gtk::Box,
+    folder: RefCell<Option<core::StickerFolder>>,
+    /// Every folder, for "Add to folder…".
+    folders: RefCell<Vec<core::StickerFolder>>,
+    generation: Cell<u64>,
+}
+
+/// What the sticker loader thread sends, in this order.
+enum StickerLoad {
+    Folders(Vec<core::StickerFolder>),
+    Empty,
+    Sticker(String, bool, Option<gtk::gdk::Texture>),
 }

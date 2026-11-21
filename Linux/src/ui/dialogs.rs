@@ -47,7 +47,7 @@ pub fn confirm(
 }
 
 /// Single-line text prompt; `on_submit` gets the trimmed text.
-fn prompt(
+pub fn prompt(
     app: &Rc<App>,
     heading: &str,
     body: &str,

@@ -563,6 +563,14 @@
     <string name="action_sticker_favorite">Favorilere ekle</string>
     <string name="action_sticker_unfavorite">Favoriden çıkar</string>
     <string name="msg_sticker_imported">%1$d çıkartma eklendi</string>
+    <string name="action_sticker_folder_create">Yeni klasör</string>
+    <string name="action_sticker_add_to_folder">Klasöre ekle</string>
+    <string name="action_sticker_remove_from_folder">Klasörden çıkar</string>
+    <string name="action_sticker_folder_rename">Klasörü yeniden adlandır</string>
+    <string name="action_sticker_folder_delete">Klasörü sil</string>
+    <string name="hint_sticker_folder_name">Klasör adı</string>
+    <string name="msg_confirm_delete_sticker_folder">\"%1$s\" klasörü silinsin mi? İçindeki çıkartmalar kalır.</string>
+    <string name="msg_sticker_added_to_folder">%1$s klasörüne eklendi</string>
     <string name="storage_voice">Sesli mesajlar</string>
     <string name="storage_stickers">Çıkartmalar</string>
     <string name="storage_prune_button">Eski mesajları sil</string>

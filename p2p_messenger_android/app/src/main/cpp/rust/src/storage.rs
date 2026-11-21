@@ -209,6 +209,7 @@ impl P2PCore {
         let enc_path = self.sticker_enc_path(id)?;
         let conn = self.db.as_ref().ok_or("DB not open")?;
         conn.execute("DELETE FROM stickers WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+        let _ = conn.execute("DELETE FROM sticker_folder_items WHERE sticker_id = ?1", params![id]);
         let _ = std::fs::remove_file(enc_path);
         let cache = self.attachments_dir()?.join("plain_cache");
         let _ = std::fs::remove_file(cache.join(format!("sticker-{id}.png")));
@@ -235,6 +236,79 @@ impl P2PCore {
             })))?.collect())
             .unwrap_or_default();
         serde_json::Value::from(rows).to_string()
+    }
+
+    /// JSON `[{id, name, stickers: [sticker id]}]`, oldest folder first. Only stickers still in the store.
+    /// ponytail: folders stay on this device (not synced to siblings), like favorites.
+    pub(crate) fn list_sticker_folders(&self) -> String {
+        let Some(conn) = &self.db else { return "[]".to_string() };
+        let folders: Vec<(i64, String)> = conn.prepare("SELECT id, name FROM sticker_folders ORDER BY created_at, id")
+            .and_then(|mut stmt| stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+            .unwrap_or_default();
+        let rows: Vec<serde_json::Value> = folders.into_iter().map(|(id, name)| {
+            let stickers: Vec<String> = conn.prepare(
+                "SELECT i.sticker_id FROM sticker_folder_items i JOIN stickers s ON s.id = i.sticker_id WHERE i.folder_id = ?1",
+            )
+                .and_then(|mut stmt| stmt.query_map(params![id], |r| r.get(0))?.collect())
+                .unwrap_or_default();
+            serde_json::json!({ "id": id, "name": name, "stickers": stickers })
+        }).collect();
+        serde_json::Value::from(rows).to_string()
+    }
+
+    /// Creates a sticker folder. Returns its id.
+    pub(crate) fn create_sticker_folder(&self, name: &str) -> Result<i64, String> {
+        let name = sticker_folder_name(name)?;
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        conn.execute("INSERT INTO sticker_folders (name, created_at) VALUES (?1, ?2)", params![name, current_time_ms() as i64])
+            .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub(crate) fn rename_sticker_folder(&self, id: i64, name: &str) -> Result<(), String> {
+        let name = sticker_folder_name(name)?;
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        match conn.execute("UPDATE sticker_folders SET name = ?2 WHERE id = ?1", params![id, name]).map_err(|e| e.to_string())? {
+            0 => Err("No such folder".to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Deletes the folder only: its stickers stay in the store.
+    pub(crate) fn delete_sticker_folder(&self, id: i64) -> Result<(), String> {
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM sticker_folder_items WHERE folder_id = ?1", params![id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM sticker_folders WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Adds stickers to a folder; ones already in it, or not in the store, are skipped.
+    pub(crate) fn add_stickers_to_folder(&self, id: i64, sticker_ids: &[String]) -> Result<(), String> {
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        let exists = conn.query_row("SELECT 1 FROM sticker_folders WHERE id = ?1", params![id], |_| Ok(())).is_ok();
+        if !exists {
+            return Err("No such folder".to_string());
+        }
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        for sticker in sticker_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO sticker_folder_items (folder_id, sticker_id) SELECT ?1, id FROM stickers WHERE id = ?2",
+                params![id, sticker],
+            ).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
+    /// Takes stickers out of a folder; they stay in the store.
+    pub(crate) fn remove_stickers_from_folder(&self, id: i64, sticker_ids: &[String]) -> Result<(), String> {
+        let conn = self.db.as_ref().ok_or("DB not open")?;
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        for sticker in sticker_ids {
+            tx.execute("DELETE FROM sticker_folder_items WHERE folder_id = ?1 AND sticker_id = ?2", params![id, sticker])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())
     }
 
     /// A sibling echo with no chat (sticker store, contact and block changes) to all my other devices.
@@ -799,5 +873,45 @@ impl P2PCore {
             return Err("sticker parts do not match their id".to_string());
         }
         Ok(Some(whole))
+    }
+}
+
+/// A folder name: trimmed, not empty, at most 64 characters.
+fn sticker_folder_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Folder name is empty".to_string());
+    }
+    Ok(name.chars().take(64).collect())
+}
+
+#[cfg(test)]
+mod sticker_folder_tests {
+    use super::*;
+
+    #[test]
+    fn folders_keep_stickers_and_drop_only_the_list() {
+        let mut core = P2PCore::new();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stickers (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+             INSERT INTO stickers VALUES ('a', 1), ('b', 2);
+             CREATE TABLE sticker_folders (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE sticker_folder_items (folder_id INTEGER NOT NULL, sticker_id TEXT NOT NULL, PRIMARY KEY (folder_id, sticker_id));",
+        ).unwrap();
+        core.db = Some(conn);
+        assert!(core.create_sticker_folder("  ").is_err());
+        let f = core.create_sticker_folder(" Cats ").unwrap();
+        core.add_stickers_to_folder(f, &["a".into(), "a".into(), "gone".into()]).unwrap();
+        core.add_stickers_to_folder(f, &["b".into()]).unwrap();
+        core.remove_stickers_from_folder(f, &["b".into()]).unwrap();
+        core.rename_sticker_folder(f, "Dogs").unwrap();
+        let list: serde_json::Value = serde_json::from_str(&core.list_sticker_folders()).unwrap();
+        assert_eq!(list, serde_json::json!([{ "id": f, "name": "Dogs", "stickers": ["a"] }]));
+        core.delete_sticker_folder(f).unwrap();
+        assert_eq!(core.list_sticker_folders(), "[]");
+        let left: i64 = core.db.as_ref().unwrap().query_row("SELECT COUNT(*) FROM stickers", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 2);
+        assert!(core.add_stickers_to_folder(f, &["b".into()]).is_err());
     }
 }

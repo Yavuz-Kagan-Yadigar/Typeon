@@ -20,6 +20,32 @@
         android:gravity="center_vertical">
 
         <Button
+            android:id="@+id/btnStickerFolderBack"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btnStickerFolderRename"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:text="@string/action_sticker_folder_rename"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btnStickerFolderDelete"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:text="@string/action_sticker_folder_delete"
+            android:visibility="gone" />
+
+        <Button
             android:id="@+id/btnStickerAdd"
             style="?attr/materialButtonOutlinedStyle"
             android:layout_width="wrap_content"
@@ -33,6 +59,32 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:text="@string/action_sticker_import_whatsapp" />
+
+        <Button
+            android:id="@+id/btnStickerNewFolder"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/action_sticker_folder_create" />
+
+        <Button
+            android:id="@+id/btnStickerAddToFolder"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/action_sticker_add_to_folder"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/btnStickerRemoveFromFolder"
+            style="?attr/materialButtonOutlinedStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/action_sticker_remove_from_folder"
+            android:visibility="gone" />
 
         <Button
             android:id="@+id/btnStickerSelectAll"

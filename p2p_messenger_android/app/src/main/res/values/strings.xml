@@ -598,6 +598,14 @@
     <string name="action_sticker_favorite">Favorite</string>
     <string name="action_sticker_unfavorite">Unfavorite</string>
     <string name="msg_sticker_imported">Added %1$d sticker(s)</string>
+    <string name="action_sticker_folder_create">New folder</string>
+    <string name="action_sticker_add_to_folder">Add to folder</string>
+    <string name="action_sticker_remove_from_folder">Remove from folder</string>
+    <string name="action_sticker_folder_rename">Rename folder</string>
+    <string name="action_sticker_folder_delete">Delete folder</string>
+    <string name="hint_sticker_folder_name">Folder name</string>
+    <string name="msg_confirm_delete_sticker_folder">Delete the folder \"%1$s\"? Its stickers stay.</string>
+    <string name="msg_sticker_added_to_folder">Added to %1$s</string>
     <string name="storage_voice">Voice messages</string>
     <string name="storage_stickers">Stickers</string>
     <string name="storage_prune_button">Delete older messages</string>
