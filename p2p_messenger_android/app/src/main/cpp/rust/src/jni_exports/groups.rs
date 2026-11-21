@@ -162,8 +162,9 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_setGroupProfilePicture<'loc
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendGroupMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, reply_to_sender_identity_id: JString<'local>, mentions_json: JString<'local>, expire_secs: jlong) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();
-    // See `sendMessage`: 0 = not disappearing.
-    let expire_secs = u32::try_from(expire_secs).ok().filter(|s| *s > 0);
+    // Always explicit from Kotlin: 0 = an ordinary message, else the timer (see `MessageContent::Text.expire_secs`).
+    // Negative = the chat's mode. So the message matches the bubble Kotlin draws, even if the mode changed meanwhile.
+    let expire_secs = u32::try_from(expire_secs).ok();
     let msg_str: String = jstr(&mut env, &msg).unwrap_or_default();
     // JSON array of mentioned identity ids; anything else means none.
     let mentions: Vec<String> = optional_jstring(&mut env, &mentions_json)

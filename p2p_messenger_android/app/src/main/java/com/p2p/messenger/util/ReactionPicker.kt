@@ -37,13 +37,6 @@ import kotlinx.coroutines.withContext
 object ReactionPicker {
 
     /**
-     * [onPick] receives an empty string when the reaction is to be removed.
-     *
-     * [showRemove]: when the message ALREADY has a reaction from me, a "remove" button is added above the grid. Why not "tap the same emoji again to remove it":
-     * the summary string (see Rust `reactions_summary`) does not say which emoji is MINE. It carries only totals. To know that, the protocol would need a
-     * per-person list. An explicit "remove" button does the same job without growing the protocol.
-     */
-    /**
      * Double tap on a message: a bar with my 5 most used emojis (see Rust `top_reactions`) and a "+" that opens the full picker ([show]).
      * Shown above [anchor] (the bubble), or below it when there is no room above.
      */
@@ -113,6 +106,13 @@ object ReactionPicker {
         popup.showAtLocation(anchor, Gravity.NO_GRAVITY, x, y)
     }
 
+    /**
+     * [onPick] receives an empty string when the reaction is to be removed.
+     *
+     * [showRemove]: when the message ALREADY has a reaction from me, a "remove" button is added above the grid. Why not "tap the same emoji again to remove it":
+     * the summary string (see Rust `reactions_summary`) does not say which emoji is MINE. It carries only totals. To know that, the protocol would need a
+     * per-person list. An explicit "remove" button does the same job without growing the protocol.
+     */
     fun show(context: Context, showRemove: Boolean, onPick: (String) -> Unit) {
         val density = context.resources.displayMetrics.density
         val metrics = context.resources.displayMetrics

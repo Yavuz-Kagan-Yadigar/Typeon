@@ -194,7 +194,8 @@ object NotificationHelper {
         }
         val body = if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_drawing_from, chatName)
         else context.getString(R.string.notif_new_drawing)
-        show(context, ("wb:$groupId:$peerDeviceFingerprint").hashCode(), context.getString(R.string.app_name), body, intent)
+        // Every stroke batch posts again: ring only for the first one until the notification is dismissed.
+        show(context, ("wb:$groupId:$peerDeviceFingerprint").hashCode(), context.getString(R.string.app_name), body, intent, alert = false)
     }
 
     /**

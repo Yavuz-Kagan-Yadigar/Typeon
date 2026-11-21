@@ -167,7 +167,9 @@ impl ChatView {
         let own_identity = self.app().own_identity_id.borrow().clone();
         let now = util::now_ms();
         // The chat's disappearing mode (see `disappear.rs`); the core stamps the message with it too.
-        let expire_secs = Some(self.disappear_mode.get()).filter(|secs| *secs > 0);
+        // Explicit, even 0: the core then sends exactly what this bubble shows.
+        let mode = self.disappear_mode.get();
+        let expire_secs = Some(mode).filter(|secs| *secs > 0);
 
         // Composer clears first; the core call runs off the GTK thread and the
         // bubble appears on its result. A failed send puts the text back.
@@ -220,7 +222,7 @@ impl ChatView {
                 // One worker for every send, so quick messages reach the core
                 // (and the peer) in the order they were typed.
                 serial_in_background(
-                    move || core::send_message(&fingerprint, &sent_text, reply_id, preview_for_core, expire_secs).map(|r| (r.message_id, r.status)),
+                    move || core::send_message(&fingerprint, &sent_text, reply_id, preview_for_core, Some(mode)).map(|r| (r.message_id, r.status)),
                     move |result| {
                         let result = result.map(|(id, status)| make_entry(id, status));
                         done(view, result, text);
@@ -249,7 +251,7 @@ impl ChatView {
                 let sent_text = text.clone();
                 serial_in_background(
                     move || {
-                        core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core, mentions, expire_secs)
+                        core::send_group_message(&group_id, &sent_text, reply_id, preview_for_core, reply_sender_for_core, mentions, Some(mode))
                     },
                     move |result| {
                         // A group send fans out to every member; the core reports
@@ -656,6 +658,14 @@ impl ChatView {
             folders: RefCell::new(Vec::new()),
             generation: Cell::new(0),
         });
+        // The only strong reference: every other closure holds the picker weakly. Without it the
+        // picker was dropped when this function returned, so the loader stopped and the grid stayed empty.
+        {
+            let keep = RefCell::new(Some(picker.clone()));
+            popover.connect_closed(move |_| {
+                keep.take();
+            });
+        }
         // Escape in a folder goes back to all stickers; at the top it closes.
         // Weak: the popover owns this closure, and the picker owns the popover.
         let keys = gtk::EventControllerKey::new();

@@ -1247,6 +1247,8 @@ impl P2PCore {
                 "wb_strokes", "wb_tombstones", "wb_page_sigs", "own_prekeys", "peer_prekeys",
                 // They hold other people's identity ids (who reacted, who saw).
                 "message_reactions", "message_seen", "stickers", "sibling_journal",
+                // Folder names are the user's own words.
+                "sticker_folders", "sticker_folder_items",
             ] {
                 let _ = conn.execute(&format!("DELETE FROM {}", table), []);
             }

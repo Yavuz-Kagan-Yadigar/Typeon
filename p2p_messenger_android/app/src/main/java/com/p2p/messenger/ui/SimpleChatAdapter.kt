@@ -18,6 +18,7 @@ import com.p2p.messenger.R
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.formatAbsoluteTime
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Minimal adapter that draws the message bubbles of one chat screen.
@@ -470,7 +471,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** One pulse frame: the accent edge fades with [p]. Once a second the time-left lines change, received messages on screen
      *  start counting down, and the ones whose time is up slide out. */
     private fun disappearTick(p: Float) {
-        val alpha = (64 + 191 * p).toInt()
+        // 8 steps, as the desktop: a drawable redraws only when its alpha changes, so this halves the bubble redraws.
+        val alpha = 64 + 191 * (p * 7).roundToInt() / 7
         for (h in disappearHolders) h.bubble.foreground?.alpha = alpha
         val now = System.currentTimeMillis()
         if (!onScreen || now / 1000 == lastSecond) return

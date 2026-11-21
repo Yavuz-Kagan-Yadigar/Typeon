@@ -126,6 +126,8 @@ pub struct App {
     /// database, and tracks the active one — the desktop counterpart of
     /// `FontOverride` / `ThemePrefs.CustomFont` on Android.
     pub font_manager: RefCell<font::FontManager>,
+    /// Last "new drawing" notice per chat: every stroke batch is an event, and a Windows balloon pops each time.
+    whiteboard_notified: RefCell<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl App {
@@ -152,6 +154,7 @@ impl App {
             contacts: RefCell::new(Vec::new()),
             groups: RefCell::new(Vec::new()),
             font_manager: RefCell::new(font::FontManager::new(data_dir.clone())),
+            whiteboard_notified: RefCell::new(std::collections::HashMap::new()),
         })
     }
 
@@ -404,7 +407,10 @@ impl App {
                         (peer, name)
                     }
                 };
-                if !conv.is_empty() {
+                // One notice per chat per 2 minutes while someone keeps drawing.
+                let recent = self.whiteboard_notified.borrow().get(&conv).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(120));
+                if !conv.is_empty() && !recent {
+                    self.whiteboard_notified.borrow_mut().insert(conv.clone(), std::time::Instant::now());
                     self.notify_if_away_text(&conv, &format!("wb:{}", conv), "Typeon", &format!("New drawing from {}", name), "New drawing", gio::NotificationPriority::Normal);
                 }
             }

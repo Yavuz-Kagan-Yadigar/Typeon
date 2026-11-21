@@ -1618,7 +1618,11 @@ impl P2PCore {
     /// least one member (or there is nobody else), "pending" when every copy is only queued. A pending row is set "sent" by the first later
     /// publish (`retry_unconfirmed_messages`) or "delivered" by the first Ack.
     pub(crate) fn send_group_message_with_status(&mut self, group_id: &str, plaintext: &str, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, reply_to_sender_identity_id: Option<String>, mentions: Vec<String>, expire_secs: Option<u32>) -> Result<(String, String), String> {
-        let expire_secs = packet::disappear_secs(expire_secs).or_else(|| self.disappear_mode("", group_id));
+        // See `send_message`: None = the group's mode, Some(0) = ordinary.
+        let expire_secs = match expire_secs {
+            Some(secs) => packet::disappear_secs(Some(secs)),
+            None => self.disappear_mode("", group_id),
+        };
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         if !group.is_member(&own_identity_id) {

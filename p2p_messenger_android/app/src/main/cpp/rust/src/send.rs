@@ -286,9 +286,13 @@ impl P2PCore {
     }
 
     /// `reply_to_message_id` / `reply_to_preview`: a swipe-to-reply quote (see the packet.rs `MessageContent::Text.reply_to_message_id` docs). The Kotlin side already shows the text, so it passes the truncated summary. The Rust side does no archive lookup.
-    /// `expire_secs`: a disappearing message (see `MessageContent::Text.expire_secs`); None = the chat's disappearing mode, if on.
+    /// `expire_secs`: a disappearing message (see `MessageContent::Text.expire_secs`). None = the chat's disappearing mode, if on;
+    /// Some(0) = an ordinary message even with the mode on (a retry of one, or the bubble the UI drew without a timer).
     pub(crate) fn send_message(&mut self, peer_device_fingerprint: String, plaintext: String, reply_to_message_id: Option<String>, reply_to_preview: Option<String>, expire_secs: Option<u32>) -> Result<(String, String), String> {
-        let expire_secs = packet::disappear_secs(expire_secs).or_else(|| self.disappear_mode(&peer_device_fingerprint, ""));
+        let expire_secs = match expire_secs {
+            Some(secs) => packet::disappear_secs(Some(secs)),
+            None => self.disappear_mode(&peer_device_fingerprint, ""),
+        };
         if self.known_remote_devices.get(&peer_device_fingerprint)
             .map_or(false, |d| self.deleted_identities.contains(&d.identity_id))
         {

@@ -45,8 +45,9 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_startDisappearCountdown<'lo
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_sendMessage<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, target: JString<'local>, msg: JString<'local>, reply_to_message_id: JString<'local>, reply_to_preview: JString<'local>, expire_secs: jlong) -> jstring {
     let target_str: String = jstr(&mut env, &target).unwrap_or_default();
-    // 0 = an ordinary message; else a disappearing one (see `MessageContent::Text.expire_secs`).
-    let expire_secs = u32::try_from(expire_secs).ok().filter(|s| *s > 0);
+    // Always explicit from Kotlin: 0 = an ordinary message, else the timer (see `MessageContent::Text.expire_secs`).
+    // Negative = the chat's mode. So the message matches the bubble Kotlin draws, even if the mode changed meanwhile.
+    let expire_secs = u32::try_from(expire_secs).ok();
     let msg_str: String = jstr(&mut env, &msg).unwrap_or_default();
     // See the `optional_jstring` docs: WhatsApp-style reply. If there is no reply, Kotlin passes `null`.
     let reply_id_opt = optional_jstring(&mut env, &reply_to_message_id);
