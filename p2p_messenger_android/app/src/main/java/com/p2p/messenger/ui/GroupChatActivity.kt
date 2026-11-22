@@ -733,7 +733,7 @@ class GroupChatActivity : AppCompatActivity() {
             return true
         }
         if (item.itemId == R.id.action_disappear) {
-            Disappear.pick(this, disappearSecs) { secs -> onDisappearPicked(secs) }
+            Disappear.tapClock(this, disappearSecs) { secs -> onDisappearPicked(secs) }
             return true
         }
         return super.onOptionsItemSelected(item)

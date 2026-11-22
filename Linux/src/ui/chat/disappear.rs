@@ -74,12 +74,16 @@ pub(super) fn load_disappear_mode(view: &Rc<ChatView>) {
     );
 }
 
-/// The chat header's clock: opens the disappearing-mode picker.
+/// The chat header's clock: turns the mode off at once when it is on, else opens the disappearing-mode picker.
 pub(super) fn disappear_button(view: &Rc<ChatView>) -> gtk::Button {
     let button = gtk::Button::builder().icon_name("alarm-symbolic").tooltip_text("Disappearing messages").build();
     let view = Rc::downgrade(view);
     button.connect_clicked(move |button| {
-        if let Some(view) = view.upgrade() {
+        let Some(view) = view.upgrade() else { return };
+        if view.disappear_mode.get() > 0 {
+            view.set_disappear_mode(0);
+            view.app().toast("Disappearing messages off");
+        } else {
             view.pick_disappear_mode(button);
         }
     });
@@ -109,7 +113,18 @@ impl ChatView {
         }
     }
 
-    /// The picker: a slider over `DISAPPEAR_STOPS`, Turn on (and send what is typed), Turn off.
+    /// Sets the chat's mode (0 = off). Turned on with text typed: that goes out now, disappearing.
+    fn set_disappear_mode(self: &Rc<Self>, secs: u32) {
+        self.disappear_mode.set(secs);
+        show_mode(&self.send_button, secs);
+        let (peer, group) = self.chat_keys();
+        bg_serial(move || core::set_disappear_mode(&peer, &group, secs));
+        if secs > 0 && self.composer.buffer().char_count() > 0 {
+            self.send();
+        }
+    }
+
+    /// The picker (mode off only, see `disappear_button`): a slider over `DISAPPEAR_STOPS`, Turn on (and send what is typed).
     fn pick_disappear_mode(self: &Rc<Self>, anchor: &gtk::Button) {
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -122,8 +137,7 @@ impl ChatView {
             .build();
         let title = gtk::Label::builder().label("Disappearing messages").xalign(0.0).build();
         title.add_css_class("heading");
-        let current = DISAPPEAR_STOPS.iter().position(|(s, _)| *s == self.disappear_mode.get());
-        let stop = current.unwrap_or_else(|| LAST_STOP.with(Cell::get)).min(DISAPPEAR_STOPS.len() - 1);
+        let stop = LAST_STOP.with(Cell::get).min(DISAPPEAR_STOPS.len() - 1);
         let value = gtk::Label::builder().label(DISAPPEAR_STOPS[stop].1).xalign(0.0).build();
         value.add_css_class("disappear-time");
         let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (DISAPPEAR_STOPS.len() - 1) as f64, 1.0);
@@ -149,10 +163,8 @@ impl ChatView {
         hint.add_css_class("caption");
         hint.add_css_class("dim-label");
         let buttons = gtk::Box::builder().spacing(6).halign(gtk::Align::End).build();
-        let off = gtk::Button::builder().label("Turn off").visible(current.is_some()).build();
-        let on = gtk::Button::builder().label(if current.is_some() { "Change" } else { "Turn on" }).build();
+        let on = gtk::Button::builder().label("Turn on").build();
         on.add_css_class("suggested-action");
-        buttons.append(&off);
         buttons.append(&on);
         content.append(&title);
         content.append(&value);
@@ -166,32 +178,19 @@ impl ChatView {
             let popover = popover.clone();
             glib::idle_add_local_once(move || popover.unparent());
         });
-        let apply: Rc<dyn Fn(u32)> = {
-            let (view, popover) = (Rc::downgrade(self), popover.downgrade());
-            Rc::new(move |secs: u32| {
-                if let Some(popover) = popover.upgrade() {
-                    popover.popdown();
-                }
-                let Some(view) = view.upgrade() else { return };
-                view.disappear_mode.set(secs);
-                show_mode(&view.send_button, secs);
-                let (peer, group) = view.chat_keys();
-                bg_serial(move || core::set_disappear_mode(&peer, &group, secs));
-                // Turned on with text typed: that goes out now, disappearing.
-                if secs > 0 && view.composer.buffer().char_count() > 0 {
-                    view.send();
-                }
-            })
-        };
         {
-            let (apply, scale) = (apply.clone(), scale.clone());
+            let (view, popover, scale) = (Rc::downgrade(self), popover.downgrade(), scale.clone());
             on.connect_clicked(move |_| {
                 let i = (scale.value().round() as usize).min(DISAPPEAR_STOPS.len() - 1);
                 LAST_STOP.with(|last| last.set(i));
-                apply(DISAPPEAR_STOPS[i].0);
+                if let Some(popover) = popover.upgrade() {
+                    popover.popdown();
+                }
+                if let Some(view) = view.upgrade() {
+                    view.set_disappear_mode(DISAPPEAR_STOPS[i].0);
+                }
             });
         }
-        off.connect_clicked(move |_| apply(0));
         popover.popup();
         on.grab_focus();
     }

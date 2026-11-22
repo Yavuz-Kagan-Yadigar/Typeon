@@ -744,7 +744,7 @@ class ChatActivity : AppCompatActivity() {
                 true
             }
             R.id.action_disappear -> {
-                Disappear.pick(this, disappearSecs) { secs -> onDisappearPicked(secs) }
+                Disappear.tapClock(this, disappearSecs) { secs -> onDisappearPicked(secs) }
                 true
             }
             else -> super.onOptionsItemSelected(item)

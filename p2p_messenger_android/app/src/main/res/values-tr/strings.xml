@@ -611,8 +611,7 @@
     <string name="disappear_title">Kaybolan mesajlar</string>
     <string name="disappear_hint">Bu sohbette gönderdiğin her şey okunduktan sonra silinir. Kopyalanamaz, iletilemez, kaydedilemez; Android\'de ekran görüntüsü engellenir.</string>
     <string name="disappear_turn_on">Aç</string>
-    <string name="disappear_change">Değiştir</string>
-    <string name="disappear_turn_off">Kapat</string>
+    <string name="disappear_turned_off">Kaybolan mesajlar kapatıldı</string>
     <string name="disappear_cannot_open">Bu türde kaybolan dosya açılamaz: yalnızca fotoğraf ve videolar gösterilir</string>
     <string name="disappear_notification">Kaybolan mesaj</string>
     <string name="disappear_left_s">⏱ %1$d sn</string>

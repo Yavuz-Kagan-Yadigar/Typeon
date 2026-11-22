@@ -48,14 +48,22 @@ object Disappear {
         button.setImageResource(if (secs > 0) R.drawable.ic_send_timer else R.drawable.ic_send_cloud)
     }
 
-    /** The timer picker, opened by the chat top bar's clock. [onPick] gets the new mode (0 = off). */
-    fun pick(ctx: Context, current: Int, onPick: (Int) -> Unit) {
+    /** The chat top bar's clock: turns the mode off at once when it is on, else opens the picker. [onPick] gets the new mode (0 = off). */
+    fun tapClock(ctx: Context, current: Int, onPick: (Int) -> Unit) {
+        if (current > 0) {
+            onPick(0)
+            android.widget.Toast.makeText(ctx, R.string.disappear_turned_off, android.widget.Toast.LENGTH_SHORT).show()
+        } else {
+            pick(ctx, onPick)
+        }
+    }
+
+    /** The timer picker (mode off only, see [tapClock]). [onPick] gets the new mode. */
+    private fun pick(ctx: Context, onPick: (Int) -> Unit) {
         val labels = ctx.resources.getStringArray(R.array.disappear_stop_labels)
-        val on = STOPS.indexOf(current)
-        val start = if (on >= 0) on else lastStop
         val pad = (16 * ctx.resources.displayMetrics.density).toInt()
         val value = TextView(ctx).apply {
-            text = labels[start]
+            text = labels[lastStop]
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             setTextColor(com.google.android.material.color.MaterialColors.getColor(ctx, androidx.appcompat.R.attr.colorPrimary, 0))
         }
@@ -63,7 +71,7 @@ object Disappear {
             valueFrom = 0f
             valueTo = (STOPS.size - 1).toFloat()
             stepSize = 1f
-            this.value = start.toFloat()
+            this.value = lastStop.toFloat()
             setLabelFormatter { labels[it.toInt().coerceIn(0, STOPS.size - 1)] }
             addOnChangeListener { _, v, _ -> value.text = labels[v.toInt().coerceIn(0, STOPS.size - 1)] }
         }
@@ -82,12 +90,11 @@ object Disappear {
         val dialog = AlertDialog.Builder(ctx)
             .setTitle(R.string.disappear_title)
             .setView(content)
-            .setPositiveButton(if (on >= 0) R.string.disappear_change else R.string.disappear_turn_on) { _, _ ->
+            .setPositiveButton(R.string.disappear_turn_on) { _, _ ->
                 lastStop = slider.value.toInt().coerceIn(0, STOPS.size - 1)
                 onPick(STOPS[lastStop])
             }
             .setNegativeButton(android.R.string.cancel, null)
-        if (on >= 0) dialog.setNeutralButton(R.string.disappear_turn_off) { _, _ -> onPick(0) }
         dialog.show()
     }
 

@@ -646,8 +646,7 @@
     <string name="disappear_title">Disappearing messages</string>
     <string name="disappear_hint">Everything you send in this chat disappears after it is read. It can\'t be copied, forwarded or saved, and screenshots are blocked on Android.</string>
     <string name="disappear_turn_on">Turn on</string>
-    <string name="disappear_change">Change</string>
-    <string name="disappear_turn_off">Turn off</string>
+    <string name="disappear_turned_off">Disappearing messages off</string>
     <string name="disappear_cannot_open">A disappearing file of this type can\'t be opened: only pictures and videos are shown</string>
     <string name="disappear_notification">Disappearing message</string>
     <string name="disappear_left_s">⏱ %1$d s</string>
