@@ -185,4 +185,9 @@
     <style name="ThemeOverlay.P2PMessenger.Font.Custom" parent="">
         <item name="appFontFamily">p2p-imported-font</item>
     </style>
+    <style name="QuickReactAnim">
+        <item name="android:windowEnterAnimation">@anim/quick_react_in</item>
+        <item name="android:windowExitAnimation">@anim/quick_react_out</item>
+    </style>
+
 </resources>

@@ -21,8 +21,8 @@ impl ChatView {
         chooser.popup();
     }
 
-    /// Double click on a message: my 5 most used emojis plus "+" for the full chooser, pointing at the click.
-    pub(super) fn quick_reactions(self: &Rc<Self>, anchor: &gtk::Box, entry: &Entry, x: f64, y: f64) {
+    /// Double click on a message: my 5 most used emojis plus "+" for the full chooser, beside the bubble.
+    pub(super) fn quick_reactions(self: &Rc<Self>, anchor: &gtk::Box, entry: &Entry) {
         // Takes the core lock: read off the GTK thread.
         let (view, anchor, entry) = (self.clone(), anchor.clone(), entry.clone());
         crate::app::run_in_background(core::top_reactions, move |emojis| {
@@ -32,8 +32,9 @@ impl ChatView {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
             let popover = gtk::Popover::builder().child(&row).build();
             popover.set_parent(&anchor);
-            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-            popover.set_position(gtk::PositionType::Top);
+            // Beside the bubble, vertically centred on it; GTK flips to the other side when there is no room.
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(0, 0, anchor.width(), anchor.height())));
+            popover.set_position(gtk::PositionType::Right);
             popover.connect_closed(|popover| popover.unparent());
             for emoji in emojis {
                 let button = gtk::Button::with_label(&emoji);

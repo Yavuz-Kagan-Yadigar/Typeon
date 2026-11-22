@@ -38,7 +38,7 @@ object ReactionPicker {
 
     /**
      * Double tap on a message: a bar with my 5 most used emojis (see Rust `top_reactions`) and a "+" that opens the full picker ([show]).
-     * Shown above [anchor] (the bubble), or below it when there is no room above.
+     * Shown beside [anchor] (the bubble), vertically centred on it; above or below when neither side has room.
      */
     fun showQuick(anchor: View, showRemove: Boolean, onPick: (String) -> Unit) {
         val owner = anchor.findViewTreeLifecycleOwner() ?: return
@@ -70,6 +70,7 @@ object ReactionPicker {
                 setColor(MaterialColors.getColor(anchor, com.google.android.material.R.attr.colorSurfaceContainerHigh))
             })
             elevation = 8 * density
+            animationStyle = R.style.QuickReactAnim
         }
         val ripple = TypedValue().also {
             context.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, it, true)
@@ -100,9 +101,19 @@ object ReactionPicker {
         val gap = (8 * density).toInt()
         // ponytail: fixed allowance for status bar + toolbar; read the real toolbar bottom if the bar ever hides behind it.
         val minTop = (96 * density).toInt()
-        val x = (at[0] + anchor.width / 2 - w / 2).coerceIn(gap, maxOf(gap, root.width - w - gap))
-        val above = at[1] - h - gap
-        val y = (if (above >= minTop) above else at[1] + anchor.height + gap).coerceIn(minTop, maxOf(minTop, root.height - h - gap))
+        // Next to the bubble, same vertical centre: right side if it fits, else left. No room on either side: above/below as before.
+        val right = at[0] + anchor.width + gap
+        val left = at[0] - w - gap
+        val x: Int
+        val y: Int
+        if (right + w + gap <= root.width || left >= gap) {
+            x = if (right + w + gap <= root.width) right else left
+            y = (at[1] + anchor.height / 2 - h / 2).coerceIn(minTop, maxOf(minTop, root.height - h - gap))
+        } else {
+            x = (at[0] + anchor.width / 2 - w / 2).coerceIn(gap, maxOf(gap, root.width - w - gap))
+            val above = at[1] - h - gap
+            y = (if (above >= minTop) above else at[1] + anchor.height + gap).coerceIn(minTop, maxOf(minTop, root.height - h - gap))
+        }
         popup.showAtLocation(anchor, Gravity.NO_GRAVITY, x, y)
     }
 

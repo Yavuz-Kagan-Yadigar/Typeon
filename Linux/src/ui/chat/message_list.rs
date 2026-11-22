@@ -447,7 +447,7 @@ impl ChatView {
             double.set_propagation_phase(gtk::PropagationPhase::Capture);
             let view = Rc::downgrade(self);
             let id = entry.id.clone();
-            double.connect_pressed(move |gesture, n_press, x, y| {
+            double.connect_pressed(move |gesture, n_press, _, _| {
                 if n_press != 2 {
                     return;
                 }
@@ -455,7 +455,7 @@ impl ChatView {
                 let Some(anchor) = gesture.widget().and_downcast::<gtk::Box>() else { return };
                 let current = view.bubbles.borrow().get(&id).map(|bubble| bubble.entry.borrow().clone());
                 if let Some(entry) = current.filter(|entry| !entry.deleted) {
-                    view.quick_reactions(&anchor, &entry, x, y);
+                    view.quick_reactions(&anchor, &entry);
                 }
             });
             column.add_controller(double);
