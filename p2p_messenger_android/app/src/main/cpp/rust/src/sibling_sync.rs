@@ -712,28 +712,27 @@ impl P2PCore {
 
         // A read boundary only covers what actually reached the reader: a message
         // still waiting for its Ack was never displayed there, however old it is.
+        // The boundary comes from ONE device (`peer_fp`): only copies still waiting for THAT
+        // device count. A copy for another, offline device of the same reader does not.
+        // A copy waits under its packet id; the row id is that id (1:1 main copy) or its
+        // `group_message_local_id` (group copies, 1:1 fan-out copies).
+        let mut waiting: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (key, p) in self.awaiting_confirmation.iter().filter(|(_, p)| p.peer_device_fingerprint == peer_fp) {
+            if group_id.is_none() { waiting.insert(key.clone()); }
+            if let Some(MessageContent::Text { group_id: g, group_message_local_id: Some(l), .. }) = &p.regen_content {
+                if g.as_deref() == group_id { waiting.insert(l.clone()); }
+            }
+        }
         if let Some(gid) = group_id {
-            // a group copy waits under its per-device packet id; the
-            // row id is its `group_message_local_id`. Copies still queued for
-            // the reader (no device known yet) never reached it either.
-            let mut waiting: std::collections::HashSet<String> = self.awaiting_confirmation.values()
-                .filter(|p| self.known_remote_devices.get(&p.peer_device_fingerprint)
-                    .map_or(false, |d| d.identity_id == viewer_identity_id))
-                .filter_map(|p| match &p.regen_content {
-                    Some(MessageContent::Text { group_id: Some(g), group_message_local_id: Some(l), .. }) if g == gid => Some(l.clone()),
-                    _ => None,
-                })
-                .collect();
+            // Copies still queued for the reader (no device known yet) never reached it either.
             if let Some(q) = self.pending_group_messages.get(&(gid.to_string(), viewer_identity_id.to_string())) {
                 waiting.extend(q.iter().filter_map(|c| match c {
                     MessageContent::Text { group_message_local_id: Some(l), .. } => Some(l.clone()),
                     _ => None,
                 }));
             }
-            ids.retain(|id| !waiting.contains(id));
-        } else {
-            ids.retain(|id| !self.awaiting_confirmation.contains_key(id));
         }
+        ids.retain(|id| !waiting.contains(id));
         for id in &ids {
             self.apply_seen_receipt(id, viewer_identity_id, read_at_ms);
         }
