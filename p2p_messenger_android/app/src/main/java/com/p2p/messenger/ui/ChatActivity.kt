@@ -49,7 +49,6 @@ import com.p2p.messenger.P2PLib
 import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
 import com.p2p.messenger.util.AppLock
-import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.CapturedImage
 import com.p2p.messenger.util.promptAttachmentCaption
@@ -162,7 +161,7 @@ class ChatActivity : AppCompatActivity() {
     /** The send key is no longer a `Button` with a text glyph. It is a circular `ImageButton` that uses the app's cloud logo as a mask
      *  (see activity_chat.xml btnSend and drawable/ic_send_cloud). */
     internal lateinit var btnSend: ImageButton
-    /** This chat's disappearing mode in seconds, 0 = off (Send held for 3 s, see ui/Disappear.kt). */
+    /** This chat's disappearing mode in seconds, 0 = off (top bar clock, see ui/Disappear.kt). */
     internal var disappearSecs = 0
     /** Until a ratchet session exists, the send, attach, camera and voice buttons and `btnSend` are disabled (see `sessionPollRunnable` and `updateComposerLock`).
      *  The text box stays editable, and the banner states the reason. */
@@ -540,18 +539,6 @@ class ChatActivity : AppCompatActivity() {
                 sendNewMessage(text)
             }
         }
-        // Held for 3 s: the chat's disappearing mode (ui/Disappear.kt). Turned on with text typed, the text goes out at once.
-        Disappear.attachHold(btnSend, { disappearSecs }) { secs ->
-            disappearSecs = secs
-            Disappear.showMode(btnSend, secs)
-            val peer = peerDeviceFingerprint
-            lifecycleScope.launch(Dispatchers.IO) { try { P2PLib.setDisappearMode(peer, "", secs.toLong()) } catch (e: Throwable) { } }
-            val text = input.text.toString()
-            if (secs > 0 && text.isNotBlank() && ensureHandshakeReadyOrWarn()) {
-                input.text.clear()
-                sendNewMessage(text)
-            }
-        }
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -756,12 +743,25 @@ class ChatActivity : AppCompatActivity() {
                 CallActivity.startOutgoing(this, peerDeviceFingerprint, null, item.itemId == R.id.action_video_call)
                 true
             }
-            // See AppRestarter: the Tor circuit and the network stack can only be set up cleanly when the process restarts.
-            R.id.action_tor_reconnect -> {
-                AppRestarter.confirmAndRestart(this)
+            R.id.action_disappear -> {
+                Disappear.pick(this, disappearSecs) { secs -> onDisappearPicked(secs) }
                 true
             }
             else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    /** A mode picked in the disappearing picker (top bar clock). Turned on with text typed, the text goes out at once. */
+    private fun onDisappearPicked(secs: Int) {
+        val input = findViewById<EditText>(R.id.edtMessage)
+        disappearSecs = secs
+        Disappear.showMode(btnSend, secs)
+        val peer = peerDeviceFingerprint
+        lifecycleScope.launch(Dispatchers.IO) { try { P2PLib.setDisappearMode(peer, "", secs.toLong()) } catch (e: Throwable) { } }
+        val text = input.text.toString()
+        if (secs > 0 && text.isNotBlank() && ensureHandshakeReadyOrWarn()) {
+            input.text.clear()
+            sendNewMessage(text)
         }
     }
 

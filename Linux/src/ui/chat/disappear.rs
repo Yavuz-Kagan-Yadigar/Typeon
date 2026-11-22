@@ -1,4 +1,4 @@
-//! Disappearing messages on the desktop: the chat's disappearing mode (Send held for 3 s), the pulsing accent edge, the time-left
+//! Disappearing messages on the desktop: the chat's disappearing mode (header clock button), the pulsing accent edge, the time-left
 //! line and the slide-out when the time is up. While the mode is on, everything sent in the chat (text, files, voice, stickers)
 //! carries the timer; the core stamps it. The core keeps its own clock for the archive (`expire_due`); this file only draws.
 //! A received message counts down from when it is on screen here, never from when it was sent, so a late delivery does not
@@ -18,8 +18,6 @@ const DISAPPEAR_STOPS: [(u32, &str); 7] = [
 ];
 /// Steps of the edge pulse; theme.rs has a `dpulse-N` class for each.
 pub(crate) const DISAPPEAR_PULSE_STEPS: i32 = 8;
-/// How long a held press on Send takes to open the timer picker.
-const HOLD_MS: u64 = 3000;
 
 thread_local! {
     /// The stop picked last, offered first next time.
@@ -61,59 +59,31 @@ pub(super) fn expire_label(entry: &Entry) -> Option<gtk::Label> {
     Some(label)
 }
 
-/// A press on Send held for `HOLD_MS` opens the disappearing-mode picker instead of sending. An `EventControllerLegacy` sees the
-/// raw press and release: the button's own click gesture claims the press, which would cancel any gesture added next to it.
-/// Also loads the chat's mode, so the button shows it from the start.
-pub(super) fn disappear_hold(view: &Rc<ChatView>, send: &gtk::Button) {
-    {
-        let (weak, button) = (Rc::downgrade(view), send.downgrade());
-        let (peer, group) = view.chat_keys();
-        app::run_in_background(
-            move || core::disappear_mode(&peer, &group),
-            move |secs| {
-                if let (Some(view), Some(button)) = (weak.upgrade(), button.upgrade()) {
-                    view.disappear_mode.set(secs);
-                    show_mode(&button, secs);
-                }
-            },
-        );
-    }
-    let legacy = gtk::EventControllerLegacy::new();
-    legacy.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
-    let held = Rc::new(Cell::new(false));
+/// Loads the chat's mode, so the Send button shows it from the start.
+pub(super) fn load_disappear_mode(view: &Rc<ChatView>) {
+    let weak = Rc::downgrade(view);
+    let (peer, group) = view.chat_keys();
+    app::run_in_background(
+        move || core::disappear_mode(&peer, &group),
+        move |secs| {
+            if let Some(view) = weak.upgrade() {
+                view.disappear_mode.set(secs);
+                show_mode(&view.send_button, secs);
+            }
+        },
+    );
+}
+
+/// The chat header's clock: opens the disappearing-mode picker.
+pub(super) fn disappear_button(view: &Rc<ChatView>) -> gtk::Button {
+    let button = gtk::Button::builder().icon_name("alarm-symbolic").tooltip_text("Disappearing messages").build();
     let view = Rc::downgrade(view);
-    let button = send.downgrade();
-    legacy.connect_event(move |_, event| {
-        match event.event_type() {
-            gtk::gdk::EventType::ButtonPress => {
-                held.set(false);
-                if let Some(source) = timer.borrow_mut().take() {
-                    source.remove();
-                }
-                let (view, button, held, timer_slot) = (view.clone(), button.clone(), held.clone(), timer.clone());
-                *timer.borrow_mut() = Some(glib::timeout_add_local_once(std::time::Duration::from_millis(HOLD_MS), move || {
-                    timer_slot.borrow_mut().take();
-                    let (Some(view), Some(button)) = (view.upgrade(), button.upgrade()) else { return };
-                    held.set(true);
-                    // Insensitive for a moment: GTK resets the button's controllers, so the release that follows is no click.
-                    button.set_sensitive(false);
-                    button.set_sensitive(true);
-                    view.pick_disappear_mode(&button);
-                }));
-                glib::Propagation::Proceed
-            }
-            gtk::gdk::EventType::ButtonRelease => {
-                if let Some(source) = timer.borrow_mut().take() {
-                    source.remove();
-                }
-                // The picker is open: this release must not send as well.
-                if held.replace(false) { glib::Propagation::Stop } else { glib::Propagation::Proceed }
-            }
-            _ => glib::Propagation::Proceed,
+    button.connect_clicked(move |button| {
+        if let Some(view) = view.upgrade() {
+            view.pick_disappear_mode(button);
         }
     });
-    send.add_controller(legacy);
+    button
 }
 
 /// The Send button tells whether the chat's messages disappear.
@@ -121,11 +91,11 @@ fn show_mode(button: &gtk::Button, secs: u32) {
     match DISAPPEAR_STOPS.iter().find(|(s, _)| *s == secs) {
         Some((_, label)) => {
             button.set_icon_name("alarm-symbolic");
-            button.set_tooltip_text(Some(&format!("Send · disappears {label} after it is read. Hold to change.")));
+            button.set_tooltip_text(Some(&format!("Send · disappears {label} after it is read")));
         }
         None => {
             button.set_icon_name("document-send-symbolic");
-            button.set_tooltip_text(Some("Send · hold for disappearing messages"));
+            button.set_tooltip_text(Some("Send"));
         }
     }
 }
@@ -197,16 +167,14 @@ impl ChatView {
             glib::idle_add_local_once(move || popover.unparent());
         });
         let apply: Rc<dyn Fn(u32)> = {
-            let (view, popover, button) = (Rc::downgrade(self), popover.downgrade(), anchor.downgrade());
+            let (view, popover) = (Rc::downgrade(self), popover.downgrade());
             Rc::new(move |secs: u32| {
                 if let Some(popover) = popover.upgrade() {
                     popover.popdown();
                 }
                 let Some(view) = view.upgrade() else { return };
                 view.disappear_mode.set(secs);
-                if let Some(button) = button.upgrade() {
-                    show_mode(&button, secs);
-                }
+                show_mode(&view.send_button, secs);
                 let (peer, group) = view.chat_keys();
                 bg_serial(move || core::set_disappear_mode(&peer, &group, secs));
                 // Turned on with text typed: that goes out now, disappearing.

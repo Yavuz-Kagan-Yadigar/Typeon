@@ -49,7 +49,6 @@ import com.p2p.messenger.R
 import com.p2p.messenger.service.P2PService
 import com.p2p.messenger.util.AppLock
 import com.p2p.messenger.util.coreErrorText
-import com.p2p.messenger.util.AppRestarter
 import com.p2p.messenger.util.AvatarUtil
 import com.p2p.messenger.util.CapturedImage
 import com.p2p.messenger.util.promptAttachmentCaption
@@ -139,7 +138,7 @@ class GroupChatActivity : AppCompatActivity() {
      */
     /** Same note as ChatActivity `btnSend`: the cloud logo is a masked circular `ImageButton`. */
     internal lateinit var btnSend: ImageButton
-    /** This group's disappearing mode in seconds, 0 = off (Send held for 3 s, see ui/Disappear.kt). */
+    /** This group's disappearing mode in seconds, 0 = off (top bar clock, see ui/Disappear.kt). */
     internal var disappearSecs = 0
     /** See `maybePlayTyphoonEffect` and ui.TyphoonParticleView. */
     internal lateinit var typhoonEffect: TyphoonParticleView
@@ -558,18 +557,6 @@ class GroupChatActivity : AppCompatActivity() {
             input.text.clear()
             sendNewMessage(text)
         }
-        // Held for 3 s: the group's disappearing mode (ui/Disappear.kt). Turned on with text typed, the text goes out at once.
-        Disappear.attachHold(btnSend, { disappearSecs }) { secs ->
-            disappearSecs = secs
-            Disappear.showMode(btnSend, secs)
-            val gid = groupId
-            lifecycleScope.launch(Dispatchers.IO) { try { P2PLib.setDisappearMode("", gid, secs.toLong()) } catch (e: Throwable) { } }
-            val text = input.text.toString()
-            if (secs > 0 && text.isNotBlank()) {
-                input.text.clear()
-                sendNewMessage(text)
-            }
-        }
         // Only sends on false->true/true->false transitions (see ChatActivity).
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -745,11 +732,25 @@ class GroupChatActivity : AppCompatActivity() {
             CallActivity.startOutgoing(this, null, groupId, item.itemId == R.id.action_video_call)
             return true
         }
-        if (item.itemId == R.id.action_tor_reconnect) {
-            AppRestarter.confirmAndRestart(this)
+        if (item.itemId == R.id.action_disappear) {
+            Disappear.pick(this, disappearSecs) { secs -> onDisappearPicked(secs) }
             return true
         }
         return super.onOptionsItemSelected(item)
+    }
+
+    /** A mode picked in the disappearing picker (top bar clock). Turned on with text typed, the text goes out at once. */
+    private fun onDisappearPicked(secs: Int) {
+        val input = findViewById<EditText>(R.id.edtMessage)
+        disappearSecs = secs
+        Disappear.showMode(btnSend, secs)
+        val gid = groupId
+        lifecycleScope.launch(Dispatchers.IO) { try { P2PLib.setDisappearMode("", gid, secs.toLong()) } catch (e: Throwable) { } }
+        val text = input.text.toString()
+        if (secs > 0 && text.isNotBlank()) {
+            input.text.clear()
+            sendNewMessage(text)
+        }
     }
 
     override fun onResume() {

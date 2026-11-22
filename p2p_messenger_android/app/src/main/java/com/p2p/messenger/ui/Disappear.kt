@@ -1,20 +1,14 @@
 package com.p2p.messenger.ui
 
-import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.view.HapticFeedbackConstants
-import android.view.MotionEvent
-import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.google.android.material.slider.Slider
 import com.p2p.messenger.R
 
 /**
- * Disappearing messages: hold Send for 3 s to turn the chat's disappearing mode on, change or off. While it is on, everything
+ * Disappearing messages: the chat top bar's clock (`R.id.action_disappear`) turns the chat's disappearing mode on, change or off. While it is on, everything
  * sent in the chat (text, files, voice, stickers) carries the timer; the core stamps it (`disappear_mode`). Each message keeps
  * its own timer (Rust `MessageContent::Text.expire_secs`). A received one counts down from when it is on screen on this device, never from when
  * it was sent, so a late delivery does not shorten it. The bubble side (pulsing edge, time left, slide-out) is in
@@ -23,7 +17,6 @@ import com.p2p.messenger.R
 object Disappear {
     /** Timer choices in seconds; the labels are `R.array.disappear_stop_labels`. The desktop has the same stops. */
     private val STOPS = intArrayOf(30, 5 * 60, 3600, 8 * 3600, 24 * 3600, 7 * 24 * 3600, 28 * 24 * 3600)
-    private const val HOLD_MS = 3000L
 
     /** The stop picked last, offered first next time (this process only). */
     private var lastStop = 2
@@ -50,49 +43,13 @@ object Disappear {
         return secs to (obj.optLong("expire_at_ms", 0L).takeIf { it > 0 } ?: (System.currentTimeMillis() + secs * 1000L))
     }
 
-    /**
-     * A press on [button] held for 3 s opens the disappearing-mode picker instead of sending. A normal tap still sends at once
-     * (the button's own click listener). [current]: the chat's mode now (0 = off); [onPick] gets the new mode (0 = off).
-     */
-    @SuppressLint("ClickableViewAccessibility")
-    fun attachHold(button: View, current: () -> Int, onPick: (Int) -> Unit) {
-        val ui = Handler(Looper.getMainLooper())
-        var held = false
-        val open = Runnable {
-            held = true
-            button.isPressed = false
-            button.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            pick(button.context, current(), onPick)
-        }
-        button.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    held = false
-                    ui.postDelayed(open, HOLD_MS)
-                    false
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    ui.removeCallbacks(open)
-                    // The picker is open: this release must not send as well.
-                    if (held) {
-                        held = false
-                        button.isPressed = false
-                        true
-                    } else {
-                        false
-                    }
-                }
-                else -> false
-            }
-        }
-    }
-
     /** The Send button shows whether the chat's messages disappear. */
     fun showMode(button: android.widget.ImageView, secs: Int) {
         button.setImageResource(if (secs > 0) R.drawable.ic_send_timer else R.drawable.ic_send_cloud)
     }
 
-    private fun pick(ctx: Context, current: Int, onPick: (Int) -> Unit) {
+    /** The timer picker, opened by the chat top bar's clock. [onPick] gets the new mode (0 = off). */
+    fun pick(ctx: Context, current: Int, onPick: (Int) -> Unit) {
         val labels = ctx.resources.getStringArray(R.array.disappear_stop_labels)
         val on = STOPS.indexOf(current)
         val start = if (on >= 0) on else lastStop

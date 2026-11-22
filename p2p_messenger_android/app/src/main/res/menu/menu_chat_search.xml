@@ -30,12 +30,10 @@
         android:title="@string/action_search_messages"
         app:showAsAction="always" />
 
-        <!-- Quick Tor and network connection reset. See ChatActivity and GroupChatActivity
-         onOptionsItemSelected, and util/AppRestarter.kt (why a full app restart is needed).
-         This menu file is shared between the two. -->
+        <!-- Disappearing messages picker (ui/Disappear.kt). Shared by ChatActivity and GroupChatActivity. -->
     <item
-        android:id="@+id/action_tor_reconnect"
-        android:icon="@drawable/reconnect"
-        android:title="@string/action_tor_reconnect"
-        app:showAsAction="ifRoom" />
+        android:id="@+id/action_disappear"
+        android:icon="@drawable/ic_chat_timer"
+        android:title="@string/disappear_title"
+        app:showAsAction="always" />
 </menu>

@@ -270,8 +270,10 @@ struct ChatView {
     watermark_pending: Cell<bool>,
     /// The disappearing-message ticker runs (see `disappear.rs`).
     disappear_ticking: Cell<bool>,
-    /// This chat's disappearing mode in seconds, 0 = off (held Send button, see `disappear.rs`).
+    /// This chat's disappearing mode in seconds, 0 = off (header clock button, see `disappear.rs`).
     disappear_mode: Cell<u32>,
+    /// The composer's Send button; its icon shows the disappearing mode.
+    send_button: gtk::Button,
     /// Ascending by `order_key`; mirrors the widget order so an out-of-order
     /// arrival can be slotted in without walking the widget tree.
     order: RefCell<Vec<(u64, String)>>,
@@ -493,6 +495,11 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         watermark_pending: Cell::new(false),
         disappear_ticking: Cell::new(false),
         disappear_mode: Cell::new(0),
+        send_button: gtk::Button::builder()
+            .icon_name("document-send-symbolic")
+            .tooltip_text("Send")
+            .valign(gtk::Align::End)
+            .build(),
         shade_pending: Cell::new(false),
         order: RefCell::new(Vec::new()),
         subtitle: subtitle.clone(),

@@ -92,19 +92,15 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
     // clips the child to the rounded box.
     entry_scroller.set_overflow(gtk::Overflow::Hidden);
 
-    let send = gtk::Button::builder()
-        .icon_name("document-send-symbolic")
-        .tooltip_text("Send")
-        .valign(gtk::Align::End)
-        .build();
+    let send = view.send_button.clone();
     send.add_css_class("suggested-action");
     send.add_css_class("circular");
     {
         let view = view.clone();
         send.connect_clicked(move |_| view.send());
     }
-    // Held for 3 s: pick a disappearing timer, then send.
-    disappear_hold(view, &send);
+    // The icon shows the disappearing mode (picked with the header clock).
+    load_disappear_mode(view);
 
     // Enter sends, Shift+Enter inserts a newline — the convention every
     // desktop chat client uses.

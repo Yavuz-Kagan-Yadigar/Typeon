@@ -72,6 +72,7 @@ pub(super) fn build_header(
             .build(),
     );
     header.pack_end(view.whiteboard.toggle_button());
+    header.pack_end(&disappear_button(view));
     let mut call_buttons = Vec::new();
     for (icon, tip, video) in [("camera-video-symbolic", "Video call", true), ("call-start-symbolic", "Voice call", false)] {
         let button = gtk::Button::builder().icon_name(icon).tooltip_text(tip).build();
