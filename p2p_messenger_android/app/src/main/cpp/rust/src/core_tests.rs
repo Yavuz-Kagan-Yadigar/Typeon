@@ -933,8 +933,9 @@ mod recovery_tests {
         core.archive_message_exp("p", "sent", b"s", Some("s1"), Some("sent"), None, None, now, Some(60)).unwrap();
         let at = |core: &P2PCore, id: &str| core.db.as_ref().unwrap()
             .query_row("SELECT expire_at_ms FROM messages WHERE message_id = ?1", params![id], |r| r.get::<_, Option<i64>>(0)).unwrap();
-        let cap = (now + packet::DISAPPEAR_MAX_SECS as u64 * 1000) as i64;
+        let cap = (now + packet::DISAPPEAR_UNREAD_SECS as u64 * 1000) as i64;
         assert!(at(&core, "r1").unwrap() >= cap, "unread: holds the cap");
+        assert!(at(&core, "r1").unwrap() < cap + 60_000, "unread cap is 1 day, not the 4-week maximum");
         assert!(at(&core, "s1").unwrap() <= (current_time_ms() + 60_000) as i64, "my own copy counts from the send");
         core.start_expiry(None, ["p", "p"]);
         let started = at(&core, "r1").unwrap();

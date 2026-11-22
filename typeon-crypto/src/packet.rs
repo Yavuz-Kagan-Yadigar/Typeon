@@ -616,8 +616,11 @@ pub struct MessagePacketHeader {
 /// the dedup maps and the DB.
 pub const MAX_HEADER_ID_LEN: usize = 256;
 
-/// Longest disappearing-message timer (4 weeks). Also the cap on an unread disappearing message.
+/// Longest disappearing-message timer (4 weeks).
 pub const DISAPPEAR_MAX_SECS: u32 = 4 * 7 * 24 * 3600;
+
+/// How long a received disappearing message that is never opened stays (1 day), or its own timer when that is longer.
+pub const DISAPPEAR_UNREAD_SECS: u32 = 24 * 3600;
 
 /// A peer's `expire_secs`, kept only when it is in `1..=DISAPPEAR_MAX_SECS`.
 pub fn disappear_secs(v: Option<u32>) -> Option<u32> {

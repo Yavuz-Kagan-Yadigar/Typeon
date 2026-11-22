@@ -1727,9 +1727,9 @@ impl P2PCore {
 }
 
 /// The first `expire_at_ms` of a disappearing row (local clock). My own message counts from now. A received one counts from when it is read
-/// (`start_expiry`); until then it holds the unread cap, so a message never opened does not stay for ever.
+/// (`start_expiry`); until then it holds the unread cap (1 day, or its own timer when longer), so a message never opened does not stay.
 pub(crate) fn first_expiry(direction: &str, secs: u32) -> i64 {
-    let secs = if direction == "sent" { secs } else { packet::DISAPPEAR_MAX_SECS };
+    let secs = if direction == "sent" { secs } else { secs.max(packet::DISAPPEAR_UNREAD_SECS) };
     current_time_ms() as i64 + secs as i64 * 1000
 }
 
