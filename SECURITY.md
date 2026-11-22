@@ -1,6 +1,6 @@
 # Typeon — Security & Network Architecture
 
-> **Current state: 2026-11-15, HEAD `50bb608` (client, server, Linux 7.4.6-beta.2).**
+> **Current state: 2026-11-22, HEAD `09ad037` (released 8.0.0: client, server, Linux, Windows; later commits on `master`).**
 > Sections 1–9 are the audit trail and may describe gossipsub, mDNS, UPnP,
 > DCUtR and 64-device caps that are no longer in the code. Section 10 lists
 > what is true now and overrides older text. Where code and this file differ, the code wins.
@@ -411,7 +411,7 @@ can plug in, rather than the app silently failing or overpromising
 
 ### UPnP port mapping — removed
 
-An earlier round added automatic UPnP port mapping. It was **removed** (M-201): mDNS and UPnP are off in the swarm, so the router is never asked to open a port and no LAN or mapped external address is advertised. Cross-network reachability is Tor onion services only (next section); outgoing plain TCP is refused (`DialReject`).
+An earlier round added automatic UPnP port mapping. It was **removed** (M-201): mDNS and UPnP are off in the swarm, so the router is never asked to open a port and no LAN or mapped external address is advertised. Cross-network reachability is Tor onion services only (next section); there is no TCP transport at all (see §10).
 
 ### Self-healing reconnection (fourth audit round fix)
 
@@ -492,7 +492,7 @@ pre-authorization. This is now implemented, in a **reachability-only v1**:
   libp2p `identify` exchange to a peer you connect to. Full IP anonymity
   (suppressing identify's address advertisement and routing *all* outbound
   dials through Tor) is a deliberately scoped-out **v2**.
-- **Tor is mandatory (fix pass 2026-10-20).** With Tor off the core refuses to start the network (`start_network` returns an error); the clearnet libp2p transport is dial-rejected, and `get_node_address` is onion-only (empty until the onion service is up).
+- **Tor is mandatory (fix pass 2026-10-20).** With Tor off the core refuses to start the network (`start_network` returns an error); there is no clearnet libp2p transport, and `get_node_address` is onion-only (empty until the onion service is up).
 - **Both peers need Tor enabled** to use a `.onion` — a non-Tor device
   cannot reach it (the connectivity layer must be on both ends, same rule as
   any overlay).
@@ -716,10 +716,15 @@ anything, so the honest reading is "we asked", not "it is gone".
   `fullBackupContent=false`, and a `data_extraction_rules.xml` that excludes
   everything from both cloud-backup and device-transfer on API 31+).
 - **Screenshot and screen-recording prevention: owner rule.** The *client*
-  app deliberately sets **no** `FLAG_SECURE` (screenshots, recording and
-  recents thumbnails are allowed; an earlier version of this document claimed
-  otherwise). The *server app* (`ServerActivity`) sets it in non-debug builds
-  because its join code is a bearer token. The code now lasts 3 days and is renewed (§10).
+  app deliberately sets **no** `FLAG_SECURE` on ordinary chat, list and settings
+  screens (screenshots, recording and recents thumbnails are allowed there).
+  It sets the flag, in release builds only (`P2PApplication.setSecure`), on the
+  link-device QR, QR scan, camera and lock screens; on every screen below
+  Android 13 (no recents opt-out there); on the chat screen and the media viewer
+  while a **disappearing message** is on screen; and on the image editor dialog.
+  Android 13+ also hides the recents thumbnail. The *server app* (`ServerActivity`)
+  sets it in non-debug builds because its join code is a bearer token. The code
+  lasts 3 days and is renewed (§10).
 - **Recovery file uses Argon2id (fourth audit round fix).** The recovery
   export (which contains *all* long-term secret keys — Ed25519, ML-DSA,
   X25519, ML-KEM) previously derived its file-encryption key with
@@ -789,11 +794,11 @@ anything, so the honest reading is "we asked", not "it is gone".
 ## 9. Remaining metadata and lifetime notes (2026-10-28)
 
 - **Clipboard self-clear only covers the running process.** `SensitiveClip` clears the primary clip 60 s after a copy, but that timer lives in the app process: if the process is killed first (force stop, OOM, reboot) the copied text stays on the clipboard until something else overwrites it. Other apps can also read the clipboard before the timer fires.
-- **Server archive buckets reveal record counts.** Archive records are grouped into per-conversation, per-period buckets, so a server can count how many records a conversation produced in each period even though record bodies stay sealed (end-to-end encrypted, keyed ids). Traffic analysis of volume/timing is not hidden; padding is not implemented.
+- **Server archive buckets reveal record counts.** Archive records are grouped into per-conversation, per-period buckets, so a server can count how many records a conversation produced in each period even though record bodies stay sealed (end-to-end encrypted, keyed ids). Traffic analysis of volume/timing is not hidden. Item sizes are padded since 2026-11-21 (Padmé, §10), so the server sees size classes, not exact lengths; record counts and timing remain visible.
 
 ---
 
-## 10. Current state (2026-11-15, HEAD `50bb608`) — overrides earlier sections
+## 10. Current state (2026-11-22, HEAD `09ad037`) — overrides earlier sections
 
 **Network**
 - **No gossipsub.** Removed in c798a6f. Envelopes go over `/p2pmessenger/envelope/1.0.0`
@@ -806,37 +811,71 @@ anything, so the honest reading is "we asked", not "it is gone".
 - **mDNS, UPnP and DCUtR are not in the build.** Circuit Relay v2 (client and service) and
   identify remain. Kademlia runs in client mode. The sections on DCUtR, UPnP and mDNS above
   are history.
-- Transport is onion-only. Plain outgoing TCP is refused (`DialReject`).
+- Transport is onion-only. There is no TCP listener and no TCP dial: inbound onion streams reach
+  the swarm in-process (`tor::OnionListen`). The `DialReject` wrapper of earlier rounds is gone because
+  the TCP transport it blocked is gone.
 
 **Server (optional store-and-forward)**
 - Protocol version **8**. Archive bucket ids are hashes of per-bucket purge secrets, so only
   the account's own devices can purge a bucket (see §8).
-- Enrolment cap: **16 active devices** per server (`DEFAULT_MAX_ENROLLMENTS`, changed from 64
-  on 2026-11-15; the Android server app uses the same 16). Idle enrolments (30 days) are put
-  to sleep. At most 60 public enrolments per hour.
+- Enrolment cap: **16 active devices** per server (`DEFAULT_MAX_ENROLLMENTS`; the Android server
+  app uses the same 16). Idle enrolments (30 days) are put to sleep. At most 60 public
+  enrolments per hour. Quotas are split per device (`budget / max_devices`).
 - Public join code: **valid 3 days**, then renewed by the server (`PUBLIC_CODE_TTL_MS`). It is a
   bearer token, so anyone holding it can enrol until the operator rotates it. Rotating the code
   does not affect enrolled devices. A revoke only blocks the enrol key, so a real ban means
   rotating the code.
-- Server DB schema version 5. Archive rows expire 13 months after their last write.
+- Server DB schema version **6**. Archive rows expire 13 months after their last write.
+- **Size padding (2026-11-21, c8ca950).** Mailbox envelopes, first-contact items and archive
+  records are padded inside the AEAD with Padmé rounding (minimum 512 bytes, overhead up to
+  about 12 %). Acks, receipts and short texts all look alike to the server. Not padded: blob
+  chunks, timestamps, and the number and timing of items.
 - Server app PIN lock: PBKDF2-HMAC-SHA256, 600,000 iterations, at least 6 characters (older PINs
   with 300,000 iterations are still read).
 
 **Client**
 - App lock: PBKDF2-HMAC-SHA256, 600,000 iterations (120,000 is still read). App password minimum
   8 characters.
-- No `FLAG_SECURE` in the client (owner rule). The server app sets it in non-debug builds.
+- `FLAG_SECURE`: only in the places listed in §6 (owner rule: not on ordinary chat, list or
+  settings screens). The server app sets it in non-debug builds.
 - `allowBackup` off. `targetSdk` 35.
-- Notification text hidden by default. No `SYSTEM_ALERT_WINDOW`.
+- Notification text hidden by default. No `SYSTEM_ALERT_WINDOW`. A disappearing message never
+  shows its content in a notification.
+- Desktop (Linux, Windows) clients are link-only secondary devices. They never create an
+  account or hold device authority; only the root (first) device adds or revokes devices.
+- On Quit a desktop sends a keepalive `bye`, so peers stop dialling it until it connects again.
+
+**Disappearing messages (2026-11-21/22) — what they are and are not**
+- A per-chat mode (30 s to 4 weeks) set from the chat's clock button. Each message carries its
+  own timer (`expire_secs`). A received message counts down from when it is on this device's
+  screen; an unopened one goes after 1 day (or its own timer when longer). The sender's copy
+  counts from sending.
+- Disappearing rows never go to the server archive, history answers, recovery files or chat
+  previews. Expired rows stay as tombstones, so late copies cannot bring them back. A sent file's
+  encrypted copy is kept until the cap so an offline receiver can still download it.
+- The client blocks copy, forward, quote, save and selection, and sets `FLAG_SECURE` while one is
+  on screen. Desktops show only a placeholder.
+- **This is a convenience feature, not a guarantee.** A receiver can still photograph the
+  screen, use a rooted or modified client, or run an unmodified old copy of the database; the
+  server may still hold the sealed delivery envelope until the receiver acks it or it expires
+  (14 days). The timer is enforced by each client's own clock and software.
+
+**Calls**
+- Group call offers are re-sent to absent members for as long as the call runs, so members see
+  **Attend**; `Ended` and `Joined` signals stop the ring on other devices. All signals are
+  ratchet messages; the server sees them as ordinary sealed items (call signals go to the server
+  and the direct path at once).
 
 **Updates**
 - Self-update checks GitHub release tags over Tor about every 20 hours. An update is installed
   only when `SHA256SUMS` carries the owner's offline Ed25519 signature (`SHA256SUMS.sig`). The
   public key is pinned in `update.rs`. A release without the signature counts as unpublished.
   The server installer checks signature, hash and version before the root step replaces the binary.
+  A rollback floor stops a downgrade below the newest verified stable version.
 - Release APKs are signed only by `sign-release.sh`. Gradle leaves the release build unsigned.
+  Every tag, pre-release or not, builds release artifacts in CI.
 
 **Open, not changed by this pass**
 - Server `sent_at_ms` still in clear. Blob and bucket ids are still capabilities for anyone enrolled.
 - Clipboard self-clear and archive record counts (§9) remain as stated.
-- The desktop "bye on quit" behaviour (7170907) was not re-checked in code.
+- Session mailbox reader proofs are X25519-only (§0).

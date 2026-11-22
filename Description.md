@@ -1,11 +1,14 @@
 # Typeon P2P Messaging Protocol — Draft v0.2
 
-> **Status note (2026-11-15, HEAD `50bb608`).** This is a design spec. Where it
+> **Status note (2026-11-22, HEAD `09ad037`, released 8.0.0).** This is a design spec. Where it
 > disagrees with the code, the code is right. Current differences:
 > - Gossipsub is removed. Delivery is direct envelope → server deposit → retry queue (sections 4.4, 7). The "gossipsub topic" wording below means a mailbox id only.
-> - Server protocol version 8. Public join code expires after 3 days and is renewed; limits: 16 active enrolments, 60 public enrolments per hour.
+> - Server protocol version 8, server DB schema 6. Public join code expires after 3 days and is renewed; limits: 16 active enrolments, 60 public enrolments per hour.
+> - **Device authority is root-only**: only the identity's first (primary) device signs `DeviceAdd` and `DeviceRevoke`, and deletes the account. Sections 1.5 and 1.6 below describe an earlier, wider design (any Active device may revoke); the linking QR carries only the fingerprint and a nonce (no KEM keys).
+> - Desktop clients (Linux, Windows) are link-only secondary devices.
 > - App lock PBKDF2 is 600,000 iterations; app password minimum 8 characters.
 > - Self-update uses a signed release list (Ed25519, offline owner key). See `TECHNICAL_HANDOFF.md` §21.
+> - Server-visible items are padded (Padmé); messages can carry a disappearing timer; group calls re-invite absent members. See section 8 below.
 >
 > Full implementation details: `TECHNICAL_HANDOFF.md`.
 
@@ -113,7 +116,9 @@ QRPackage {
   identity_id: bytes[32],        // v0.2: the person's identity is now carried
   device_fingerprint: bytes[32], // this device's own fingerprint
   rendezvous_node: Multiaddr,    // one known address, enough to connect
-}
+  known_relays: [Multiaddr],     // relay addresses to dial through
+  pairing_nonce: bytes,          // bearer secret, see 1.4
+}                                // code: version 3
 ```
 - The QR stays small, and scanning is instant and reliable. Multi-QR / gallery
   methods were tried but postponed because of ordering risk and scanning friction.
@@ -148,12 +153,14 @@ When a user wants to add a second device (e.g. a laptop):
 ```
 1. The new device generates its own key pair → it becomes its own device_fingerprint.
 2. The new device shows a "add device QR":
-   DeviceLinkRequest {
+   DeviceLinkRequest {                    // code: version 3
      device_fingerprint: bytes[32],
      device_name: string,
-     kem_pubkey_x25519, kem_pubkey_mlkem,  // to set up a temporary connection
+     nonce: bytes[16],                    // proves the grant answers THIS QR
+     rendezvous_node + known_relays,      // no public keys: they arrive in IdentityExchange
    }
-3. An existing (approved) device READS this QR (so approval is given by the
+   Both screens also show a nine-digit compare code (PBKDF2 over fingerprint + nonce).
+3. The primary device READS this QR (so approval is given by the
    existing device, not the reverse direction. This makes an attacker's
    "add a fake device" request meaningless, because approval always comes from
    an already trusted device).
@@ -172,11 +179,12 @@ When a user wants to add a second device (e.g. a laptop):
 
 ### 1.6 Device removal / revocation (Revoke)
 
-- Any **Active** device may revoke another device of the same Identity
-  (`status: Revoked`). This prevents a monopoly of the "primary device": if the
-  phone is lost, it can be revoked from the laptop, and vice versa.
-  **This also solves the "founder device loss" problem from section 6 at the
-  personal identity level** (see section 5.5 for transfer to the group context).
+- **Implemented rule: only the primary (root) device revokes** another device of
+  the same Identity (`status: Revoked`); the same holds for adding a device and for
+  deleting the account. A linked device that logs out sends `DeviceLeaving` and the
+  root revokes it. (The earlier draft let any Active device revoke. It was dropped
+  so an unreachable or compromised secondary cannot cut off the others, and desktops
+  are link-only.) Losing the primary device is a recovery-file case (1.8).
 - Revocation is propagated to all other Active devices and known contacts/groups
   through a signed `DeviceRevoke` packet.
 - A revoked device is treated as no longer able to produce valid signatures or
@@ -199,6 +207,9 @@ SyncPayload {
   sibling_proofs: [DeviceAddProof], // proof for every sibling except the first device
   archive_root_key: bytes?,      // server archive root key (belongs to the identity)
   name_changed_at_ms: u64,       // timestamp of the last account-name change
+  own_revokes: [DeviceRevoke],   // revocations of this identity's devices
+  blocked: [identity_id],        // blocked identities
+  removed_groups: [group_id],    // groups left or deleted (so a stale update cannot bring them back)
 }
 // Note: ratchet state and message history are NOT carried in SyncPayload; devices
 // set up their own device-pair ratchets (1.7.1), and history is requested
@@ -248,10 +259,9 @@ EVERY device of Identity_A holds a SEPARATE ratchet session with EVERY device of
 
 **Read receipt to the other side** (part of normal message traffic):
 ```
-ReadReceipt {
-  message_id: bytes,
-  read_by_identity: bytes[32],   // which person read it
-  read_at: timestamp,
+Seen {                           // `MessageContent::Seen`; the reader is the packet's sender_identity_id
+  target_message_id: string,
+  group_message_local_id: string?,  // set for group messages
 }
 ```
 It is sent encrypted and signed like other `MessagePacket`s; no separate channel is
@@ -285,7 +295,7 @@ Ahmet  seen  14:32
 // "read" watermark; sent store-and-forward to sibling devices and to the other side.
 ReadStateSync { ... }
 ```
-When a device is the first to read a message, the `ReadReceipt` goes to the other
+When a device is the first to read a message, the `Seen` packet goes to the other
 side, and at the same time the "this message was read" information is added to its
 own `SyncPayload` delta. The only thing other devices (such as a laptop) learn during
 sync is "this message is already read". Which device did the reading is not carried;
@@ -381,6 +391,11 @@ When a connection is set up, the incoming (identity_id, device_fingerprint) pair
       starts with a new DeviceRatchetState
 ```
 
+Code detail for the first case: a new identity becomes a contact only if the sender
+proved it read a code this device shows (`pairing_proof_valid`), the contact was not
+deleted on this device (only a scanned or typed code brings it back), and the contacts
+table is below `MAX_CONTACTS`. Otherwise it is refused, with no alert.
+
 This distinction matters: the **signed DeviceAdd chain** ensures that adding each
 new device in a multi-device setup does not needlessly flood the user with alarms,
 yet an unchained or unexpected key change is still caught and blocked at full
@@ -435,12 +450,16 @@ MessagePacket {
   header: {
     sender_identity_id: bytes[32],   // v0.2: person identity (whose message it is)
     sender_device_fingerprint: bytes[32], // v0.2: which device sent it
-    ratchet_pubkey: bytes,           // public key of the current ratchet step
+    message_id: string,              // sender-chosen id (acks, dedup, resend)
+    ratchet_pubkey: bytes,           // sender's ratchet public keys; only filled on a rotation
     message_number: u32,
     prev_chain_length: u32,
-  },
-  ciphertext: bytes,               // AEAD (ChaCha20-Poly1305) encrypted content
-  signature: bytes,                // ML-DSA + Ed25519 hybrid signature (over header + ciphertext)
+    rotation_kyber_ciphertext: bytes?, // set while a KEM rotation is announced
+    sent_at_ms: u64,                 // signed send time
+  },                                 // the header travels as raw CBOR bytes; the signature covers those bytes
+  ciphertext: bytes,               // AEAD (ChaCha20-Poly1305), header bytes as associated data
+  signature_classical: bytes,      // Ed25519 and
+  signature_pq: bytes,             // ML-DSA-87, over header bytes ‖ ciphertext ‖ recipient device fingerprint
 }
 ```
 
@@ -473,8 +492,8 @@ adds it to their own DHT bootstrap list.
 Kademlia always runs in `Mode::Client`: it only bootstraps/queries, never enters
 anyone's routing table, and publishes no records. Address discovery runs through the
 QR's `rendezvous_node`, `device_addrs`/`device_onion_addrs`, `AddressAnnounce`,
-relays and (if present) the server; the network is onion-only (clearnet dial is
-rejected with `DialReject`). The old draft below is the target and is not implemented:
+relays and (if present) the server; the network is onion-only (no TCP listener or TCP dial; inbound
+onion streams reach the swarm in-process). The old draft below is the target and is not implemented:
 
 ```
 DHT_Entry { key: device_fingerprint, value: { multiaddrs, last_updated, signature } }
@@ -568,9 +587,11 @@ When sending a group message:
 
 ```
 Group {
-  group_id: uuid,                      // shared locally and between members, randomly generated
+  group_id: string,                    // `group-<16 hex>`, random, made by the founder
   name: string,
-  founder_fingerprint: bytes[32],      // founder, the single authority
+  avatar_jpeg: bytes?,
+  founder_identity_id: string,         // founder, the single authority (can be handed over, see below)
+  founder_chain: [FounderTransfer],    // signed hand-overs, newest last (at most 8)
   members: [
     {
       identity_id: bytes[32],            // v0.2: membership is per person (not per device)
@@ -587,10 +608,9 @@ Group {
 - Only `founder_identity_id` can add or remove members. No other member has this
   authority. **v0.2 update**: since the founder may now have several devices (section
   1), the "founder lost their device" problem is solved at the **identity level**, not
-  the group level. If the founder loses their phone, another Active device of the
-  founder (section 1.6), or as a last resort the recovery file (section 1.8), continues
-  under the same `founder_identity_id`, and the group membership authority is not
-  interrupted. The problem, which previously needed a separate "backup founder"
+  the group level. If the founder loses their phone, the recovery file (section 1.8) continues
+  under the same `founder_identity_id`; a linked device of the founder can sign group
+  updates too (`send_group_update_to_siblings`), but cannot take the identity's root authority. The problem, which previously needed a separate "backup founder"
   mechanism, is now solved as a natural result of the general identity/device model.
 - A membership change is sent as a `GroupUpdate` packet signed by the founder, pairwise
   to all current (and any newly added) members — and to **every Active device** of
@@ -600,10 +620,14 @@ Group {
 GroupUpdate {
   group_id: uuid,
   new_version: u32,
-  change: Add(identity_id) | Remove(identity_id) | Rename(string),
-  signed_by: bytes[32],                // must be founder_identity_id
-  signed_by_device: bytes[32],         // which founder device signed it
-  signature: bytes,
+  change: Add(identity_id) | Remove(identity_id) | Rename(string) | AvatarUpdate(bytes?)
+          | Delete | TransferFounder(identity_id),
+  group_name, members,                 // the state after the change
+  member_devices, member_device_proofs, // device keys of members, vouched by the founder (delta)
+  signed_by: string,                   // must be founder_identity_id
+  signed_by_device: string,            // which founder device signed it
+  signature, signature_pq,             // Ed25519 + ML-DSA-87
+  founder_chain,
 }
 ```
 
@@ -652,7 +676,7 @@ When a member is removed from the group:
 3. **Multi-device support**: → **Decided**: full synchronisation, two-layer
    Identity/Device model (see sections 1, 2.2, 3.3, 5.5).
 4. **Founder device loss**: → **Decided**: solved at the identity level; the recovery
-   file (section 1.8) remains available as a last resort (see the note in section 5.2).
+   file (section 1.8) is the way back when the primary device is lost (see the note in section 5.2).
 5. **Node incentive model — decision: volunteer only.**
    The use case is small scale (a group of friends, a known number of people); node
    mode is kept on by the project owner on their own device. No reciprocity or
@@ -666,8 +690,8 @@ When a member is removed from the group:
    node's address via QR/manual entry → connects to it → discovers the others over
    the DHT. If the single node is offline (the constraint v0.1 accepts), new discovery
    stops; at small scale this is an acceptable trade-off.
-6. **Read status sync**: → **Decided**: brought into the v0.2 scope, a `read_states`
-   addition to `ReadReceipt` (normal message traffic) + `SyncPayload` (see section 1.7.1).
+6. **Read status sync**: → **Decided**: brought into the v0.2 scope, a `ReadStateSync`
+   watermark message plus `Seen` (normal message traffic) + `SyncPayload` (see section 1.7.1).
 7. **Device count limit**: → **Decided**: at most 5 Active devices per Identity
    (see section 1).
 
@@ -703,9 +727,29 @@ to the Identity/Device split and runs only in the special case "1 Identity = 1 D
 - [x] DeviceAdd/DeviceRevoke flow (sections 1.5/1.6)
 - [x] Sync between devices: SyncPayload (contacts, groups) (section 1.7)
 - [x] Device-pair based DeviceRatchetState and pairwise multi-device sending (section 1.7.1)
-- [x] Identity recovery file (.txt, password-protected) (section 1.8)
+- [x] Identity recovery file (`typeon-recovery-*.bin`, password-protected) (section 1.8)
 - [ ] Message history sync (optional, user preference) (not in SyncPayload; `SiblingHistoryRequest/Response` exists, no setting)
-- [x] Read status (ReadReceipt + separate `ReadStateSync` message) (section 1.7.1)
+- [x] Read status (`Seen` + separate `ReadStateSync` message) (section 1.7.1)
 
 File transfer and voice/video calls are OUTSIDE the v0.1/v0.2 scope (added later; see
 the status note above).
+
+---
+
+## 8. Additions after v0.2 (implemented; outside the original scope)
+
+These were added later. The wire details are in `TECHNICAL_HANDOFF.md`; the threat model is in `SECURITY.md`.
+
+**Server-visible size padding (2026-11-21).** Everything a store-and-forward server stores that the client seals (mailbox envelopes, first-contact items, archive records) is padded inside the AEAD: `plaintext ‖ 0x80 ‖ 0x00…`, rounded up with Padmé (Nikitin et al., 2019), at least 512 bytes, never past the wire cap. The server sees a size class, not the length. It does not hide timing or item counts.
+
+**Disappearing messages.** A chat has an optional disappearing mode, set per device (30 s to 4 weeks). While it is on, every message sent in the chat (text, file, voice, sticker) carries `expire_secs`. A receiver deletes the message `expire_secs` after it is on its own screen (local clock); an unopened message goes after 1 day, or after its own timer when longer. The sender's copy counts from sending. Such rows never enter history answers, recovery files, chat previews or the server archive, and an expired row stays as a tombstone so late copies cannot bring it back. Clients block copy, forward, quote and save, and the Android client sets `FLAG_SECURE` while one is shown; desktops show only a placeholder. It is a convenience, not a guarantee: a receiver can still photograph the screen or run a modified client.
+
+**Quick reactions.** Double tap (double click on desktop) on a message opens a bar of the user's five most used reaction emojis plus a button for the full picker. The list is computed locally from stored reactions.
+
+**Stickers.** Stickers are lossy JPEG XL files kept encrypted on the device, shared with linked devices (`SiblingEchoBody::Sticker`, `StickersRequest`), with local-only favorites and folders.
+
+**Group calls.** A running group call is offered again to absent members (every 30 s for 5 minutes, then every 2 minutes) so they can join later ("Attend"). `CallAction::Ended` tells every member the call is over; `CallAction::Joined` tells the user's other devices to stop ringing.
+
+**Self-update.** Every app checks the project's GitHub `releases.atom` over Tor about every 20 hours and installs an update only when `SHA256SUMS` carries the owner's offline Ed25519 signature (`SHA256SUMS.sig`).
+
+**Desktop clients.** Linux (GTK4) and Windows builds are secondary devices only: they link to a phone by QR, never create an account, and never hold device authority.

@@ -10,7 +10,9 @@ install, so this file is the shared copy for opencode, and for Claude on Windows
 - `p2p_messenger_android_server/`, `typeon-server/` — store-and-forward server (Android app + Rust crate).
 - `typeon-crypto/` — shared crypto primitives.
 - `Linux/` — GTK4 + libadwaita desktop client (`typeon-linux`). **The same crate builds the Windows client**: platform code sits behind `#[cfg(windows)]` / `#[cfg(unix)]`, plus `src/*_win.rs` and `src/win.rs`.
+- `tools/` — `bump-version.sh` (version bump in every manifest and lock file), `sign-update.sh` (owner's offline update signing; the owner runs it).
 - `dist/` — release artifacts + `SHA256SUMS` (ignored by git).
+- Current release: **8.0.0** (client, server app, Linux, Windows; tag `v8.0.0`). `master` carries later unreleased work. Per-area detail: `HANDOFF.md` (rules, file map), `TECHNICAL_HANDOFF.md` (algorithms), `SECURITY.md`, `Description.md` (protocol spec).
 
 ## Owner rules
 - Desktop clients (Linux, Windows) are **secondary devices only**: they link to the phone by QR. Never add account creation, pairing authority or device-authority roles to them. Unreachable desktops would break the other devices.
@@ -18,7 +20,10 @@ install, so this file is the shared copy for opencode, and for Claude on Windows
 - **Do not build** (cargo, gradle, flatpak) unless the owner explicitly says so ("derle").
 - Never use `git checkout`/`git restore` to undo work. Back the files up first, then edit them back.
 - Code review: judge the code, not its comments. Comments are not evidence.
-- On a release: bump the version, copy every artifact into `dist/` and refresh `dist/SHA256SUMS`.
+- The GitHub remote (`origin`) is **public**. Never commit or push private paths: `.claude/`, `reviews/`, `trafficvis/`, `inspection-*/`, `HANDOFF.local.md`, the `Mesaj`/`Pil`/`Test-Bulgulari` notes (all gitignored). Commit or push only when the owner asks.
+- `FLAG_SECURE` is not set on ordinary client chat, list or settings screens (owner rule). It is set only on link/QR/camera/lock screens, below API 33, and while a disappearing message is shown (`P2PApplication.setSecure`, release builds only).
+- New Android text goes into both `res/values/strings.xml` and `res/values-tr/strings.xml`.
+- On a release: bump the version with `tools/bump-version.sh`, copy every artifact into `dist/` and refresh `dist/SHA256SUMS`. Gradle leaves release APKs unsigned: sign them with `./sign-release.sh`. The update signature (`SHA256SUMS.sig`) is made by the owner with `tools/sign-update.sh`; give the owner the command, never touch the key.
 - Never write passwords, keys or device secrets into the repo or this file.
 
 ## Windows client (cross-compiled on Linux)
@@ -32,7 +37,7 @@ Build: `Linux/packaging/windows/build.sh [--release]`. Portable zip: `Linux/pack
 Windows specifics:
 - Vault key: DPAPI (`src/keyring_win.rs`), file `vault-key.dpapi` in `%LOCALAPPDATA%\typeon`.
 - Voice messages: GStreamer `wasapi2src` (`src/audio_win.rs`). Calls: wasapi2, mfvideosrc, Media Foundation / OpenH264 encoders, D3D11 decoders (`src/call_media.rs`).
-- Tray icon: our own `Shell_NotifyIconW` icon (`src/win.rs`, exe icon resource 1 embedded by `Linux/build.rs`): left click opens, right click → Open / Quit. Notifications are balloons on that icon (`app::post_notification`). Never call gio `send_notification`/`withdraw_notification` directly: on Windows that creates GLib's second, menu-less tray icon. Closing the window hides it to the tray; main menu → Quit also exits.
+- Tray icon: our own `Shell_NotifyIconW` icon (`src/win.rs`, exe icon resource 1 embedded by `Linux/build.rs`): left click opens, right click → Open / Quit. Notifications are balloons on that icon (`app::post_notification`). Never call gio `send_notification`/`withdraw_notification` directly: on Windows that creates GLib's second, menu-less tray icon. Closing the window hides it to the tray; main menu → Quit also exits (Quit sends a keepalive `bye` so peers stop dialling the desktop).
 - Autostart: Settings → Network → "Start with Windows" (HKCU Run, `--background`).
 - Custom fonts: `pango_font_map_add_font_file` (`src/win.rs`).
 - Debug log: the package ships `bin\typeon-debug.exe` (a release build with `--features console`: a console window, no debug assertions or debug hooks) and `gdbus.exe`. From `cmd` in `Typeon\bin`: `set RUST_LOG=info` then `typeon-debug.exe 2> log.txt`. The release `typeon.exe` has no console.
