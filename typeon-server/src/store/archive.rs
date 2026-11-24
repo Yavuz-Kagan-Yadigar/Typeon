@@ -81,6 +81,41 @@ impl Store {
         Ok(newest)
     }
 
+    /// What `archive_put` of `records` by `owner` would change, without writing: `(owner's charge, total stored bytes)`.
+    /// The same rules as `archive_put`, in order: an over-long id is skipped, only a higher `rev` overwrites, and an
+    /// overwrite refunds the old row to its owner. An edit, a delete or another device's copy of a stored record is
+    /// therefore charged only what it adds, and a put that shrinks the archive is never refused for the quota.
+    pub fn archive_put_delta(&self, bucket: &str, records: &[ArchiveRecord], owner: &[u8]) -> (i64, i64) {
+        // record_id -> (rev, byte_len, owner) as it stands after the records before it in this batch.
+        let mut rows: std::collections::HashMap<&str, Option<(i64, i64, Vec<u8>)>> = std::collections::HashMap::new();
+        let (mut owner_delta, mut total_delta) = (0i64, 0i64);
+        for rec in records {
+            if rec.record_id.len() > 128 {
+                continue;
+            }
+            let row = rows.entry(rec.record_id.as_str()).or_insert_with(|| {
+                self.conn.query_row(
+                    "SELECT rev, byte_len, owner FROM archive WHERE bucket = ?1 AND record_id = ?2",
+                    params![bucket, rec.record_id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Vec<u8>>(2)?)),
+                ).ok()
+            });
+            let rev = rec.rev.min(i64::MAX as u64) as i64;
+            if row.as_ref().is_some_and(|(old_rev, _, _)| rev <= *old_rev) {
+                continue;
+            }
+            let bytes = archive_row_bytes(rec) as i64;
+            let (old_bytes, refund) = match row {
+                Some((_, old_bytes, old_owner)) => (*old_bytes, if old_owner.as_slice() == owner { *old_bytes } else { 0 }),
+                None => (0, 0),
+            };
+            owner_delta += bytes - refund;
+            total_delta += bytes - old_bytes;
+            *row = Some((rev, bytes, owner.to_vec()));
+        }
+        (owner_delta, total_delta)
+    }
+
     /// Only the owners whose rows changed are recounted (an overwrite or purge changes what another enrollment is charged).
     /// Recounting every enrollment would scan the whole archive on each request.
     pub(super) fn recount_archive_bytes(&self, owners: &[Vec<u8>]) {

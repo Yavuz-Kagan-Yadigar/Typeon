@@ -66,7 +66,10 @@ impl P2PCore {
             wipe_memo_secrets(memo);
             memo.clear();
         }
-        memo.insert(tag, (id.clone(), secret));
+        // Two threads can miss the same tag: the copy replaced here is zeroed too.
+        if let Some((_, mut old)) = memo.insert(tag, (id.clone(), secret)) {
+            zeroize::Zeroize::zeroize(&mut old);
+        }
         Some((id, secret))
     }
 

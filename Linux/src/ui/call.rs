@@ -300,7 +300,7 @@ impl CallUi {
                 m.set_camera(b.is_active());
                 b.set_active(m.camera_on());
             }
-            ui.self_view.set_visible(b.is_active());
+            ui.self_view.set_visible(b.is_active() && !ui.app.locked.get());
             b.set_icon_name(if b.is_active() { "camera-video-symbolic" } else { "camera-disabled-symbolic" });
         });
         // Closing the window any other way than Hang up must not leave a
@@ -510,9 +510,12 @@ impl CallUi {
                 m.drop_slot(slot);
             }
         }
-        // Behind the idle lock: no names or pictures, as the title. The empty
-        // peer key makes the unlock render set them again.
+        // Behind the idle lock: no names, pictures or video, as the title. The
+        // empty peer key makes the unlock render set them again.
         let locked = self.app.locked.get();
+        if let Some(m) = self.media.borrow().as_ref() {
+            self.self_view.set_visible(!locked && m.camera_on());
+        }
         for (slot, p) in live {
             let tile = tiles.entry(slot).or_insert_with(|| {
                 let tile = new_tile(self.video.get());
@@ -522,7 +525,7 @@ impl CallUi {
             tile.name.set_text(if locked { "" } else { p.name.as_str() });
             // Muted participants get a mic-off icon before their name.
             tile.mic_off.set_visible(p.muted);
-            let showing_video = self.video.get() && !p.video_off;
+            let showing_video = self.video.get() && !p.video_off && !locked;
             tile.picture.set_visible(showing_video);
             tile.avatar.set_visible(!showing_video);
             if locked {

@@ -723,6 +723,28 @@ fn archive_charges_the_last_writer_and_any_holder_can_purge() {
 }
 
 #[test]
+fn archive_put_delta_matches_what_put_charges() {
+    let s = Store::open_in_memory().unwrap();
+    let a = enroll(&s, b"aaaa", "peerA");
+    let b = enroll(&s, b"bbbb", "peerB");
+    let row = |body: usize| (2 + body + ARCHIVE_ROW_OVERHEAD) as i64;
+    let first = [rec("m1", 1, 100, &[0u8; 100]), rec("m2", 1, 100, &[0u8; 10])];
+    assert_eq!(s.archive_put_delta("ar_1", &first, &a), (row(100) + row(10), row(100) + row(10)));
+    s.archive_put("ar_1", &first, &a, 0).unwrap();
+    // The same records again (another device's copy, or a resend): nothing is added.
+    assert_eq!(s.archive_put_delta("ar_1", &first, &a), (0, 0));
+    // A delete that shrinks a row refunds the writer: the quota check must let it through.
+    assert_eq!(s.archive_put_delta("ar_1", &[rec("m1", 2, 100, b"x")], &a), (row(1) - row(100), row(1) - row(100)));
+    // Another enrollment overwriting a's row pays the whole row; the total grows only by the difference.
+    assert_eq!(s.archive_put_delta("ar_1", &[rec("m2", 2, 100, &[0u8; 20])], &b), (row(20), row(20) - row(10)));
+    // In order within one batch: the second copy of m3 at a lower rev is skipped, a higher one replaces the first.
+    let batch = [rec("m3", 2, 100, &[0u8; 30]), rec("m3", 1, 100, &[0u8; 50]), rec("m3", 3, 100, &[0u8; 40])];
+    assert_eq!(s.archive_put_delta("ar_1", &batch, &a), (row(40), row(40)));
+    s.archive_put("ar_1", &batch, &a, 0).unwrap();
+    assert_eq!(s.enrollment_by_id(&a).unwrap().bytes_archive, row(100) + row(10) + row(40));
+}
+
+#[test]
 fn deleting_a_blob_refunds_what_was_charged_and_frees_the_id() {
     let s = Store::open_in_memory().unwrap();
     let a = enroll(&s, b"aaaa", "peerA");

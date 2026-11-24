@@ -477,15 +477,17 @@ impl ServerCore {
                 if records.iter().any(|r| r.sealed.len() > MAX_DEPOSIT_BYTES) {
                     return ServerResponse::Err(ServerErrorCode::TooLarge);
                 }
-                // One put can carry many records, so the quota check counts this request's bytes too.
-                let incoming: usize = records.iter().map(store::archive_row_bytes).sum();
-                if (e.bytes_archive as u64).saturating_add(incoming as u64) > limits.max_archive_bytes {
+                // One put can carry many records: the check counts what this request adds, net of the rows it
+                // overwrites (see `archive_put_delta`). An edit or delete near the quota still goes through.
+                let (owner_delta, total_delta) = self.store.archive_put_delta(&bucket, &records, &e.enrollment_id);
+                if owner_delta > 0 && (e.bytes_archive.max(0) as u64).saturating_add(owner_delta as u64) > limits.max_archive_bytes {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
+                let incoming = total_delta.max(0) as usize;
                 // See `total_budget_exceeded`. Unlike mail (`mailbox_ttl_ms`, 14 days by default), the archive lives 13 months after its last write
                 // (`ARCHIVE_TTL_MS`, swept in `maybe_sweep`) or until an `ArchivePurge` arrives. It is the largest
                 // contributor to the total ceiling.
-                if self.total_budget_exceeded(incoming, false) {
+                if incoming > 0 && self.total_budget_exceeded(incoming, false) {
                     warn!("Total disk budget full, archive write rejected");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
