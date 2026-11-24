@@ -477,13 +477,14 @@ impl ServerCore {
                 if records.iter().any(|r| r.sealed.len() > MAX_DEPOSIT_BYTES) {
                     return ServerResponse::Err(ServerErrorCode::TooLarge);
                 }
-                if e.bytes_archive as u64 > limits.max_archive_bytes {
+                // One put can carry many records, so the quota check counts this request's bytes too.
+                let incoming: usize = records.iter().map(store::archive_row_bytes).sum();
+                if (e.bytes_archive as u64).saturating_add(incoming as u64) > limits.max_archive_bytes {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
                 // See `total_budget_exceeded`. Unlike mail (`mailbox_ttl_ms`, 14 days by default), the archive lives 13 months after its last write
                 // (`ARCHIVE_TTL_MS`, swept in `maybe_sweep`) or until an `ArchivePurge` arrives. It is the largest
                 // contributor to the total ceiling.
-                let incoming: usize = records.iter().map(store::archive_row_bytes).sum();
                 if self.total_budget_exceeded(incoming, false) {
                     warn!("Total disk budget full, archive write rejected");
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);

@@ -157,6 +157,7 @@ internal fun GroupChatActivity.onGroupPhotoCaptured(jpeg: ByteArray, caption: St
                 caption, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: ""
             )
             withContext(Dispatchers.Main) {
+                if (groupId != targetGroupId) return@withContext
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this@onGroupPhotoCaptured, com.p2p.messenger.util.coreErrorText(this@onGroupPhotoCaptured, result), Toast.LENGTH_SHORT).show()
                 } else {
@@ -260,6 +261,7 @@ internal fun GroupChatActivity.onGroupFilePicked(uri: Uri, caption: String = "",
                 caption, quote?.id ?: "", quote?.preview ?: "", quote?.sender ?: ""
             )
             withContext(Dispatchers.Main) {
+                if (groupId != targetGroupId) return@withContext
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this@onGroupFilePicked, com.p2p.messenger.util.coreErrorText(this@onGroupFilePicked, result), Toast.LENGTH_SHORT).show()
                 } else {

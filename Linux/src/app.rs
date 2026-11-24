@@ -518,17 +518,19 @@ impl App {
         // comparison and the file write are just as safe off-thread.
         let data_dir = self.data_dir.clone();
         run_in_background(
-            || core::archive_root_key(),
-            move |ark| {
+            // The file read, compare and fsync'd write stay off the GTK thread too.
+            move || {
                 // Also when the key changed: the primary device replaces it
                 // when it revokes a device.
-                if let Some(ark) = ark {
-                    if matches!(crate::secrets::load_archive_key(&data_dir), Ok(Some(k)) if k == ark) {
-                        return;
-                    }
-                    if let Err(e) = crate::secrets::store_archive_key(&data_dir, &ark) {
-                        eprintln!("could not store the archive root key: {e}");
-                    }
+                let ark = core::archive_root_key()?;
+                if matches!(crate::secrets::load_archive_key(&data_dir), Ok(Some(k)) if k == ark) {
+                    return None;
+                }
+                crate::secrets::store_archive_key(&data_dir, &ark).err()
+            },
+            |error: Option<String>| {
+                if let Some(e) = error {
+                    eprintln!("could not store the archive root key: {e}");
                 }
             },
         );

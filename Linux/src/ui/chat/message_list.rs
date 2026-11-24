@@ -30,7 +30,7 @@ impl ChatView {
         if let Some(existing) = self.bubbles.borrow().get(&entry.id) {
             // Already on screen — a duplicate can legitimately arrive when a
             // reload races an event. Refresh in place instead of doubling it.
-            {
+            let deleted = {
                 let mut current = existing.entry.borrow_mut();
                 let deleted = current.deleted || entry.deleted;
                 let seen_by = if entry.seen_by.is_empty() { current.seen_by.clone() } else { entry.seen_by.clone() };
@@ -39,7 +39,8 @@ impl ChatView {
                 current.deleted = deleted;
                 current.seen_by = seen_by;
                 current.reactions = reactions;
-            }
+                deleted
+            };
             existing.text.set_markup(&display_text(&entry));
             self.search_lower.borrow_mut().clear();
             existing.edited.set(entry.edited);
@@ -53,7 +54,8 @@ impl ChatView {
             existing.entry.borrow_mut().status = status.clone();
             existing.meta.set_markup(&format_meta(entry.order_key, status.as_deref(), entry.edited));
             // Shared borrows only, so these are safe under the lookup above.
-            if entry.deleted {
+            // A stale copy of a deleted message must not bring its text back.
+            if deleted {
                 self.apply_delete(&entry.id);
             }
             if !entry.reactions.is_empty() {

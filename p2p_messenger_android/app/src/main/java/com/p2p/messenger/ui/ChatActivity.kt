@@ -455,9 +455,9 @@ class ChatActivity : AppCompatActivity() {
             Thread { try { P2PLib.startDisappearCountdown(peer, "") } catch (e: Throwable) { } }.start()
         }
         // A disappearing message on screen: screenshots, screen recording and the recents thumbnail come out black.
+        // Below API 33 the whole screen stays secure (P2PApplication), so it is never cleared there.
         adapter.onDisappearPresent = { on ->
-            if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-            else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            if (on || android.os.Build.VERSION.SDK_INT >= 33) com.p2p.messenger.P2PApplication.setSecure(this, on)
         }
         selection = MessageSelection(this, adapter, { saveAttachmentToDownloads(it) }) { P2PLib.deleteMessage(peerDeviceFingerprint, it) }
         adapter.onAttachmentClick = { item -> onAttachmentClicked(item) }
@@ -632,6 +632,7 @@ class ChatActivity : AppCompatActivity() {
         P2PService.activeConversationId = peerDeviceFingerprint
         localMessages.clear()
         adapter.notifyDataSetChanged()
+        adapter.updateDisappearPulse()
         isLoadingOlderHistory = false
         noMoreOlderHistory = false
         searchMatches = emptyList()

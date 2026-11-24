@@ -132,13 +132,13 @@ jobs:
           LINEAGE: ${{ secrets.SIGNING_LINEAGE_B64 }}
         run: |
           export TYPEON_SIGNING="$RUNNER_TEMP/sign"; mkdir -p "$TYPEON_SIGNING"
+          trap 'rm -rf "$TYPEON_SIGNING"' EXIT
           echo "$JKS" | base64 -d > "$TYPEON_SIGNING/typeon-release.jks"
           echo "$LINEAGE" | base64 -d > "$TYPEON_SIGNING/lineage.bin"
           printf %s "$PASS" > "$TYPEON_SIGNING/pass.txt"
           export ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}
           mkdir signed
           for a in out/*.apk; do ./sign-release.sh "$a" "signed/$(basename "$a")"; done
-          rm -rf "$TYPEON_SIGNING"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: android, path: signed/*.apk }
 

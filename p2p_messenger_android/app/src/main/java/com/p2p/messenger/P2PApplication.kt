@@ -27,6 +27,8 @@ class P2PApplication : Application() {
      * moment. Moving between activities never drops the count to 0, so switching screens does not trigger it.
      */
     private var startedActivityCount = 0
+    /** The last screen stopped only for a recreate (rotation, theme): its restart is no return from the background. */
+    private var recreating = false
     /** Set once the core reported a stored identity. Later checks skip the core mutex on the main thread. */
     @Volatile private var identityKnown = false
 
@@ -213,7 +215,7 @@ class P2PApplication : Application() {
                 // ChatActivity straight from a notification must not skip the lock. See `AppLock` and `AppLockActivity`.
                 AppLock.guard(activity)
                 // See the `startedActivityCount` docs.
-                if (startedActivityCount == 0) {
+                if (startedActivityCount == 0 && !recreating) {
                     // The check takes the core mutex, which a long poll turn can hold: off the UI thread.
                     Thread {
                         if (identityKnown || P2PLib.hasStoredIdentity()) {
@@ -233,6 +235,7 @@ class P2PApplication : Application() {
                         }
                     }.start()
                 }
+                recreating = false
                 startedActivityCount++
                 com.p2p.messenger.service.P2PService.setAppVisible(true)
             }
@@ -249,6 +252,7 @@ class P2PApplication : Application() {
 
             override fun onActivityStopped(activity: Activity) {
                 startedActivityCount = (startedActivityCount - 1).coerceAtLeast(0)
+                recreating = startedActivityCount == 0 && activity.isChangingConfigurations
                 // The app went fully to the background (the count does not drop to 0 between screens, see
                 // `startedActivityCount`). The password is asked again on the next return. `isChangingConfigurations` covers
                 // `recreate()` (scale, font, language, colour and theme settings) and rotation: they stop and restart the

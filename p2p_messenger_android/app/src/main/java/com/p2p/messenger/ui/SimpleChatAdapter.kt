@@ -459,7 +459,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     var onDisappearPresent: ((Boolean) -> Unit)? = null
     private var disappearPresent = false
 
-    private fun updateDisappearPulse() {
+    /** Also called by the Activity after it empties the list (a chat switch binds no row). */
+    fun updateDisappearPulse() {
         val present = items.any { it.expireSecs > 0 && !it.isDeleted }
         disappearPulse.running = onScreen && present
         if (present != disappearPresent) {
@@ -526,7 +527,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (item.expireSecs <= 0 || item.isDeleted) {
             holder.txtExpire.visibility = View.GONE
             holder.bubble.foreground = null
-            disappearHolders.remove(holder)
+            // This holder showed a disappearing bubble before: the last one may be gone now.
+            if (disappearHolders.remove(holder)) updateDisappearPulse()
             return
         }
         holder.txtExpire.visibility = View.VISIBLE
@@ -760,6 +762,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 notifyItemChanged(i)
             }
         }
+        // A deleted disappearing message no longer keeps the screen secure.
+        updateDisappearPulse()
     }
 
     /** Applies a send status update (see the Rust "status" event). A message that stayed "pending"

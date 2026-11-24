@@ -34,7 +34,6 @@ class ServerService : Service() {
         private const val TAG = "TypeonServerSvc"
         private const val CHANNEL_ID = "TypeonServerChannel"
         private const val NOTIFICATION_ID = 1
-        private const val ERROR_NOTIFICATION_ID = 2
 
         const val PREFS_NAME = "typeon_server_settings"
         private const val KEY_NODE = "node_mode"
@@ -351,7 +350,6 @@ class ServerService : Service() {
                 lastError = null
                 startFailures = 0
                 setLocks(true)
-                nm.cancel(ERROR_NOTIFICATION_ID)
                 nm.notify(NOTIFICATION_ID, buildNotification(getString(R.string.notif_running)))
             }
         }

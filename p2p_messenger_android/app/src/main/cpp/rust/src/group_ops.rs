@@ -268,16 +268,7 @@ impl P2PCore {
             let u = if member_identity_id == new_member_identity_id { &full } else { &update };
             self.send_group_update_to_member(group_id, &member_identity_id, u);
         }
-        // The picture rides only an AvatarUpdate, never the Add: a full state
-        // after it gives the new member the picture. Only when the Add went
-        // out, or the queued Add would be replaced by it.
-        let add_queued = self.pending_group_syncs.contains_key(&(group_id.to_string(), new_member_identity_id.to_string()));
-        if let Some(g) = self.groups.get(group_id).filter(|g| g.avatar_jpeg.is_some() && !add_queued).cloned() {
-            match self.sign_group_resync(&g) {
-                Ok(resync) => self.send_group_update_to_member(group_id, new_member_identity_id, &resync),
-                Err(e) => warn!("Group picture for the new member not sent: {}", e),
-            }
-        }
+        // The group picture follows the Add in `send_group_update_to_member`.
         self.send_group_update_to_siblings(&update);
         Ok(())
     }
@@ -748,6 +739,18 @@ impl P2PCore {
             self.pending_group_syncs.remove(&(group_id.to_string(), member_identity_id.to_string()));
             if lasting {
                 self.meta_del(&meta_key);
+            }
+            // The picture rides only an AvatarUpdate, never the Add: a full
+            // state right after the Add went out (now or from the queue) gives
+            // the new member the picture. Sent only then, so it never replaces
+            // a still-queued Add.
+            if matches!(&update.change, GroupChange::Add(id) if id == member_identity_id) {
+                if let Some(g) = self.groups.get(group_id).filter(|g| g.avatar_jpeg.is_some()).cloned() {
+                    match self.sign_group_resync(&g) {
+                        Ok(resync) => self.send_group_update_to_member(group_id, member_identity_id, &resync),
+                        Err(e) => warn!("Group picture for the new member not sent: {}", e),
+                    }
+                }
             }
         } else {
             let key = (group_id.to_string(), member_identity_id.to_string());

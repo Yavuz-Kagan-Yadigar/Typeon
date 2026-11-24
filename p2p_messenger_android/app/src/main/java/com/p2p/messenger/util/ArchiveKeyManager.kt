@@ -55,19 +55,20 @@ object ArchiveKeyManager {
      * when the user turns on server-side history.
      */
     @Synchronized
-    fun loadIfPresent(context: Context) {
+    fun loadIfPresent(context: Context): Boolean {
         val file = keyFile(context)
-        if (!file.exists()) return
+        if (!file.exists()) return false
         val dataKey = try {
             KeystoreCrypto.decrypt(file.readBytes(), KeystoreCrypto.ALIAS_ARCHIVE_ROOT)
         } catch (e: Exception) {
             // The Keystore key is lost or corrupt. A new one is NOT generated. The archive on the server is encrypted with the old key, and a new key
             // would not recover it. It would only split the archive from this point on. The user can restore from the recovery file, or the key comes
             // back from a sibling device through `DeviceSync`.
-            return
+            return false
         }
         try {
             P2PLib.setArchiveRootKey(dataKey)
+            return true
         } finally {
             dataKey.fill(0)
         }
@@ -83,10 +84,8 @@ object ArchiveKeyManager {
     @Synchronized
     fun ensureCreated(context: Context): Boolean {
         val file = keyFile(context)
-        if (file.exists()) {
-            loadIfPresent(context)
-            return true
-        }
+        // A file that does not decrypt is no usable key.
+        if (file.exists()) return loadIfPresent(context)
         // A key that arrived from a sibling (`DeviceSync`) may be in memory. Write it, and do not generate a new one on top. Otherwise the archive would
         // be split across devices.
         val fromCore = try { P2PLib.archiveRootKey() } catch (e: Exception) { ByteArray(0) }

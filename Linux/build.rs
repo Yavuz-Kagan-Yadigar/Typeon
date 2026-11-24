@@ -15,19 +15,16 @@ fn main() {
     std::fs::write(&rc, format!("1 ICON \"{}\"\n", ico)).unwrap();
     let obj = out.join("typeon-res.o");
     // windres: llvm-mingw's name when cross-compiling on Linux, plain or llvm-
-    // prefixed under MSYS2 CLANG64 on Windows. First one that starts wins.
-    let status = ["x86_64-w64-mingw32-windres", "windres", "llvm-windres"]
-        .iter()
-        .find_map(|tool| {
-            std::process::Command::new(tool)
-                .arg(&rc)
-                .args(["-O", "coff", "-o"])
-                .arg(&obj)
-                .status()
-                .ok()
-        })
-        .expect("no windres found (x86_64-w64-mingw32-windres, windres, llvm-windres)");
-    assert!(status.success(), "windres failed");
+    // prefixed under MSYS2 CLANG64 on Windows. First one that succeeds wins.
+    let ok = ["x86_64-w64-mingw32-windres", "windres", "llvm-windres"].iter().any(|tool| {
+        std::process::Command::new(tool)
+            .arg(&rc)
+            .args(["-O", "coff", "-o"])
+            .arg(&obj)
+            .status()
+            .map_or(false, |s| s.success())
+    });
+    assert!(ok, "windres failed or not found (x86_64-w64-mingw32-windres, windres, llvm-windres)");
     println!("cargo:rustc-link-arg-bins={}", obj.display());
     // The main thread gets 1 MB on Windows (8 MB on Linux). ML-DSA-87 / ML-KEM-1024
     // key loading on the GTK thread overflows that ("thread 'main' has overflowed

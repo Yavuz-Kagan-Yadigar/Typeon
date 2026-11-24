@@ -251,6 +251,7 @@ internal fun GroupChatActivity.sendVoiceMessage(file: File, durationMs: Long, ca
                 "Error: ${e.message}"
             }
             withContext(Dispatchers.Main) {
+                if (groupId != targetGroupId) return@withContext
                 if (result.startsWith("Error:")) {
                     Toast.makeText(this@sendVoiceMessage, com.p2p.messenger.util.coreErrorText(this@sendVoiceMessage, result), Toast.LENGTH_SHORT).show()
                 } else {

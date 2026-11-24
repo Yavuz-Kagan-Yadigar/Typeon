@@ -20,16 +20,13 @@ object SkippedKeyManager {
 
     private const val KEY_FILENAME = "skipped_key_enc.enc"
 
-    private fun keyFile(context: Context): File =
-        File(context.filesDir, KEY_FILENAME)
-
     /** Must be called every time the app starts (after initDatabase), regardless of node mode. */
     @Synchronized
     fun ensureLoaded(context: Context) {
-        val existed = keyFile(context).exists()
         val dataKey = loadOrCreate(context.filesDir)
         if (dataKey == null) {
-            if (existed) KeystoreCrypto.reportKeyFailure(context)
+            // Unreadable key, or a first key that could not be stored.
+            KeystoreCrypto.reportKeyFailure(context)
             return
         }
         try {

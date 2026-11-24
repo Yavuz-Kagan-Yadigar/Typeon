@@ -1077,7 +1077,20 @@ impl P2PCore {
         }
         let Some(conn) = &self.db else { return };
         // A disappearing row never reached the server archive (see `archive_message_exp`); its edit or expiry must not upload it now.
-        if conn.query_row("SELECT 1 FROM messages WHERE message_id = ?1 AND expire_secs IS NOT NULL", params![target_message_id], |_| Ok(())).is_ok() {
+        // Scoped to this chat: message ids are unique only per conversation.
+        let disappearing = match group_id {
+            Some(gid) => conn.query_row(
+                "SELECT 1 FROM messages WHERE message_id = ?1 AND group_id = ?2 AND expire_secs IS NOT NULL",
+                params![target_message_id, gid],
+                |_| Ok(()),
+            ),
+            None => conn.query_row(
+                "SELECT 1 FROM messages WHERE message_id = ?1 AND peer_device_fingerprint = ?2 AND group_id IS NULL AND expire_secs IS NOT NULL",
+                params![target_message_id, peer_device_fingerprint],
+                |_| Ok(()),
+            ),
+        };
+        if disappearing.is_ok() {
             return;
         }
 

@@ -73,6 +73,7 @@ object MessageHistoryManager {
             // Keystore or disk failure: this runs on unguarded start-up
             // paths and took the process down before the network started.
             com.p2p.messenger.util.Log.e(TAG, "Anahtar uretilemedi", e)
+            KeystoreCrypto.reportKeyFailure(context)
         } finally {
             dataKey.fill(0)
         }

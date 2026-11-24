@@ -97,6 +97,18 @@ pub fn place(app: &Rc<App>, conversation: &Conversation, video: bool) {
         if let Err(e) = result {
             ui.app.toast(&e);
             ui.close();
+            return;
+        }
+        // A call that ended before any poll saw it leaves idle == idle, and
+        // `render` never closes the window: ask once now that it exists.
+        let Ok(s) = gio::spawn_blocking(core::call_state).await else { return };
+        if ui.closing.get() {
+            return;
+        }
+        if !ui.seen.get() && (s.state.is_empty() || s.state == "idle") {
+            ui.on_state_changed("idle", &s);
+        } else {
+            ui.render(&s);
         }
     });
 }
@@ -498,19 +510,28 @@ impl CallUi {
                 m.drop_slot(slot);
             }
         }
+        // Behind the idle lock: no names or pictures, as the title. The empty
+        // peer key makes the unlock render set them again.
+        let locked = self.app.locked.get();
         for (slot, p) in live {
             let tile = tiles.entry(slot).or_insert_with(|| {
                 let tile = new_tile(self.video.get());
                 self.grid.insert(&tile.root, -1);
                 tile
             });
-            tile.name.set_text(&p.name);
+            tile.name.set_text(if locked { "" } else { p.name.as_str() });
             // Muted participants get a mic-off icon before their name.
             tile.mic_off.set_visible(p.muted);
             let showing_video = self.video.get() && !p.video_off;
             tile.picture.set_visible(showing_video);
             tile.avatar.set_visible(!showing_video);
-            if *tile.peer.borrow() != p.peer {
+            if locked {
+                if !tile.peer.borrow().is_empty() {
+                    tile.peer.borrow_mut().clear();
+                    tile.avatar.set_text(None);
+                    tile.avatar.set_custom_image(None::<&gdk::Paintable>);
+                }
+            } else if *tile.peer.borrow() != p.peer {
                 *tile.peer.borrow_mut() = p.peer.clone();
                 tile.avatar.set_text(Some(&p.name));
                 let picture = self.app.contacts.borrow().iter()

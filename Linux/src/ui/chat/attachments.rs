@@ -290,6 +290,10 @@ impl ChatView {
             move || core::download_file(&file_id, &source_fingerprint),
             move |result| match result {
                 Ok(()) => {
+                    // The file finished while the start was in flight: keep its complete state.
+                    if *state.status.borrow() == "complete" {
+                        return;
+                    }
                     if let Some(button) = &hide_on_start {
                         button.set_visible(false);
                     }
