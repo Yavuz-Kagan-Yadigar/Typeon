@@ -4,7 +4,7 @@ use super::*;
 
 impl P2PCore {
     pub(crate) fn new() -> Self {
-        // Every JNI-exported `P2PCore` method wraps its body in `catch_panic` (see the JNI Bindings section at the end of the file). This panic hook is
+        // Every JNI-exported `P2PCore` method wraps its body in `catch_panic` (in `jni_exports/mod.rs`). This panic hook is
         // installed here as well because release builds are stripped (`strip = true` in Cargo.toml), so a panic's crash dump would have no symbols.
         // The hook runs BEFORE unwinding starts, so it logs the full panic message and file/line to logcat before `catch_unwind` catches it.
         std::panic::set_hook(Box::new(|info| {
@@ -186,10 +186,9 @@ impl P2PCore {
         // First statement on the connection. A wrong key fails on the read.
         conn.execute_batch(&zeroize::Zeroizing::new(format!("PRAGMA key = {};", key_pragma.as_str())))?;
         conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-        // Enable WAL and busy_timeout. The client did not set these before, while the server (`typeon-server/src/store.rs`) always did.
-        // With the default rollback journal, every message (ratchet state), every 8 transferred chunks (`bytes_transferred`) and every skipped key was a
-        // separate fsync-heavy transaction, which cost measurable battery and latency on a phone. `busy_timeout` prevents silent `SQLITE_BUSY`
-        // errors if a second connection is added later.
+        // WAL journal and busy_timeout (the server in `typeon-server/src/store/` uses them too). The rollback journal makes every write
+        // (ratchet state, transfer progress, skipped keys) a separate fsync-heavy transaction, which costs battery on a phone. busy_timeout
+        // turns a lock conflict with a second connection into a wait instead of an immediate SQLITE_BUSY error.
         // secure_delete: deleted rows (acked queue entries, removed contacts) are zeroed instead of lingering in free pages.
         for (k, v) in [("journal_mode", "WAL"), ("synchronous", "NORMAL"), ("secure_delete", "ON")] {
             if let Err(e) = conn.pragma_update(None, k, v) {
@@ -208,12 +207,11 @@ impl P2PCore {
                 trusted_identity_id TEXT, known_devices_json TEXT, last_device_change INTEGER, avatar_jpeg BLOB);
              CREATE TABLE IF NOT EXISTS groups (group_id TEXT PRIMARY KEY, founder TEXT, name TEXT,
                 version INTEGER, members_json TEXT, created_at INTEGER, avatar_jpeg BLOB);
-             -- Spec dışı, kullanıcı isteği (WhatsApp tarzı tepkiler): bir
-             -- mesaja bırakılan emojiler. KİŞİ BAŞINA TEK tepki, bu yüzden
-             -- birincil anahtar (mesaj, tepki veren) — yeni bir emoji
-             -- öncekinin üzerine yazar, kaldırma satırı siler (bkz.
-             -- `apply_reaction`). `reacted_at_ms`: sırasız teslimde eski bir
-             -- tepkinin yeniyi ezmemesi için (bkz. packet.rs `Reaction`).
+             -- Not in the spec. A user request (WhatsApp-style reactions): emojis left on a
+             -- message. ONE reaction per person, so the key is (message, reactor). A new emoji
+             -- overwrites the old one, and a removal deletes the row (see `apply_reaction`).
+             -- `reacted_at_ms` stops an old reaction that arrives late from overwriting a newer
+             -- one (see packet.rs `Reaction`).
              CREATE TABLE IF NOT EXISTS message_reactions (
                 message_id TEXT NOT NULL,
                 reactor_identity_id TEXT NOT NULL,
@@ -221,20 +219,14 @@ impl P2PCore {
                 reacted_at_ms INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (message_id, reactor_identity_id)
              );
-             -- Spec dışı, hata düzeltmesi (kullanıcı: seen mekanizması ve
-             -- seen pp bubbles güvenilir değil, özellikle gruplarda): önceden
-             -- bir `Seen` alındığında (bkz. `MessageContent::Seen` kolu) HİÇBİR
-             -- YERE yazılmıyordu — sadece o an sohbet ekranı AÇIKSA görülen,
-             -- kalıcı olmayan bir olay yayınlanıyordu. Sohbet kapalıyken (ya da
-             -- uygulama arka plandayken) gelen bir görüldü bildirimi
-             -- SONSUZA KADAR kayboluyordu; sohbeti yeniden açtığınızda kim
-             -- gördü avatar listesi boş/eksik başlıyordu — özellikle
-             -- gruplarda görünür (tek kişilik 1:1 tikin aksine, çoklu-üye
-             -- avatar satırı eksikliği çok daha göze batıyor). `message_reactions`
-             -- ile AYNI desen: (mesaj, görüntüleyen) çifti başına tek satır,
-             -- `load_message_history`/`load_group_message_history` her satırda
-             -- BURADAN taze okuyup `ArchivedMessage.seen_by`'a gömüyor (bkz.
-             -- orası) — tıpkı `reactions_summary` gibi.
+             -- Not in the spec, a bug fix. A received `Seen` (see the `MessageContent::Seen` arm)
+             -- used to be written NOWHERE: it only emitted an event, which reached the chat screen
+             -- only while that chat was open. A read receipt that arrived while the chat was closed
+             -- (or the app was in the background) was lost for good, and the seen-by avatars of a
+             -- reopened chat started empty, most visibly in groups. Same pattern as
+             -- `message_reactions`: one row per (message, viewer). `load_message_history` and
+             -- `load_group_message_history` read it for each row and put it in `ArchivedMessage.seen_by`,
+             -- as `reactions_summary` does.
              CREATE TABLE IF NOT EXISTS message_seen (
                 message_id TEXT NOT NULL,
                 viewer_identity_id TEXT NOT NULL,
@@ -249,13 +241,11 @@ impl P2PCore {
                 encrypted_blob BLOB NOT NULL,
                 nonce BLOB NOT NULL,
                 timestamp INTEGER NOT NULL,
-                -- Çoklu-cihaz/sıralama (spec dışı, kullanıcı isteği): göndericinin
-                -- KENDİ gönderim anı (ms). `timestamp` YEREL alınma/arşivleme
-                -- anıdır; gecikmeli teslim edilen bir mesaj alınma sırasına göre
-                -- DEĞİL, GÖNDERİM sırasına göre gösterilmeli — bu yüzden
-                -- gösterim/sıralama bu kolona göre yapılır (0/NULL ise
-                -- `timestamp`'e düşülür). `timestamp` sync eşiği/sayfalama için
-                -- OLDUĞU GİBİ (yerel, monoton) korunur.
+                -- Multi-device ordering (not in the spec, a user request): the sender's own send time
+                -- (ms). `timestamp` is the LOCAL receive/archive time. A delayed message must be shown
+                -- in SEND order, so display and sorting use this column (0/NULL falls back to
+                -- `timestamp`). `timestamp` is kept as it is (local, monotonic) for the sync threshold
+                -- and paging.
                 sent_at_ms INTEGER
              );
              CREATE INDEX IF NOT EXISTS idx_messages_peer ON messages(peer_device_fingerprint, timestamp);
@@ -300,36 +290,28 @@ impl P2PCore {
                 multiaddr TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
              );
-             -- bkz. `device_onion_addr` alanı dokümantasyonu: `device_addrs`'tan
-             -- AYRI — bir `.onion` adresi asla `device_addrs`'taki (LAN/
-             -- doğrudan) bir adresle üzerine yazılmaz, aksi hâlde ağ
-             -- değişikliğinden bağımsız olması gereken Tor yeniden-bağlanma
-             -- ipucu kaybolurdu.
+             -- See the `device_onion_addr` field docs. A `.onion` address is kept apart from
+             -- `device_addrs`: a LAN or direct address never overwrites it. Otherwise the Tor
+             -- reconnect hint, which must not depend on the network, would be lost.
              CREATE TABLE IF NOT EXISTS device_onion_addrs (
                 device_fingerprint TEXT PRIMARY KEY,
                 multiaddr TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
              );
-             -- bkz. `persist_durable_retry` dokümantasyonu: süreç tamamen
-             -- öldürülüp yeniden başlasa bile kaybolmaması gereken
-             -- (Edit/Delete/GroupUpdate) yeniden deneme kuyruğunun diskteki
-             -- kopyası.
+             -- See `persist_durable_retry`: the on-disk copy of the retry queue for Edit, Delete and
+             -- GroupUpdate. It must survive a process kill and restart.
              CREATE TABLE IF NOT EXISTS pending_durable_retries (
                 message_id TEXT PRIMARY KEY,
                 peer_device_fingerprint TEXT NOT NULL,
                 content_cbor BLOB NOT NULL,
                 created_at INTEGER NOT NULL
              );
-             -- bkz. `pending_group_messages` alanı dokümantasyonu: önceden bu
-             -- kuyruk SADECE bellekte tutuluyordu — bir grup üyesinin HİÇ
-             -- cihazı çözülemezken süreç öldürülürse, o üyeye kuyruklanmış
-             -- mesajlar sessizce ve kalıcı olarak kayboluyordu (kullanıcı
-             -- gönderildi sanıyordu). `pending_durable_retries` ile AYNI
-             -- desen: her satır tek bir kuyruklanmış mesajı taşır (bir üye
-             -- için birden fazla satır olabilir, `pending_durable_retries`'ten
-             -- FARKLI olarak — orada mesaj başına TEK bekleyen Ack varken,
-             -- burada bir üye çözülene kadar SIRAYLA birikmiş TÜM mesajlar
-             -- tutulmalı).
+             -- See the `pending_group_messages` field docs. This queue used to live only in memory:
+             -- if the process was killed while no device of a group member could be resolved, the
+             -- messages queued for that member were lost silently, and the user believed they were
+             -- sent. Same pattern as `pending_durable_retries`, but one row per queued message. A
+             -- member can have several rows: ALL messages queued for it are kept, in order, until
+             -- one of its devices is resolved.
              CREATE TABLE IF NOT EXISTS pending_group_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id TEXT NOT NULL,
@@ -337,24 +319,18 @@ impl P2PCore {
                 content_cbor BLOB NOT NULL,
                 created_at INTEGER NOT NULL
              );
-             -- Çoklu-cihaz (spec 1.5): küçük anahtar/değer deposu. Şu an tek
-             -- kullanım: `own_device_add` — bu cihaz ikincil olarak bir
-             -- kimliğe bağlandıysa, birincil cihazın verdiği imzalı DeviceAdd
-             -- (CBOR). Kişilere kendimizi tanıtırken kanıt olarak yeniden
-             -- kullanılır (bkz. `announce_self_to_all_contacts`).
-             -- Kullanıcı kararı: engellenen kimlikler (bkz.
-             -- `blocked_identities`). Ayrı bir tablo, çünkü kişi kaydı
-             -- silinse bile engel DEVAM ETMELİ.
+             -- Blocked identities (a user decision). A separate table, so the block survives
+             -- deleting the contact record.
              CREATE TABLE IF NOT EXISTS blocked_identities (
                 identity_id TEXT PRIMARY KEY,
                 blocked_at  INTEGER NOT NULL
              );
-             -- Hesabını sildiğini bildiren kimlikler (bkz. `deleted_identities`).
+             -- Identities that announced their account deletion (see `deleted_identities`).
              CREATE TABLE IF NOT EXISTS deleted_identities (
                 identity_id TEXT PRIMARY KEY,
                 deleted_at  INTEGER NOT NULL
              );
-             -- bkz. `contact_removed_locally`.
+             -- See `contact_removed_locally`.
              CREATE TABLE IF NOT EXISTS removed_contacts (
                 identity_id TEXT PRIMARY KEY
              );
@@ -367,28 +343,32 @@ impl P2PCore {
                 targets TEXT NOT NULL,
                 content BLOB NOT NULL
              );
-             -- bkz. `remove_group_locally`.
+             -- See `remove_group_locally`.
              CREATE TABLE IF NOT EXISTS removed_groups (
                 group_id TEXT PRIMARY KEY,
                 -- Group version when it was removed here: an older signed
                 -- update must not bring the group back.
                 version INTEGER NOT NULL DEFAULT 0
              );
+             -- Small key/value store for multi-device (spec 1.5). Only one key is used so far:
+             -- `own_device_add`, the signed DeviceAdd (CBOR) of a secondary device linked to an
+             -- identity. It is shown to contacts as proof when this device introduces itself (see
+             -- `announce_self_to_all_contacts`).
              CREATE TABLE IF NOT EXISTS app_meta (
                 k TEXT PRIMARY KEY,
                 v BLOB NOT NULL
              );
-             -- bkz. `ack_text_packet`.
+             -- See `ack_text_packet`.
              CREATE TABLE IF NOT EXISTS acked_packets (
                 packet_id TEXT PRIMARY KEY,
                 acked_at INTEGER NOT NULL
              );
              -- The age prune runs on every ack: no full scan.
              CREATE INDEX IF NOT EXISTS idx_acked_packets_at ON acked_packets(acked_at);
-             -- bkz. `remember_sibling_op`. new_text NULL = delete.
-             -- bkz. `current_own_prekey` / `store_peer_prekey`.
+             -- See `current_own_prekey` / `store_peer_prekey`.
              CREATE TABLE IF NOT EXISTS own_prekeys (id INTEGER PRIMARY KEY, sealed BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS peer_prekeys (device_fingerprint TEXT PRIMARY KEY, prekey BLOB NOT NULL);
+             -- See `remember_sibling_op`. new_text NULL = delete.
              CREATE TABLE IF NOT EXISTS pending_sibling_ops (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 target_message_id TEXT NOT NULL,
@@ -433,7 +413,7 @@ impl P2PCore {
         // that ran an earlier version need the column added by hand. SQLite has no `ADD COLUMN IF NOT EXISTS`, so the "duplicate column" error
         // is ignored when the column already exists.
         migrate("ALTER TABLE files ADD COLUMN preview_jpeg BLOB")?;
-        // Same migration pattern: voice-message duration, our own profile photo, and profile photos that contacts sent us. All were added later.
+        // Voice message duration.
         migrate("ALTER TABLE files ADD COLUMN duration_ms INTEGER")?;
         // The chunk size is now per file (see `attachments::FILE_CHUNK_SIZE_V2`).
         // NULL = legacy 256 KiB, so existing rows work as before.
@@ -448,13 +428,9 @@ impl P2PCore {
         migrate("ALTER TABLE groups ADD COLUMN avatar_jpeg BLOB")?;
         // See `packet::FounderTransfer`. The founder transfer chain prevents a missed transfer from permanently removing a member from the group.
         migrate("ALTER TABLE groups ADD COLUMN founder_chain_json TEXT")?;
-        // Group history and message status. The `messages` table used to hold only 1:1 chats (keyed by peer_device_fingerprint). Group messages were never
-        // archived (see the Text/group_id arm of receive_message), and sent group messages were archived under the WRONG key: each recipient's own
-        // peer_device_fingerprint. Those rows could never be read back as group history, and if that recipient was also a 1:1 contact, they leaked into
-        // its DM history. Rows with `group_id` set are now real group messages. In those rows peer_device_fingerprint is an empty string, which keeps the
-        // NOT NULL constraint and marks "not a DM". `sender_identity_id`: group messages have many senders, so the author must be stored.
-        // `message_id` / `status`: send status (pending / sent / failed) used to live only in memory (the `message_status` HashMap). After an app restart or a
-        // chat screen reopen (a fresh `getMessageHistory` read), that state was lost and every row showed as "sent", including messages still pending or failed.
+        // Group history and send status. Rows with `group_id` set are group messages. For them peer_device_fingerprint is an empty string:
+        // the column is NOT NULL, and '' marks "not a 1:1 chat". `sender_identity_id` stores the author, since a group has many senders.
+        // `message_id` / `status` (pending, sent or error) are kept on disk, so a restart does not show every row as "sent".
         migrate("ALTER TABLE messages ADD COLUMN group_id TEXT")?;
         migrate("ALTER TABLE messages ADD COLUMN sender_identity_id TEXT")?;
         // See the `sent_at_ms` note on the messages table: send-order display.
@@ -602,10 +578,9 @@ impl P2PCore {
         }
         self.sweep_orphan_enc_files();
         self.load_identity_from_db();
-        // `contacts` / `groups` tables were created but never written or read, so contacts, groups and known remote device public keys existed only
-        // in memory and were lost on every process restart (including app updates). Every mutation now writes to disk (see persist_contact /
-        // persist_group / persist_remote_device), and they are reloaded here at startup. Ratchet sessions are restored separately, inside
-        // `setSkippedKeyEncryptionKey` once the encryption key is loaded (see load_ratchet_states_from_db).
+        // Contacts, groups and known remote device keys are written on every change (see persist_contact, persist_group and
+        // persist_remote_device) and reloaded here. Ratchet sessions are restored separately, once the encryption key is loaded
+        // (see load_ratchet_states_from_db).
         self.load_contacts_from_db();
         self.load_groups_from_db();
         self.load_remote_devices_from_db();
@@ -703,7 +678,7 @@ impl P2PCore {
     }
 
     /// Rows of the 1:1 chat with `identity_id` older than this were deleted
-    /// by the user (`delete_contact`): no backfill may bring them back.
+    /// by the user (clear chat or delete contact): no backfill may bring them back.
     pub(crate) fn history_floor(&self, identity_id: &str) -> u64 {
         self.meta_str(&format!("hfloor:{}", identity_id))
             .and_then(|v| v.parse::<u64>().ok())

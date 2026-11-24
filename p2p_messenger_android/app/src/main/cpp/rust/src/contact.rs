@@ -38,7 +38,7 @@ pub struct KnownDevice {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contact {
-    pub contact_id: String, // yerel uuid
+    pub contact_id: String, // local uuid
     pub display_name: String,
     pub trusted_identity_id: String,
     pub known_devices: Vec<KnownDevice>,
@@ -61,7 +61,7 @@ pub struct Contact {
 /// The outcome that decides what to do when a connection is set up with an `(identity_id, device_fingerprint)` pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceCheckOutcome {
-    /// The identity_id is unknown: TOFU. Save it, set verified=false, and continue.
+    /// The identity_id is unknown: TOFU. Save it, record the device as unverified, and continue.
     NewContactTofu,
     /// Known and ACTIVE device: continue silently.
     KnownActive,

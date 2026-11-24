@@ -253,8 +253,8 @@ impl App {
         if kind.is_empty() || kind == "noop" {
             return;
         }
-        // the core caught a panic (a single bad packet does it too):
-        // logged only, nothing restarts on it.
+        // The core caught a panic (a single bad packet can do it too). Log it,
+        // and tell the user once per process.
         if kind == "core_panic" {
             log::error!("core caught a panic (see the core log)");
                         // On Android the service restarts a dead core. Here the window kept looking alive while sends, receives and downloads were silently
@@ -297,20 +297,18 @@ impl App {
     /// any) is open — the counterpart of `P2PService.maybeNotify`.
     fn apply_side_effects(self: &Rc<Self>, event: &Event) {
         match event.kind.as_str() {
-            // the primary
-            // device revoked THIS device. The core already wiped its DB tables
-            // + attachments and is now inert; here we finish the job the way
-            // `confirm_logout` (ui/settings.rs) does — drop the keyring vault
-            // key and remove the whole data directory (vault.bin + db file
-            // included), tell the user, then stop the process. The poll thread
-            // is still running against a now-deleted database, so quitting is
-            // the only safe finish; a fresh launch lands on onboarding.
             "sync" => {
                 self.persist_archive_key_if_new();
                 // A sibling's sync may bring contacts and their avatars.
                 self.refresh_caches();
             }
             "call" => crate::ui::call::on_event(self, event),
+            // This device was revoked. The core has already wiped its DB tables
+            // and attachments and is inert. Here we finish the job the way
+            // `confirm_logout` (ui/settings.rs) does: drop the keyring vault
+            // key, remove the data directory, tell the user, then quit. The
+            // poll thread would otherwise run against a deleted database, so
+            // quitting is the only safe finish; a fresh launch lands on onboarding.
             "self_revoked" => {
                 // Stop the poll thread before erasing the files it works on
                 // (it would otherwise keep polling a deleted database until
@@ -320,10 +318,11 @@ impl App {
                 // A D-Bus round trip (or a wallet unlock prompt): not on the
                 // GTK thread. Started now, joined before the erase below.
                 let key_deleted = std::thread::spawn(move || crate::keyring::delete_key(&profile));
-                                // Deleting the directory is on the same main-thread path as closing the app. `stop_poll_loop` only sets a flag (the poll thread may
-                                // be asleep for up to 1 s), and the Rust core (swarm, tokio tasks, the OPEN SQLite connection) keeps running. If the directory is
-                                // deleted right away and the app stays open until the user presses OK, the core would keep writing into a deleted directory. The vault
-                                // key, which is the critical one, was already deleted above.
+                // The directory is erased only after the user presses OK. Until then
+                // the core (swarm, tokio tasks, the open SQLite connection) keeps
+                // running, and deleting the files now would let it write into a
+                // deleted directory. `stop_poll_loop` only sets a flag; the poll
+                // thread may still be asleep for up to 1 s.
                 let data_dir = self.data_dir.clone();
                 let app_quit = self.application.clone();
                 let erase_and_quit = move || {
@@ -454,11 +453,8 @@ impl App {
                     }
                 }
             }
-                        // Contact or group membership changed under us. Keep the name caches current, so the next event resolves correctly.
-                        // Android ties this to a toast. Linux used to ignore it entirely. A PERMANENT handshake failure on desktop was completely silent: the user
-                        // says "messages are not going through" and the interface gives no hint.
-                        // An unrecognised-device alert is no longer silent. The core publishes an event, and it is shown here as a desktop notification. Accept,
-                        // reject or block is chosen from the alert row on the contacts screen.
+            // A contact's device is not recognised. Shown as a notification here;
+            // accept or reject is chosen in the alert dialog (ui/dialogs.rs).
             "device_alert" => {
                 let who = event.string("contact_display_name");
                 let code = event.string("device_short_code");
@@ -489,7 +485,7 @@ impl App {
                     "{who}: secure session could not be set up — the other side may be on an incompatible version."
                 ));
             }
-                        // A rejected group update should be visible to the user. No client was listening to it.
+            // A rejected group update is shown to the user.
             "group_update_failed" => {
                 let name = self.group_name(&event.string("group_id"));
                 self.toast(&format!("{name}: a group update was rejected and not applied."));
@@ -538,7 +534,7 @@ impl App {
         );
     }
 
-        /// Notifications shown even while the chat is open. Security alerts (see `device_alert`) must be visible no matter where the user is.
+    /// Notifications shown even while the chat is open. Security alerts (see `device_alert`) must be visible no matter where the user is.
     fn notify_always(self: &Rc<Self>, id: &str, title: &str, body: &str) {
         // Same setting as message notifications: no names on a lock screen.
         let hide = self.prefs.borrow().hide_notification_content;
@@ -723,7 +719,7 @@ pub fn start_poll_loop(app: &Rc<App>) {
         glib::ControlFlow::Continue
     });
 
-    // power-save for the core's keepalive ladder (20 s -> 60 s) and its
+    // power-save for the core's keepalive ladder (20 s, or 60 s in power save) and its
     // radio-window coalescing — the state Android feeds from the app lifecycle
     // (`P2PLib.setPowerSave`), which the desktop client never reported. The
     // window hookup lives in `main.rs` (`connect_is_active_notify`); this
@@ -822,17 +818,14 @@ pub fn set_metered(metered: bool) {
     std::thread::spawn(move || core::set_metered(metered));
 }
 
-/// Runs `work` off the main thread and hands the result back on it. Used for
-/// the handful of core calls that are genuinely slow — network start, file
-/// encryption, recovery export — so the window never freezes.
-/// One desktop notification, replacing any earlier one with the same `id`.
-/// Windows: a balloon on Typeon's own tray icon (`win::notify`); GLib's win32
-/// backend would put a second, menu-less icon in the tray.
 /// A disappearing message's content never goes into a notification (it would outlive the message there).
 fn shown_text(event: &Event, text: String) -> String {
     if event.number("expire_secs") > 0 { "Disappearing message".to_string() } else { text }
 }
 
+/// One desktop notification, replacing any earlier one with the same `id`.
+/// Windows: a balloon on Typeon's own tray icon (`win::notify`); GLib's win32
+/// backend would put a second, menu-less icon in the tray.
 pub fn post_notification(
     application: &adw::Application,
     id: &str,
@@ -866,6 +859,9 @@ pub fn withdraw_notification(application: &adw::Application, id: &str) {
     let _ = (application, id);
 }
 
+/// Runs `work` off the main thread and hands the result back on it. Used for
+/// the handful of core calls that are genuinely slow — network start, file
+/// encryption, recovery export — so the window never freezes.
 pub fn run_in_background<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
     then: impl FnOnce(T) + 'static,

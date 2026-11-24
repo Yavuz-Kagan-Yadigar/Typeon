@@ -103,6 +103,11 @@ internal fun parseGroupSendResult(result: String): Pair<String, SimpleChatAdapte
     null
 }
 
+/**
+ * Sends a group message in the background. `P2PLib.sendGroupMessage` (JNI) runs a separate ratchet encryption, a hybrid signature and a send
+ * attempt for EVERY member (see Rust `send_group_message`, the pairwise fan-out). On the main thread that froze touch input for the whole
+ * time, which grows with group size. `btnSend` is now disabled while it runs and `progressSending` is shown instead (same pattern as ChatActivity).
+ */
 /** `expireSecs`: a disappearing message (see ui/Disappear.kt), 0 = an ordinary one. */
 internal fun GroupChatActivity.sendNewMessage(text: String, expireSecs: Int = disappearSecs): kotlinx.coroutines.Job {
     btnSend.isEnabled = false
@@ -277,7 +282,7 @@ internal fun GroupChatActivity.handleIncomingSeenBulk(obj: JSONObject) {
 internal fun GroupChatActivity.sendTypingState(isTyping: Boolean) {
     if (isTypingSent == isTyping) return
     isTypingSent = isTyping
-    // Same as `netPack` (see the top of the file).
+    // Same as `netPack` in GroupChatActivity.
     val gid = groupId
     netPack.execute {
         try {

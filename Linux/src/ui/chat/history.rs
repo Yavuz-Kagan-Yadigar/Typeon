@@ -100,7 +100,7 @@ impl ChatView {
     }
 
     /// Re-places the day separators from `order`: one above the first bubble
-    /// of each day. Cheap (bubbles stay, only the few labels change), so it
+    /// of each day. Cheap (bubbles stay, only the separator widgets are rebuilt), so it
     /// runs after every insert batch, older pages and live messages too.
     pub(super) fn refresh_day_separators(&self) {
         let mut child = self.messages.first_child();
@@ -429,7 +429,7 @@ pub(super) fn attachment_entry(attachment: &core::AttachmentSummary, peer_finger
         mine: attachment.direction == "sent",
         sender_identity,
         text: attachment.caption.clone(),
-        // The sender's send time (the core falls back to `created_at`), the same clock as texts.
+        // The sender's send time, or `created_at` when the row has none: the same clock as texts.
         order_key: if attachment.sent_at_ms > 0 { attachment.sent_at_ms } else { attachment.created_at },
         status: None,
         reply_preview: attachment.reply_to_preview.clone().filter(|p| !p.is_empty()),

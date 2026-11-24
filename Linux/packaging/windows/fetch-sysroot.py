@@ -124,7 +124,7 @@ def main():
             with open(path + ".part", "wb") as f:
                 f.write(data)
             os.rename(path + ".part", path)
-        # Packages hold mingw64/... plus .PKGINFO/.MTREE; only the tree is wanted.
+        # Packages hold clang64/... plus .PKGINFO/.MTREE; only the tree is wanted.
         subprocess.run(["tar", "--zstd", "-xf", path, "-C", root, "--exclude=.[A-Z]*"], check=True)
     # pkg-config files carry prefix=/clang64; the build sets PKG_CONFIG_SYSROOT_DIR=root.
     print("sysroot:", os.path.join(root, "clang64"))

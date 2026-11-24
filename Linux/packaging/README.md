@@ -82,8 +82,9 @@ artifact, and an offline build fails at that step.
 
 ### Signing — read this
 
-The release is signed with **the keystore committed to the repo** (`app/debug.keystore`,
-`CN=Typeon Debug`). This is a deliberate choice. If the signing key changed, Android would
+Gradle leaves the release APK **unsigned**. `./sign-release.sh` signs it with the private
+key in `~/.config/typeon-signing` (v3 lineage), never with the repo's `app/debug.keystore`,
+which is only for debug builds. Keeping one key matters. If the signing key changed, Android would
 treat the app as a different application, refuse to install over it, and the user would
 have to uninstall first. That deletes the identity, ratchet sessions, the message archive,
 and on the server app the **onion identity**. Once the onion address changes, every client

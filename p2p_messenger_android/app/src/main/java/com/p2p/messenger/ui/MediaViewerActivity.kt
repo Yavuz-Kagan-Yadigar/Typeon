@@ -295,7 +295,7 @@ class MediaViewerActivity : AppCompatActivity() {
                         currentScale = MIN_SCALE
                         imageView.imageMatrix = currentMatrix
                     }
-                    // A single tap WITHOUT pinch or drag closes the viewer. This is for the full-screen profile photo viewer.
+                    // A single tap WITHOUT pinch or drag closes the image viewer.
                     if (event.actionMasked == MotionEvent.ACTION_UP && !hasMovedPastSlop && !hadMultiTouch) {
                         finish()
                     }

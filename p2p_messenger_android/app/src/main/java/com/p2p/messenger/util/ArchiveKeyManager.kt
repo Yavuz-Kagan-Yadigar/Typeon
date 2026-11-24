@@ -26,21 +26,13 @@ object ArchiveKeyManager {
     private fun keyFile(context: Context): File =
         File(context.filesDir, ARCHIVE_KEY_FILENAME)
 
-    /**
-     * Called at app start. If a key exists, it is decrypted and loaded into Rust.
-     *
-     * Unlike `MessageHistoryManager`, a key is NOT generated here if none exists (see `ensureCreated`). Reason: a device linked later that generated
-     * its own random key before getting the ARK from its sibling would write an archive that the other devices could not read. Generation happens only
-     * when the user turns on server-side history.
-     */
     /** An ARK that came from a sibling device was held only in the core's memory, and was lost on restart. It is written to disk now, if the file does not exist yet. */
     @Synchronized
     fun persistIfNew(context: Context) {
         val file = keyFile(context)
         val key = try { P2PLib.archiveRootKey() } catch (e: Exception) { return }
         if (key.size != 32) return
-        // Written again when the key changed: it is replaced when a device
-        // is revoked.
+        // Written again when the stored copy differs from the key in Rust.
         if (file.exists()) {
             val stored = try { KeystoreCrypto.decrypt(file.readBytes(), KeystoreCrypto.ALIAS_ARCHIVE_ROOT) } catch (e: Exception) { null }
             val same = stored != null && stored.contentEquals(key)
@@ -55,6 +47,13 @@ object ArchiveKeyManager {
         }
     }
 
+    /**
+     * Called at app start. If a key exists, it is decrypted and loaded into Rust.
+     *
+     * Unlike `MessageHistoryManager`, a key is NOT generated here if none exists (see `ensureCreated`). Reason: a device linked later that generated
+     * its own random key before getting the ARK from its sibling would write an archive that the other devices could not read. Generation happens only
+     * when the user turns on server-side history.
+     */
     @Synchronized
     fun loadIfPresent(context: Context) {
         val file = keyFile(context)

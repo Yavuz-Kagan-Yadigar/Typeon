@@ -56,8 +56,8 @@ impl P2PCore {
         if buckets.is_empty() {
             return;
         }
-        // One request must not exceed 1 MiB (see the `MAX_DEPOSIT_BYTES` note: the same wire cap applies to every
-        // request). 500: the server refuses a list longer than its 512-mailbox cap.
+        // One request must not exceed 1 MiB (`typeon_crypto::server_proto::MAX_DEPOSIT_BYTES`: the same wire cap applies to every
+        // request). 500 stays below the server's advertised `max_mailboxes` (512), the batch ceiling used here.
         let cap = self.server_rt.get(server_id).map_or(1, Self::mailbox_cap).min(500);
         for chunk in buckets.chunks(cap) {
             let req = ServerRequest::ArchivePurge { purge_secrets: chunk.to_vec() };
@@ -126,7 +126,7 @@ impl P2PCore {
 // ---------------------------------------------------------------------------
 //
 // Why mailbox envelopes cannot serve as history: ratchet message keys are forward secret, and they are deleted after
-// use. Skipped keys are limited (`MAX_SKIPPED_KEYS`) and pruned on rotation. An envelope from last week can therefore
+// use. Skipped keys are limited (`MAX_SKIPPED_KEYS` in typeon-crypto's ratchet) and pruned on rotation. An envelope from last week can therefore
 // no longer be decrypted by ANYONE, including the intended recipient. A newly linked device never had those keys at all.
 // So history is re-encrypted under a SEPARATE, long-lived key.
 
@@ -305,7 +305,7 @@ impl P2PCore {
             }
             return;
         }
-        // 500: the server refuses a list longer than its 512-mailbox cap.
+        // 500 stays below the server's advertised `max_mailboxes` (512), the batch ceiling used here.
         let cap = self.server_rt.get(&server_id).map_or(1, Self::mailbox_cap).min(500);
         let tail = rest.split_off(rest.len().min(cap));
         let req = ServerRequest::ArchivePurge { purge_secrets: rest };

@@ -28,15 +28,14 @@
 //! cannot change). It reads with `io.take()`, so an oversized request is cut
 //! silently and CBOR decoding then fails. The response cap is 10 MiB.
 //!
-//! Gossipsub's `max_transmit_size` is also exactly 1 MiB. A `FileOffer` that fits
-//! gossipsub (with a large `preview_jpeg`) may not fit in a CBOR `Deposit`. So
-//! `MAX_DEPOSIT_BYTES` is well below the cap, and envelopes over it are never
-//! tried on the server and go to gossipsub directly.
+//! A large envelope (a `FileOffer` with a big `preview_jpeg`) may not fit in a
+//! CBOR `Deposit`. So `MAX_DEPOSIT_BYTES` is well below the cap, and envelopes
+//! over it are never tried on the server and go over the direct path only.
 
 use serde::{Deserialize, Serialize};
 
 /// Server RPC protocol id. Carried on `request_response::cbor::Behaviour`, as
-/// `FILE_TRANSFER_PROTOCOL` and `KEEPALIVE_PROTOCOL` are.
+/// `FILE_TRANSFER_PROTOCOL` is.
 ///
 /// Both ends register `ProtocolSupport::Full`, so the server can send `Notify`
 /// on its own (see `ServerRequest::Notify`). `request_response` only decides
@@ -79,7 +78,7 @@ pub const MAX_DEPOSIT_BYTES: usize = 900 * 1024;
 pub const MAX_FETCH_BATCH_BYTES: u32 = 512 * 1024;
 pub const MAX_FETCH_BATCH_ITEMS: u32 = 64;
 
-/// Records per `ArchivePut`. The client sends up to 50. Each record costs the
+/// Server cap on records per `ArchivePut`. The client sends up to 50 (`SERVER_ARCHIVE_BATCH`). Each record costs the
 /// server a SELECT and an INSERT inside its single event loop.
 pub const MAX_ARCHIVE_PUT_RECORDS: usize = 256;
 
@@ -112,7 +111,7 @@ pub enum ServerRequest {
     /// the operator a provable list of who uses the server, even across servers
     /// and after a PeerId change. A keypair is cheap, and that cost is not worth it.
     ///
-    /// Signed input: `version || server_peer_id || invite_token || challenge || ts_ms`.
+    /// Signed input: `enroll_signing_input`, which covers the version, both PeerIds, the invite token, the two public keys, the challenge and `ts_ms`.
     /// `server_peer_id` must be included. Otherwise a malicious server could
     /// replay the `Enroll` it received against another server and register under
     /// that user. `challenge` binds the signature to the single-use value the
@@ -206,8 +205,8 @@ pub enum ServerRequest {
     /// never a gap.
     ///
     /// The client sends it only after the envelope is decrypted and written to the
-    /// archive. This is the same rule as `send_ack` in receive.rs, which sends the
-    /// ack after `archive_message` succeeds. Acking on a transient failure (full
+    /// archive. The `unacked` queue in `server_client/` holds only the seqs the client
+    /// has processed, and an Ack is sent for those. Acking on a transient failure (full
     /// disk, DB error) would delete a message that is stored nowhere.
     Ack { acks: Vec<(MailboxId, u64)> },
 
@@ -363,11 +362,11 @@ pub enum ServerResponse {
     /// The envelope was written to disk.
     ///
     /// `try_publish_raw` reports this as "sent". That is a stronger guarantee than
-    /// the local success of `gossipsub.publish()`, but it is still not end to end.
+    /// a local send success, but it is still not end to end.
     /// The only proof of end-to-end delivery is the recipient's
     /// `MessageContent::Ack` (see `awaiting_confirmation` in lib.rs). So `Deposited`
-    /// does not permanently silence the gossipsub path. See
-    /// `should_shadow_on_gossipsub` in server_client.rs.
+    /// does not permanently silence the direct path. The client's server copy and
+    /// its direct copy are deduplicated on receipt (see `receive.rs`).
     Deposited { seq: u64 },
     Batch { items: Vec<MailItem>, more: bool },
     ArchiveProbed { present: Vec<BucketStat> },

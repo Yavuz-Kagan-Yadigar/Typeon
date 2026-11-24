@@ -184,7 +184,7 @@ internal fun SettingsFragment.addServer(code: String) {
  * Redraws the server rows.
  *
  * The number of rows varies, so they are built in code rather than fixed in XML. The look matches the other sections of the settings:
- * bold 16sp title, 12sp description at 70% opacity, `?attr/materialButtonOutlinedStyle` buttons, and `SwitchMaterial`.
+ * bold 14sp title, 12sp description at 70% opacity, `?attr/materialButtonOutlinedStyle` buttons, and `SwitchMaterial`.
  */
 internal fun SettingsFragment.refreshServers() {
     if (serversContainer == null) return

@@ -108,7 +108,7 @@ internal fun ChatActivity.onNewIncomingItemAdded() {
 }
 
 /**
- * Plays a light particle 'typhoon' effect when a message is sent to a chat that has had no messages for the last 15 minutes.
+ * Plays a light particle 'typhoon' effect when a message is sent or arrives in a chat that has had no messages for the last 15 minutes.
  *
  * The check runs AFTER insertion: it compares the gap between the newest message and the one before it. So callers need no separate 'was it quiet' flag
  * before inserting; one call site is enough.
@@ -119,8 +119,7 @@ internal fun ChatActivity.maybePlayTyphoonEffect() {
     val newest = localMessages.lastOrNull() ?: return
     val previous = localMessages.getOrNull(localMessages.size - 2) ?: return
     if (newest.orderKey - previous.orderKey < TYPHOON_QUIET_WINDOW_MS) return
-    // `post`: the bubble has not been measured in this frame yet, so its position is known only after layout.
-    // The funnel now covers the whole view (see TyphoonParticleView `burst`), so the bubble position does not need to be computed.
+    // The effect is drawn over the whole view (see TyphoonParticleView `burst`), so the bubble position is not needed.
     typhoonEffect.burst(
         com.google.android.material.color.MaterialColors.getColor(
             // Not `colorPrimary`: in this theme that is the dark, matte counterpart of the bubble orange, and particles looked dim on the dark background.

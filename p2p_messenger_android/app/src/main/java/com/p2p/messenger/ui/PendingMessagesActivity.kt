@@ -17,7 +17,7 @@ import org.json.JSONArray
 
 /**
  * List of messages opened from Settings that have not been acknowledged by the other side yet. Unconfirmed messages are retried
- * automatically with a fresh ratchet step, up to TEXT_RETRY_GIVE_UP_MS (2 days). See lib.rs `awaiting_confirmation` and types.rs
+ * automatically with a fresh ratchet step, up to TEXT_RETRY_GIVE_UP_MS (7 days). See `awaiting_confirmation` in the Rust core and types.rs
  * `regen_content`. Each row shows the target (contact or group), a text preview, the last retry time, and a "Cancel" button
  * (see network.rs `cancel_pending_message`).
  */
@@ -152,7 +152,7 @@ class PendingMessagesActivity : AppCompatActivity() {
 
     /**
      * The manual "Retry now" button in the pending list. See network.rs `retry_pending_message_now`. It only moves this message's next retry
-     * time to NOW. The actual send attempt happens on the next `poll_events` turn, in the background loop that already runs every second. So no
+     * time to NOW. The actual send attempt happens on the next `poll_events` turn, in the background loop that already runs. So no
      * separate network I/O happens here, which is good for the battery. The row is NOT removed (unlike Cancel): the message is still pending,
      * only its retry was moved up. On the next `onResume` or refresh, the row will show either as confirmed (gone from the list) or still pending
      * (with the current "last tried" time).

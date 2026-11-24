@@ -47,7 +47,7 @@ fn main() -> glib::ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(if cfg!(debug_assertions) { "warn" } else { "off" })).init();
 
     // GTK closures unwind into C and abort; leave a trace before that happens.
-    // (Message text is never in a panic payload we write: location + type only.)
+    // (Only the file and line are written, never the panic message.)
     std::panic::set_hook(Box::new(|info| {
         let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
         eprintln!("typeon: panic at {location}");
@@ -200,14 +200,14 @@ fn activate(application: &adw::Application) {
     // A crash or kill skips the shutdown-time sweep below; clear what it left.
     sweep_plain_cache(&data_dir);
 
-    // Hard requirement, checked before the database is even opened: this
-    // device's secret keys are sealed with a key held in KDE Wallet or GNOME
-    // Keyring. With neither available there is no safe place to put that key,
-    // so Typeon says so and stops rather than quietly degrading to a file
+    // Hard requirement, checked before the database is even opened: on Linux
+    // this device's secret keys are sealed with a key held in KDE Wallet or
+    // GNOME Keyring. With neither available there is no safe place to put that
+    // key, so Typeon says so and stops rather than quietly degrading to a file
     // anyone running as this user could read.
-    // the probe can block for many seconds on a locked wallet, so it
-    // runs off the GTK thread; `hold` keeps the app alive until the window
-    // exists, and STARTING stops a second `activate` building a second stack.
+    // The probe can block for many seconds on a locked wallet, so it runs off
+    // the GTK thread; `hold` keeps the app alive until the window exists, and
+    // STARTING stops a second `activate` building a second stack.
     static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if STARTING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
@@ -300,10 +300,9 @@ fn activate(application: &adw::Application) {
             sweep_plain_cache(&app.data_dir);
         });
     }
-    // Windows: closing the window keeps Typeon running in the tray (GLib's
-    // notification backend owns the tray icon; a click on it re-activates,
-    // which presents this hidden window). Quit is in the main menu; the
-    // close-time work then runs at shutdown.
+    // Windows: closing the window keeps Typeon running in the tray (the tray
+    // icon in win.rs; a click on it presents this hidden window). Quit is in
+    // the main menu; the close-time work then runs at shutdown.
     #[cfg(windows)]
     {
         window.set_hide_on_close(true);

@@ -31,7 +31,8 @@
 //! - `TYPEON_SERVER_NAME`
 //! - `TYPEON_SERVER_BUDGET_BYTES` (total disk the server may use, same syntax as `--storage`; default
 //!   `DEFAULT_BUDGET_BYTES`, 16 GiB)
-//! - `TYPEON_SERVER_DB_KEY` (optional 64-hex SQLCipher key; a plain DB is migrated)
+//! - `TYPEON_SERVER_DB_KEY` (optional 64-hex SQLCipher key; a plain DB is migrated), or `TYPEON_SERVER_DB_KEY_FILE`
+//!   to read the key from a file
 //! - `TYPEON_SERVER_MAX_DEVICES` (maximum enrolled devices; default 16). The budget is split over this many devices.
 
 use std::path::PathBuf;
@@ -146,8 +147,8 @@ fn build_config() -> ServerConfig {
     if let Ok(name) = std::env::var("TYPEON_SERVER_NAME") {
         cfg.server_name = name;
     }
-        // `total_storage_budget_bytes` used to be read but never set anywhere. The server's total disk ceiling was dead code. Only
-        // per-record quotas applied, so N records could grow real usage to N times the quota.
+    // Sets the total disk ceiling. Without it only the per-record quotas apply, and N records could grow real usage to
+    // N times the quota.
     cfg.total_storage_budget_bytes = Some(DEFAULT_BUDGET_BYTES);
     match (STORAGE_FLAG.get(), std::env::var("TYPEON_SERVER_BUDGET_BYTES")) {
         (Some(&bytes), _) => cfg.total_storage_budget_bytes = Some(bytes),
@@ -174,9 +175,8 @@ fn build_config() -> ServerConfig {
     cfg
 }
 
-/// Management commands open ONLY the database. Building a `ServerCore` here started a second Tor client on the state
-/// directory the daemon holds locked. The command then waited 90 s and failed while the server was running. The address a
-/// code needs is the one the daemon last wrote to the DB.
+/// Management commands open ONLY the database. Building a `ServerCore` here would start a second Tor client on the state
+/// directory the daemon holds locked. The address a code needs is the one the daemon last wrote to the DB.
 fn open_store() -> Store {
     match Store::open(&data_dir().join("typeon_server.db")) {
         Ok(s) => s,
@@ -294,8 +294,8 @@ async fn run() {
     }
 }
 
-/// Requirement: one code must be shareable with EVERYONE. `invite new` creates a NEW code on every call, and the token
-/// cannot be shown again. This command returns the SAME code until it expires (3 days) (see `ServerCore::join_code`).
+/// One code shareable with everyone: this returns the SAME code until it expires (3 days). `invite new` creates a new
+/// code on every call, and an invite token cannot be shown again (only its hash is stored).
 fn join_code(args: &[String]) {
     let rotate = matches!(args.first().map(String::as_str), Some("rotate") | Some("yenile"));
     match typeon_server::join_code(&open_store(), rotate) {
@@ -325,7 +325,7 @@ fn invite(args: &[String]) {
                 eprintln!("Number of days must be at least 1: {days}");
                 std::process::exit(2);
             }
-            // An overflow wrapped negative, which means "never expires".
+            // Checked: an overflow would wrap negative, and a negative expiry would mean "never expires".
             let Some(ttl_ms) = days.checked_mul(24 * 60 * 60 * 1000) else {
                 eprintln!("Number of days too large: {days}");
                 std::process::exit(2);

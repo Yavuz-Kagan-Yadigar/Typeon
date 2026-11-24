@@ -122,7 +122,7 @@ impl P2PCore {
 
     /// Restores ALL ratchet sessions stored in the DB into `self.ratchets`, at app start (after `skipped_key_encryption_key` is loaded;
     /// see the JNI `setSkippedKeyEncryptionKey`). This lets conversations continue after a process restart (app update, background kill)
-    /// without a new handshake. Before this, the state was memory-only and was lost on every process restart (see the note at the end of the file).
+    /// without a new handshake.
     /// Loads the persisted sessions and opens the send gate (`ratchets_loaded`).
     /// Called once the skipped-key / ratchet storage key has arrived: loads everything sealed with it. One implementation for JNI and `api.rs`
     /// (they had drifted apart). A second call with the same key does nothing: a reload would roll live sessions back to their stored state.
@@ -564,7 +564,7 @@ impl P2PCore {
             // Re-queued messages keep their original `message_id` and first-queued time (`original_sent_at`). A new id would leave the archived bubble on the old id,
             // so Ack and status events never reached it, and `init_db` turned 'pending' into 'error' at startup. Receivers also dedup on the same id.
             let known = self.known_remote_devices.contains_key(&peer_fp);
-            // The backoff reaches its cap (15 + 30 + 60 s) long before most restores. Do not restart it at 15 s after every process kill.
+            // A message older than `ACK_RETRY_MAX_MS` restores at that interval. Do not restart it at 15 s after every process kill.
             let interval = (current_time_ms().saturating_sub(created_at) > ACK_RETRY_MAX_MS).then_some(ACK_RETRY_MAX_MS);
             // The envelope already published, still on the current chain: it goes back into the queue as it is, due now, and
             // `retry_unconfirmed_messages` offers it at its normal pace. No ratchet step, no signature, no new server copy.

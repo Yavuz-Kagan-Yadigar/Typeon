@@ -9,8 +9,7 @@ import com.p2p.messenger.R
  * Used by the quick "disconnect / reconnect Tor" button on the chat and settings top bar.
  *
  * Today the network layer does NOT support being rebuilt inside a LIVE process. This includes the Tor dial transport added to the libp2p swarm (see
- * `ArtiDialTransport` in tor.rs). Even the Tor on/off switch in Settings only saves the preference, and asks the user to restart the app by hand (see
- * SettingsFragment `tor_switch`, `R.string.tor_restart_needed`, and the note "toggle takes effect on the next network-layer start" in SECURITY.md). On the
+ * `ArtiDialTransport` in tor.rs). A Tor setting change takes effect on the next network-layer start (see SECURITY.md). On the
  * Rust side there is no verified way to call `start_network` a second time in a live process SAFELY. The old swarm's sockets and background tasks (see the
  * Tor bootstrap retry loop in tor.rs) must be shut down cleanly first, and that is not verified. So no new, unverified "hot restart" logic is written here.
  *
@@ -31,8 +30,7 @@ object AppRestarter {
     }
 
     /**
-     * This is destructive (it kills the whole process), so it is never triggered directly. The user is asked to confirm first. Both the toolbar button (see
-     * `wireTorReconnectButton`) and the top-bar menu item in SettingsFragment share this.
+     * This is destructive (it kills the whole process), so the user is asked to confirm first. The top-bar menu item in SettingsFragment uses this.
      */
     fun confirmAndRestart(context: Context) {
         AlertDialog.Builder(context)

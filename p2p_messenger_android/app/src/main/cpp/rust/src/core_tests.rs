@@ -24,7 +24,7 @@ mod wipe_coverage_tests {
         "unknown_inbound",               // same, per connection id
         "server_rpc_timeouts",           // connection health counter
         "advertised_onion",              // our own address; rebuilt with the network
-        "ratchets_loaded",               // load gate; the key stays loaded across a wipe
+        "ratchets_loaded",               // load gate. The wipe resets it too, but it holds no identity data
         "server_sweep_at", "blob_rtt_sum", "blob_rtt_count",
         "last_reconnect_sweep_at", "last_pending_flush_at", "last_sibling_backfill_at",
         "last_network_change_at", "network_change_pending", "last_unconfirmed_retry_at",

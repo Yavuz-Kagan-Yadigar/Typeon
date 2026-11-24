@@ -210,8 +210,8 @@ impl P2PCore {
         // waiting for them to reconnect to us (see `announce_address_to_all_contacts`).
         self.announce_address_to_all_contacts();
         // Multi-device (1.7): a network change is a strong signal. Ignore the debounce and try the sibling history backfill NOW (to catch messages from
-        // people I missed while offline). At most one extra round per 5 minutes: every LTE/Wi-Fi flap asked every sibling for the newest rows of every
-        // conversation again.
+        // people I missed while offline). The backfill is only moved up to 5 minutes early, so a network flap cannot start a round every time.
+        // Before, every LTE/Wi-Fi flap asked every sibling for the newest rows of every conversation again.
         self.last_sibling_backfill_at = self.last_sibling_backfill_at
             .min(current_time_ms().saturating_sub(SIBLING_BACKFILL_INTERVAL_MS - 5 * 60_000));
         self.last_sibling_roster_sync_at = 0;
@@ -609,7 +609,7 @@ impl P2PCore {
         // fingerprint linked to the `PeerId` that published the packet. The call is further down, after the freshness and replay checks, because a replayed old init
         // also has a valid signature.
 
-        // Gossipsub `Signed` mode lets an observer re-publish a valid captured `HandshakeInit`. This function overwrites an existing ratchet with a fresh `respond` state,
+        // An observer can re-send a valid captured `HandshakeInit`. This function overwrites an existing ratchet with a fresh `respond` state,
         // so a replay could break a live conversation. Two layers guard against it (see the `recent_handshake_sigs` field):
         // (1) a freshness window: a timestamp too old or too far ahead is rejected (this tolerates clock skew);
         // (2) content dedup: the same signed, byte-identical handshake is not applied twice within the window. A real re-pairing carries fresh ephemeral keys, so it has a

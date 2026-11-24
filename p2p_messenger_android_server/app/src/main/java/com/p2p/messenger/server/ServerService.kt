@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * The foreground service that keeps the server alive.
  *
- * The same pattern as the client's `P2PService` (the same `dataSync` type, the same `START_STICKY`), but much simpler. There is no event loop here. The Rust
+ * The same pattern as the client's `P2PService` (the same `START_STICKY` and foreground type, `remoteMessaging` on API 34+), but much simpler. There is no event loop here. The Rust
  * `ServerCore` runs in its own tokio task. This service has one job: keep the process alive and show a permanent notification to the user.
  *
  * HONEST LIMIT: under memory pressure, Android can still kill a foreground service. This app is meant for a "spare phone left at home, plugged in" scenario.
@@ -105,8 +105,8 @@ class ServerService : Service() {
         fun dataDir(context: Context): java.io.File = context.filesDir
 
         /**
-         * The blob directory (file attachments). It is the ONLY thing that takes up space (504 MB in a real test). It holds nothing that is sensitive to the
-         * permission model, so it can safely go to the SD card.
+         * The blob directory (file attachments). Blobs are most of the space used (504 MB in a real test). They hold nothing that is sensitive to the
+         * permission model, so they can safely go to the SD card. Mail and the archive stay in the database.
          */
         fun blobDir(context: Context): java.io.File {
             val saved = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -276,14 +276,14 @@ class ServerService : Service() {
         }
     }
 
+    // Doubles while the core stays down (failed start included), capped.
+    private var watchdogDelay = WATCHDOG_MS
+
     /**
      * The native loop can end on its own (a panic inside it). Nobody else
      * notices with the screen off: the service kept the wake lock and the
      * Wi-Fi lock for a server that was gone. Start it again.
      */
-    // Doubles while the core stays down (failed start included), capped.
-    private var watchdogDelay = WATCHDOG_MS
-
     private val watchdogTick = object : Runnable {
         override fun run() {
             core.execute {
@@ -383,7 +383,7 @@ class ServerService : Service() {
         super.onDestroy()
     }
 
-    /** Prods the core on a network change, so arti refreshes its circuits and onion publication. If `ServerLib.notifyNetworkChanged` does not exist (an old .so), it is skipped silently. */
+    /** Prods the core on a network change, so arti refreshes its circuits and onion publication. If `ServerLib.notifyNetworkChanged` is missing (an old .so), the UnsatisfiedLinkError is logged and the poke is skipped. */
     private fun pokeCore(reason: String) {
         if (!pokePending.compareAndSet(false, true)) return
         poker.execute {

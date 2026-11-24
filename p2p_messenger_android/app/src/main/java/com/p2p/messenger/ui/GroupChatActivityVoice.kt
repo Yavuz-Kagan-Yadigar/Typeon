@@ -227,7 +227,7 @@ internal fun GroupChatActivity.finishVoiceRecording(send: Boolean) {
 
 /**
  * Same pattern as ChatActivity.sendVoiceMessage. The differences: `prepareAndSendGroupFile` (offered to ALL members), and the return value
- * is a plain file-id string, not the JSON `{message_id, status}` of the 1:1 path (see the `onGroupFilePicked` note on the return format).
+ * is a plain file-id string, not the JSON `{message_id, status}` of the 1:1 path.
  */
 internal fun GroupChatActivity.sendVoiceMessage(file: File, durationMs: Long, caption: String = "", quote: com.p2p.messenger.util.Quote.Ref? = null) {
     val targetGroupId = groupId

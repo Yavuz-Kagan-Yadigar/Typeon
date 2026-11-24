@@ -5,7 +5,7 @@
 //! formats the phones use:
 //!
 //!  - audio (kind 1): `[n][len u16 BE]*n [opus packet]*n`, three 20 ms packets of
-//!    16 kHz mono Opus at 12 kbps per bundle (one Tor cell instead of three);
+//!    16 kHz mono Opus at 24 kbps per bundle (one Tor cell instead of three);
 //!  - video (kind 2): `[flags: bit0 key, bit1 hevc][rotation/90][w u16][h u16]`
 //!    followed by an Annex-B access unit, parameter sets inline on keyframes;
 //!  - state (kind 4): `[flags: bit0 muted, bit1 camera off]`, once a second.
@@ -725,7 +725,7 @@ fn receive(shared: Arc<Shared>, video: std::sync::mpsc::SyncSender<Vec<u8>>) {
         }
         match frame[0] {
             KIND_AUDIO => play_audio(&shared, frame[1], &frame[2..]),
-            // Full queue: dropped; the decoder asks for a keyframe.
+            // Full queue: dropped; the next keyframe brings the decoder back.
             KIND_VIDEO => {
                 let _ = video.try_send(frame);
             }
@@ -827,7 +827,7 @@ impl VideoLane {
         }
     }
 
-    /// Every report to this sender asks for H.264 from now on.
+    /// Asks this sender for H.264, once per lane.
     fn ask_avc(&mut self, slot: u8) {
         if !self.avc_asked {
             self.avc_asked = true;

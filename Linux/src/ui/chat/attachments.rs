@@ -25,7 +25,7 @@ impl ChatView {
     }
 
     /// A sticker: just the picture, no name, size or button (it downloads
-    /// on its own). ponytail: an animated sticker shows its first frame.
+    /// on its own). An animated one plays through `load_sticker`.
     pub(super) fn build_sticker(self: &Rc<Self>, attachment: &Attachment) -> (gtk::Box, Rc<AttachmentState>) {
         let block = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let picture = gtk::Picture::new();

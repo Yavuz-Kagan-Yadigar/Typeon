@@ -42,7 +42,7 @@ import kotlin.math.hypot
 class EditImage(val bitmap: Bitmap, val reduced: Boolean)
 
 /** Full-size bitmaps the editor may hold at once (base, working image, an
- *  undo replay, a rotate's temporaries): the decode budget is the heap / this. */
+ *  undo replay, a rotate's temporaries): the decode budget is a quarter of the heap / this. */
 private const val EDIT_COPIES = 6
 
 /**
@@ -302,8 +302,8 @@ fun <T : Any> AppCompatActivity.openImageEditor(
         if (event.action == KeyEvent.ACTION_UP) finish()
         true
     }
-    // Its own window: the activity's FLAG_SECURE does not cover it (Recents
-    // and screen capture before API 33, as for every other screen).
+    // Its own window, so the activity's FLAG_SECURE does not cover it. It sets
+    // FLAG_SECURE itself below API 33.
     if (android.os.Build.VERSION.SDK_INT < 33) {
         dialog.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
     }

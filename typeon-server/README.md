@@ -9,10 +9,8 @@ it.
 
 Typeon has never had store-and-forward anywhere. libp2p Circuit Relay v2 only
 builds a *live* circuit between two peers who are both online at the same
-moment, and the `p2p_msg_<fp>` gossipsub topic is a naming convention, not
-storage — if the recipient is not subscribed at that instant, the packet is
-gone. All durability today lives on the *sender*: retry with backoff for up to
-two days, then give up.
+moment, and a direct send needs the recipient online at that instant. All durability today lives on the *sender*: retry with backoff for up to
+seven days, then give up.
 
 That works when both people open the app often. It does not work when a phone
 is off for a week, when a device is brand new, or when the sender uninstalls.
@@ -46,7 +44,7 @@ This server closes that gap without giving up end-to-end encryption.
   and not pretended otherwise.
 - It can also **drop, delay, reorder or withhold** messages. It cannot forge
   or modify them (the recipient verifies Ed25519 + ML-DSA-87 signatures), and
-  withholding is contained: the client keeps sending over gossipsub/Tor/relay
+  withholding is contained: the client keeps sending over direct Tor/relay paths
   in parallel after a short grace period, so a censoring server degrades
   delivery to "slower over P2P", not "lost".
 
@@ -55,7 +53,7 @@ This server closes that gap without giving up end-to-end encryption.
 | Store | Holds | Lifetime |
 |---|---|---|
 | `mail` | sealed delivery envelopes | deleted on the recipient's `Ack`, else 14 days |
-| `archive` | re-encrypted history records | until the owner purges them or hits quota |
+| `archive` | re-encrypted history records | until the owner purges them, hits quota, or 13 months after its last write |
 
 They cannot be merged. A ratchet message key is consumed and destroyed on
 decryption, so a stored delivery envelope from last week is undecryptable by
@@ -99,7 +97,7 @@ its own onion service. There is no clearnet mode.
 
 ## Letting people join
 
-    typeon-server join-code                    # the permanent code — publish once
+    typeon-server join-code                    # the current code (valid 3 days, then renewed)
     typeon-server join-code rotate             # invalidate it and print a new one
     typeon-server devices list
     typeon-server devices revoke <enrollment_id>   # revoke = block the device's key
@@ -110,9 +108,9 @@ its own onion service. There is no clearnet mode.
 
     typeon-server:/dns/abc…onion/tcp/42612/p2p/12D3Koo…#a1b2c3…
 
-Paste it into **Settings → Servers → Add server** on Android or Linux, tap it
+Paste it into **Settings → Servers** on Android or Linux, tap it
 as a link on Android, or show it as a QR from the Android server app. The same
-code works for **any number of people**: publish it once and nobody has to ask
+code works for **any number of people** until it expires: publish it and nobody has to ask
 you for anything.
 
 The Sybil gate is not the token being single-use, then, but two other things:

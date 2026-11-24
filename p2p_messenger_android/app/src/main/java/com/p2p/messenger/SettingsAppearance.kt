@@ -290,7 +290,6 @@ internal fun SettingsFragment.setupChatAppearanceControls(view: View) {
     }
 
     // On release: store values, compute the processed file once, off the main thread.
-    // On release: store values, compute the processed file once, off the main thread.
     fun seekListener(onProgress: (Int, Boolean) -> Unit) = object : android.widget.SeekBar.OnSeekBarChangeListener {
         override fun onProgressChanged(bar: android.widget.SeekBar, progress: Int, fromUser: Boolean) = onProgress(progress, fromUser)
         override fun onStartTrackingTouch(bar: android.widget.SeekBar) {}
@@ -402,7 +401,7 @@ internal fun SettingsFragment.onChatWallpaperPicked(uri: Uri) {
             ThemePrefs.chatWallpaperFile(app).writeBytes(compressed)
             // New image: rebuild the processed copy with the current slider values.
             ThemePrefs.regenerateProcessedWallpaper(app)
-            // Thumbnail only (40 dp): a small decode here, not the full image on the main thread.
+            // Thumbnail only (160 px): a small decode here, not the full image on the main thread.
             val thumbBitmap = ThemePrefs.wallpaperPreview(app, ThemePrefs.getWallpaperBlur(app), ThemePrefs.getWallpaperDarkness(app), 160)
             withContext(Dispatchers.Main) {
                 view?.let { v ->

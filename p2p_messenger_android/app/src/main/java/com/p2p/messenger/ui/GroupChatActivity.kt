@@ -79,8 +79,7 @@ import java.util.UUID
  *
  * Group messages are archived and encrypted locally by `archive_group_message` (one row per group). `loadGroupHistoryIfAvailable`, called from `bindToIntent`,
  * loads that history, the same pattern as ChatActivity.
- * Known limit: this is the device's own archive. A message a member sent while this device was offline, and that never reached it, is not synced.
- * There is no network history request for groups yet, unlike `HistorySyncRequest` for direct chats.
+ * Known limit: this is the device's own archive. Older group messages come back only through a `HistorySyncRequest` that names the `group_id`.
  */
 class GroupChatActivity : AppCompatActivity() {
 
@@ -133,9 +132,6 @@ class GroupChatActivity : AppCompatActivity() {
      */
     private lateinit var dotOwnStatus: View
     private lateinit var ownStatusDot: PulsingStatusDot
-    /**
-     * While a message is sending, the send button is replaced by a loading indicator and disabled, which blocks double taps (same pattern as ChatActivity, `sendNewMessage`).
-     */
     /** Same note as ChatActivity `btnSend`: the cloud logo is a masked circular `ImageButton`. */
     internal lateinit var btnSend: ImageButton
     /** This group's disappearing mode in seconds, 0 = off (top bar clock, see ui/Disappear.kt). */
@@ -309,7 +305,7 @@ class GroupChatActivity : AppCompatActivity() {
 
     /**
      * The `peer` field has no meaning here: a group message arrives pairwise over several 1:1 connections. So this screen looks at `group_id` instead,
-     * and only handles "group_message" events.
+     * and handles only the events that belong to this group (plus a few global ones, such as file progress and sticker changes).
      */
     private val messageListener: (String) -> Unit = { json ->
         try {
@@ -519,7 +515,7 @@ class GroupChatActivity : AppCompatActivity() {
             stickerPicker.show()
         }
 
-        // Same note as ChatActivity. A group has no real group-photo concept here, so the badge AvatarUtil generates from the name is shown
+        // Same note as ChatActivity. The group photo is shown when one is set; otherwise the badge AvatarUtil generates from the name is shown
         // (the same visual language as contacts without a photo).
         val toolbarTitleView = layoutInflater.inflate(R.layout.actionbar_chat_title, null)
         txtToolbarTitle = toolbarTitleView.findViewById(R.id.txtToolbarTitle)
@@ -811,14 +807,14 @@ class GroupChatActivity : AppCompatActivity() {
         typingMembers.clear()
         updateTypingIndicatorUi()
         sendTypingState(false)
-        // Same note as ChatActivity onPause: an ongoing recording or playback is stopped cleanly when the user leaves the screen.
-        backgrounded = true // the recording keeps running (service has the microphone type)
+        // Playback stops when the user leaves the screen. A recording keeps running (the service has the microphone type).
+        backgrounded = true
         stopVoicePlayback()
     }
 
     /**
      * The pending callbacks of the handlers hold the adapter (and with it
-     * this activity) alive: the reply highlight (2 s), the typing cleaners,
+     * this activity) alive: the reply highlight (1.5 s), the typing cleaners,
      * the voice tick, the recording timer, the status poll and the read
      * watermark. `onPause` only removes SOME of them — a pending callback
      * survived the pause and kept the whole screen alive.

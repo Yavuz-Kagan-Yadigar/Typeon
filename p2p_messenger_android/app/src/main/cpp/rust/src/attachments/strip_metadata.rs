@@ -2,12 +2,13 @@
 
 use super::*;
 
-/// The byte ranges of the metadata segments of a JPEG file: APP1 (EXIF with
-/// the GPS position, XMP) and APP13 (Photoshop/IPTC). The image data, JFIF
-/// and the ICC profile (APP2) are outside them. With them the EXIF
-/// orientation of the photo, if it is not the upright one: the caller puts
-/// that one tag back (`orientation_segment`), or a photo taken rotated is
-/// shown as the sensor stored it.
+/// The byte ranges of the metadata segments of a JPEG file: every APPn segment
+/// except the JFIF APP0, the ICC profile (APP2) and Adobe APP14, and every COM
+/// segment (EXIF with the GPS position, XMP, IPTC, ...). The image data is
+/// outside them. The EXIF orientation of the photo, if it is not the upright
+/// one, is returned too: the caller puts that one tag back
+/// (`orientation_segment`), or a photo taken rotated is shown as the sensor
+/// stored it.
 /// None for a file that is not a JPEG and on any doubt about its structure:
 /// the caller then refuses to send it (fail closed, the EXIF may hold GPS).
 pub(super) fn jpeg_metadata_ranges(file: &mut File) -> Option<(Vec<(u64, u64)>, Option<u8>)> {
@@ -184,12 +185,13 @@ pub(super) fn png_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
     }
 }
 
-/// JPEG XL container boxes that carry EXIF, XMP or JUMBF (also Brotli-
-/// compressed as `brob` of those types), and `jbrd`: the JPEG reconstruction
-/// data keeps the source JPEG's other APP markers and comments (IPTC, COM).
-/// Without it the image still decodes, only not back to the exact JPEG
-/// bytes. The codestream boxes stay. A bare
-/// codestream has no metadata. None for other files, and on any doubt.
+/// Every JPEG XL container box except the codestream and the frame/header
+/// boxes (`ftyp`, `jxll`, `jxlc`, `jxlp`, `jxli`): so EXIF, XMP, JUMBF and
+/// `brob` (Brotli-compressed) boxes go, and so does `jbrd`, the JPEG
+/// reconstruction data that holds the source JPEG's other APP markers and
+/// comments (IPTC, COM). Without it the image still decodes, only not back to
+/// the exact JPEG bytes. A bare codestream has no metadata. None for other
+/// files, and on any doubt.
 pub(super) fn jxl_metadata_ranges(file: &mut File) -> Option<Vec<(u64, u64)>> {
     {
         let len = file.metadata().ok()?.len();

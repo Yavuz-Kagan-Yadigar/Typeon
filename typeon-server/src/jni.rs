@@ -6,7 +6,8 @@
 //! ## Architecture
 //!
 //! `ServerCore` runs `run()` in its own tokio task. The UI asks for status every second. A lock on `ServerCore` would
-//! stall the loop, so the loop refreshes a cheap snapshot (`ServerShared`) on every turn, and the UI reads that.
+//! stall the loop, so the loop copies a cheap snapshot (`ServerShared`) at attach, on a listen-address change and on
+//! each sweep tick (about once a minute), and the UI reads that.
 //!
 //! Management operations (create invites, list or revoke devices) use a SEPARATE database connection. SQLite WAL mode
 //! supports several connections safely (see `Store::open`), so they never block the main loop.
@@ -163,10 +164,9 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_startServer<'loca
         // that eats the phone's own disk and makes the device unusable is not acceptable.
         if storage_budget_bytes > 0 {
             let budget = storage_budget_bytes as u64;
-                        // `ServerConfig.total_storage_budget_bytes` was written and read by `handle_blob_put` and
-                        // `handle_authenticated`, but was NEVER SET anywhere. `ServerConfig::new` leaves it `None`, and neither this file
-                        // nor the headless daemon filled it in. So the total ceiling was dead code, and only the per-record quotas applied.
-                        // With 20 enrolled devices instead of 8, the real ceiling was 2.5 times the budget.
+                        // `ServerConfig.total_storage_budget_bytes` is what `total_budget_exceeded` reads. `ServerConfig::new` leaves it
+                        // `None` (no ceiling), so it must be set here through `apply_storage_budget`. Otherwise only the per-record
+                        // quotas apply, and their sum can be several times the budget.
             // The budget is divided by the expected enrollment count, so no single device takes everyone else's share. The
             // quota share and the enrollment cap are one number: more devices than shares would put the sum of the quotas
             // over the budget.
@@ -378,7 +378,7 @@ pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_joinCode<'local>(
     })
 }
 
-/// `[{enrollment_id, peer_id, state, bytes_mail, bytes_archive, bytes_blob}]`
+/// `[{enrollment_id, peer_id, revoked, blocked, bytes_mail, bytes_archive, bytes_blob}]`
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_server_ServerLib_listDevices<'local>(
     mut env: JNIEnv<'local>,

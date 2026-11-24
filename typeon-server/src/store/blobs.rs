@@ -56,8 +56,8 @@ impl Store {
         if inserted == 0 {
             return Ok(());
         }
-        // A new distinct chunk (the insert above took): one more. A COUNT(*) here scanned every earlier chunk row, O(n^2)
-        // over an upload.
+        // A new distinct chunk (the insert above took): one more. Incrementing avoids a COUNT(*), which would scan every
+        // chunk row on each write.
         self.conn
             .execute(
                 "UPDATE blobs SET byte_len = byte_len + ?2, received_chunks = received_chunks + 1
@@ -125,7 +125,8 @@ impl Store {
     /// Two rules. Completed blobs live for `blob_ttl_ms` after their LAST SERVE, so a file still being downloaded keeps
     /// living. Unfinished uploads are dropped 24 hours after their last chunk (`blob_touch` per chunk).
     ///
-    /// Both also have a hard cap from `created_at`, whatever is served or written: a downloader asking for chunk 0
+    /// Both also have a hard cap from `created_at`, whatever is served or written (2 × `ttl_ms` for completed blobs,
+    /// 7 days for unfinished ones): a downloader asking for chunk 0
     /// every few weeks (or an uploader sending one chunk a day) would keep a blob, and its uploader's quota, for ever.
     pub fn blobs_to_gc(&self, now: i64, ttl_ms: i64) -> Vec<String> {
         let mut stmt = match self.conn.prepare(

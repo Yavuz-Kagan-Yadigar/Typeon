@@ -118,11 +118,6 @@ impl ChatView {
             }
         }
 
-                // An edit cannot be applied to an attachment's caption (the protocol's `Edit` content is plain text), so it is still
-                // skipped when an attachment is present. But `Delete` works regardless of the text (see `delete_message`, the same shared
-                // Rust core path, including `purge_attachment_if_exists`, which Android also supports). Before, this condition also
-                // required `entry.attachment.is_none()`. So after an attachment was sent, the Linux user had NO way to delete it: a disk
-                // leak, and no way to take back a file sent by mistake.
         if let Some(attachment) = entry.attachment.as_ref().filter(|a| !locked && a.sticker && !entry.mine && !entry.deleted) {
             let view = self.clone();
             let file_id = attachment.file_id.clone();
@@ -144,7 +139,8 @@ impl ChatView {
         }
 
         if entry.mine && !entry.deleted && !entry.id.starts_with("legacy:") {
-            // Editing would show the hidden text in the dialog.
+            // Edit is offered for text only: the protocol's `Edit` content is plain text, and a locked (disappearing) message
+            // would show its hidden text in the dialog.
             if entry.attachment.is_none() && !locked {
                 let view = self.clone();
                 let entry = entry.clone();
@@ -155,6 +151,7 @@ impl ChatView {
                     Box::new(move || view.edit_message(&entry)),
                 ));
             }
+            // Delete also works for attachments: the core purges the local file (`purge_attachment_if_exists`).
             {
                 let view = self.clone();
                 let entry = entry.clone();

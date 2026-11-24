@@ -4,9 +4,8 @@
 //!
 //! Nothing else in the app does store-and-forward (see the section on
 //! store-and-forward in the README and SECURITY.md). libp2p Circuit Relay v2 builds a live circuit
-//! only while both peers are connected and stores nothing. The `p2p_msg_<fp>` gossipsub topic is a
-//! naming scheme, not a storage service. Durability therefore rests entirely on the SENDER
-//! (`awaiting_confirmation`, retries for up to 2 days). This server fills that gap.
+//! only while both peers are connected and stores nothing. Durability therefore rests entirely on the SENDER
+//! (`awaiting_confirmation`, retries for up to 7 days). This server fills that gap.
 //!
 //! ## What the server cannot see
 //!
@@ -377,8 +376,8 @@ type HashDone = (String, Vec<u8>, Option<Vec<u8>>);
 /// Snapshot readable from OUTSIDE the main loop.
 ///
 /// Needed by the Android server app. `ServerCore` runs `run()` in its own tokio task, and the UI wants the
-/// status every second. A lock on `ServerCore` would stall the loop, so the loop refreshes this cheap copy on
-/// every turn instead.
+/// status every second. A lock on `ServerCore` would stall the loop, so the loop copies into this cheap snapshot
+/// only at attach, on a listen-address change, and on each sweep tick (about once a minute).
 #[derive(Debug, Default)]
 pub struct ServerShared {
     pub peer_id: std::sync::Mutex<String>,
@@ -492,8 +491,8 @@ impl ServerCore {
                         .with_request_timeout(Duration::from_millis(p2p_messenger::server_client_timeout_ms()))
                         .with_max_concurrent_streams(MAX_STREAMS_PER_CONNECTION),
                 );
-                // 30 s, for the same reason as `file_chunks` in the core. Over Tor, the library's default of 10 s is
-                // often too short for a 256 KiB chunk.
+                // 90 s (`BLOB_REQUEST_TIMEOUT_MS` in the core), the same as the client's `file_chunks`. Over Tor, the
+                // library's default of 10 s is often too short for a 256 KiB chunk.
                 let file_chunks = request_response::cbor::Behaviour::new(
                     [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), ProtocolSupport::Inbound)],
                     request_response::Config::default()
@@ -521,8 +520,8 @@ impl ServerCore {
                 ServerBehaviour { server_rpc, file_chunks, identify, limits, relay, stream: libp2p_stream::Behaviour::new() }
             })
             .map_err(|e| e.to_string())?
-            // Same reason as the 600 s value in the core: keep the connection alive during quiet periods, and do
-            // not rebuild Tor circuits for nothing.
+            // Keeps the connection alive through quiet periods and avoids rebuilding Tor circuits for nothing. The
+            // client core uses 1800 s (network/mod.rs).
             .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(600)))
             .build();
 
@@ -582,8 +581,8 @@ impl ServerCore {
     /// Called from the `run_until` loop when the network interface changes (Wi-Fi drops and returns, or a switch
     /// to cellular). The server is passive (it never dials peers), so the only thing to do is nudge Tor. Circuits
     /// and the onion descriptor should not wait minutes for periodic recovery after a Wi-Fi outage (see
-    /// `tor::TorHandle::notify_network_changed`). The libp2p listener is on loopback and stays bound for the
-    /// whole process, so no `listen_on` is needed again.
+    /// `tor::TorHandle::notify_network_changed`). The libp2p listen address is only a label (see `tor::OnionListen`),
+    /// so no `listen_on` is needed again.
     pub fn notify_network_changed(&self) {
         self.tor.notify_network_changed();
     }
@@ -628,7 +627,7 @@ impl ServerCore {
         self.tor.status().as_str().to_string()
     }
 
-    /// Advertised address. Onion only: the listener is on loopback (see `new`).
+    /// Advertised address. Onion only: no socket is bound (see `new`).
     pub fn advertised_addrs(&self) -> Vec<String> {
         self.tor
             .onion_host()

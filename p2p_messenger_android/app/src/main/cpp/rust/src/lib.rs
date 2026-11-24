@@ -1,6 +1,6 @@
 //! Typeon protocol core.
 //!
-//! Scope: one identity per device, with the Identity / Device split kept so the core can grow to several devices.
+//! Scope: one identity, which can have several linked devices. The Identity / Device split keeps the device list apart from the identity.
 //!
 //! Modules:
 //! - `identity`: Identity and Device model, fingerprints
@@ -131,7 +131,7 @@ use ratchet::{DeviceRatchetState, MlKem1024DecapsulationKey, MlKem1024Encapsulat
 use attachments::{FileChunkRequest, FileChunkResponse};
 
 const DB_NAME: &str = "p2p_messenger.db";
-/// Protocol identifier for file attachments. See the module note in attachments.rs.
+/// Protocol identifier for file attachments. See the module note in `attachments/mod.rs`.
 const FILE_TRANSFER_PROTOCOL: &str = "/p2pmessenger/filexfer/1.0.0";
 /// Largest attachment size the user may request. See `prepare_and_send_file`.
 const MAX_ATTACHMENT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
@@ -259,8 +259,8 @@ struct P2PCore {
     /// monotonic timestamp: a real re-pairing (fresh ephemeral keys, different
     /// signature) is accepted whatever the clock skew, and only byte-identical copies
     /// are rejected. Old entries are pruned from the window, so the set does not grow
-    /// without bound. It lives in memory; after a restart, the freshness window still
-    /// rejects old replays.
+    /// without bound. It is also kept on disk (`persist_handshake_sigs`), so it survives a
+    /// restart.
     recent_handshake_sigs: HashMap<String, Vec<(u64, Vec<u8>)>>,
     /// See `EARLY_PACKET_TTL_MS`. Key: sender device_fingerprint. Value: (time buffered,
     /// packet). Replayed in order by `replay_early_packets` once the handshake completes.
@@ -294,8 +294,8 @@ struct P2PCore {
     last_inbound_dedup_prune_at: u64,
     /// See `EARLY_EDIT_DELETE_TTL_MS`. `Edit` and `Delete` packets whose target `Text`
     /// is not yet in the archive. Key: target message id (1:1 `message_id`, or group
-    /// `group_message_local_id`). Value: (time buffered, sender peer_fp, sender
-    /// sender_identity_id, the packet's own message_id (for the Ack), content). Applied
+    /// `group_message_local_id`). Value: (time buffered, sender peer_fp, sender_identity_id,
+    /// the packet's own message_id (for the Ack), content). Applied
     /// by `replay_buffered_edits_deletes` once the target `Text` is archived.
     pending_edits_deletes: HashMap<String, Vec<(u64, String, String, String, MessageContent)>>,
     /// `Text`, `FileOffer` and `Reaction` for a group we do not hold yet, keyed by group
@@ -307,8 +307,6 @@ struct P2PCore {
     /// Device-change alerts waiting for the user's decision, not yet accepted or
     /// rejected. Key: new_device_fingerprint.
     pending_device_alerts: HashMap<String, DeviceAlertInfo>,
-    /// Pending messages. Messages from a device that is not yet verified or is blocked are not kept. Send and receive stop until the alert
-    /// is resolved, so messages from that device are dropped silently until then.
     swarm: Option<Swarm<P2PBehaviour>>,
     /// Handle to the running onion service, when the Tor layer is on (client, service and bridge). `None` means Tor is off. Started in
     /// `start_network` when `tor_enabled` is set. See tor.rs and the "Tor onion" note in SECURITY.md.
@@ -321,9 +319,8 @@ struct P2PCore {
     /// and session start. On the transition, our current `.onion` address is sent proactively to every known contact.
     tor_was_ready: bool,
     /// Addresses the swarm really listens on after `start_network` (`SwarmEvent::NewListenAddr`,
-    /// see `poll_events`). The `node_address` shown on the QR / "my code" screen is
-    /// derived from this. Only relay circuit addresses count. The loopback listener is
-    /// never shown.
+    /// see `poll_events`). Only relay circuit addresses are kept here. The QR / "my code"
+    /// address does not come from this list: it is the `.onion` address (`get_node_address`).
     own_listen_addrs: Vec<Multiaddr>,
     /// Envelopes that `publish_envelope` could not send. `poll_events` retries the SAME envelope (no new
     /// ratchet step or message_id). After `PENDING_ENVELOPE_TIMEOUT_MS` an entry is marked "Failed" and dropped.
@@ -380,16 +377,16 @@ struct P2PCore {
     /// contact. See `process_handshake_init`.
     id0_inits: std::collections::HashSet<String>,
     /// The active own device fingerprint once the swarm runs (set by `start_network` or, for an identity made or
-    /// restored later, by `ensure_own_mailbox_subscription`). Names the own server mailbox. No gossip topic exists.
+    /// restored later, by `ensure_own_mailbox_subscription`). Names the own server mailbox.
     own_mailbox_topic_fp: Option<String>,
     /// Devices this device started a pairing with and has no ratchet with yet. Key: peer_fp. Value: start
-    /// time (ms). Only a marker (no gossip topic): dropped when the ratchet exists or after
+    /// time (ms). Only a marker: dropped when the ratchet exists or after
     /// `PAIRING_MAILBOX_TTL_MS`.
     pairing_mailbox_subs: HashMap<String, u64>,
     /// The connection a verified IdentityExchange arrived on, per device. Only our
     /// IdentityExchange and Handshake to that device use it. The side that showed its
     /// code has no PeerId mapping yet (the IX maps nothing, see
-    /// `process_identity_exchange`), and without gossip its reply had no route except a
+    /// `process_identity_exchange`), so without this map its reply had no route except a
     /// server. Dropped once a ratchet exists.
     pairing_reply_peer: HashMap<String, PeerId>,
     /// Multi-device: if THIS device was linked as a secondary to an identity, this is the
@@ -410,7 +407,7 @@ struct P2PCore {
     /// The 256-bit key that encrypts the message history archive. Kotlin keeps a
     /// "history data key" wrapped in the Keystore, unwraps it at startup and loads it here
     /// with `setHistoryKey`. Rust never writes this key to disk; it stays in memory (see
-    /// the message history note at the end of the file). While it is `None` (not loaded yet,
+    /// `set_history_key` in api.rs). While it is `None` (not loaded yet,
     /// or node mode never turned on), messages are not archived, only processed live.
     history_key: Option<[u8; 32]>,
     // --- Server (store-and-forward) option; see the `server_client` module ---
@@ -419,7 +416,7 @@ struct P2PCore {
     /// Per-server runtime state (connected, registered, which mailboxes were announced).
     /// Not persisted. It is rebuilt on every start.
     server_rt: HashMap<String, server_client::ServerRuntime>,
-    /// Server RPCs in flight. If a `Deposit` fails, its envelope falls back to gossip
+    /// Server RPCs in flight. If a `Deposit` fails, its envelope is requeued
     /// (see `requeue_failed_deposit`).
     server_inflight: HashMap<request_response::OutboundRequestId, server_client::ServerInflight>,
     /// `(server_id, mailbox_id) -> highest processed seq`. Persistent. Without it, every
@@ -439,8 +436,8 @@ struct P2PCore {
     server_sweep_at: u64,
     /// Messages successfully deposited on a server: `(server_id, message_id)` -> deposit
     /// time (ms). Why: `awaiting_confirmation` resends the envelope until the end-to-end
-    /// `Ack` arrives (up to 7 days). That is right for the gossip path, which stores
-    /// nothing. On the server path the envelope already sits on disk. Depositing it again
+    /// `Ack` arrives (up to 7 days). That is right for a direct send, which the network
+    /// does not store. On the server path the envelope already sits on disk. Depositing it again
     /// does not make the recipient more likely to see it. It only resends the same bytes.
     /// Measured on a real device: a queue to a contact identity that no longer existed
     /// (a broken pairing) redeposited two envelopes of 368 KB each about every 20 s. That
@@ -456,7 +453,7 @@ struct P2PCore {
     /// for 30 days while the recipient was offline.
     server_deposit_locations: HashMap<(String, String), (String, u64)>,
     /// Total and count of blob round-trip times, to tell whether a transfer is limited by
-    /// latency or by bandwidth (see `server_client` `BLOB_PIPELINE_DEPTH`).
+    /// latency or by bandwidth (see `server_client` `BLOB_RTT_GROW_FACTOR`).
     blob_rtt_sum: u64,
     blob_rtt_count: u64,
     /// Root archive key (ARK). It belongs to the IDENTITY, not the device, unlike
@@ -471,12 +468,11 @@ struct P2PCore {
     /// (`attachments/`) know where to be written on disk. Everything else already resolves
     /// relative to this directory, as the DB path does.
     app_files_dir: Option<String>,
-    /// `device_fingerprint -> PeerId`. Unlike gossip topic unicast, file chunk transfer
-    /// (`request_response`) needs a target `PeerId`. This map is filled passively from the
-    /// gossip `message.source` of any packet from a device (IdentityExchange, Handshake,
-    /// Message, GroupUpdate). See `record_peer_id_if_known`. No separate discovery step is
-    /// invented. If the process restarts, a new `PeerId` is made (see `with_new_identity`),
-    /// and this map resets as well. At least one packet from the device must arrive before a
+    /// `device_fingerprint -> PeerId`. File chunk transfer (`request_response`) needs a
+    /// target `PeerId`. This map is filled passively from the connection's `PeerId` of any
+    /// verified packet from a device (IdentityExchange, Handshake, Message, GroupUpdate). See
+    /// `record_peer_id_if_known`. No separate discovery step is invented. If the process
+    /// restarts, this map resets as well. At least one packet from the device must arrive before a
     /// file download from it can start.
     device_to_peer_id: HashMap<String, PeerId>,
     /// The one call in progress (ringing or active). See the `call` module.
@@ -595,7 +591,7 @@ struct P2PCore {
     /// than they do on the same LAN. There was no log, no retry, and the function still returned `Ok(())`.
     /// Now each (group_id, identity_id) pair that could not be sent keeps its latest `GroupUpdate` here. `group_sync_sweep` (run by the same periodic
     /// pattern as `reconnect_sweep`) retries it until the device resolves. It is in memory, the same scope as the other retry queues
-    /// (`awaiting_confirmation` and `pending_envelopes`), and is cleared when the group is deleted locally (see `remove_group_locally`).
+    /// (`awaiting_confirmation` and `pending_envelopes`). `remove_group_locally` clears it, but `delete_group` keeps it, so the delete notice still goes out.
     pending_group_syncs: HashMap<(String, String), GroupUpdate>,
     /// Fix: a group member sometimes could not receive messages, and behaved inconsistently. `pending_group_syncs` above covered this failure class
     /// only for `GroupUpdate` (membership, name, avatar). The same fan-out pattern in `send_group_message`, `edit_group_message` and
@@ -675,7 +671,7 @@ struct P2PCore {
     envelopes_inflight: HashMap<request_response::OutboundRequestId, (String, NetworkEnvelope, u64, bool)>,
     /// Our onion address, as announced to identify (`add_external_address`).
     advertised_onion: Option<String>,
-    /// Persisted sessions are loaded (see `initiate_handshake_with`).
+    /// Persisted sessions are loaded (see `load_ratchet_states_from_db`).
     ratchets_loaded: bool,
     /// Onion addresses that peers announced through identify, by PeerId. Applied to
     /// `device_onion_addr` once the PeerId is tied to a device.
@@ -690,12 +686,10 @@ struct P2PCore {
     /// The last time a handshake was refreshed for a peer (see `maybe_redo_handshake`). Recovering
     /// from a lost `HandshakeInit` only needs a new handshake, but doing it every turn would churn the
     /// session needlessly. This map enforces `HANDSHAKE_REDO_MIN_INTERVAL_MS`.
-    /// The second field of the value is the root key abandoned by the PREVIOUS refresh.
-    /// `initiate_handshake_with` does NOT unsubscribe the old topic when it subscribes the new one.
-    /// That is deliberate: the other side may still publish on the old topic until it processes the new
-    /// handshake. With repeated refreshes these subscriptions would pile up. Same "keep one generation
-    /// late" pattern as `maybe_rotate_ratchet`: the previous generation's topic is dropped only at the
-    /// next refresh.
+    /// The second field of the value is the root key that the PREVIOUS refresh replaced. It is kept
+    /// one generation, because the other side may still send on it until it processes the new
+    /// handshake. The same "keep one generation late" pattern as `maybe_rotate_ratchet`: the previous
+    /// generation is dropped only at the next refresh.
     last_handshake_redo: HashMap<String, (u64, Option<Vec<u8>>)>,
     /// Per device: (first failure in the current streak, count). See `note_undecryptable`.
     undecryptable_from: HashMap<String, (u64, u32)>,
@@ -758,7 +752,7 @@ struct P2PCore {
     revoked_disconnects: Vec<(PeerId, u64)>,
     /// Delivery guarantee: the key is the message id of the packet we sent (Text, Edit, Delete and HistorySyncRequest packets). `poll_events`
     /// republishes every entry periodically until the peer confirms it (an Ack, or a HistorySyncResponse). See `ACK_RETRY_INITIAL_MS` and
-    /// `ACK_RETRY_MAX_MS`. A successful gossip publish is only a local guarantee (see the note on `pending_envelopes` for why that is not enough).
+    /// `ACK_RETRY_MAX_MS`. A successful publish is only a local guarantee (see the note on `pending_envelopes` for why that is not enough).
     /// This is the app's only real end-to-end delivery guarantee layer.
     awaiting_confirmation: HashMap<String, PendingConfirmation>,
 }

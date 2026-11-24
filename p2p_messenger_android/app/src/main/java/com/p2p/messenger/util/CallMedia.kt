@@ -25,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap
  *  - send:    `P2PLib.callSend(kind, payload)`
  *  - receive: `P2PLib.callRecv()` -> `[kind][slot][payload]`
  *
- * Audio: 16 kHz mono Opus at 12 kbps, three 20 ms packets per frame (60 ms).
+ * Audio: 16 kHz mono Opus at 24 kbps, three 20 ms packets per frame (60 ms).
  * A Tor cell carries ~500 bytes; one ~30-byte packet per cell would waste most
  * of every cell. Transport is TCP (Tor), so nothing is ever lost, only late:
  * the jitter buffer pads with silence after an underrun and drops when a burst
@@ -607,7 +607,7 @@ object CallMedia {
             const val BUFFER_MS = 1200
             /** Below API 31 there is no start threshold: the track starts
              *  when its WHOLE buffer is full, so the buffer size is the added
-             *  delay (0.8 s with [BUFFER_MS]). Not measured on a device:
+             *  delay ([LEGACY_BUFFER_MS], 300 ms). Not measured on a device:
              *  raise it if audio breaks up on LTE bursts there. */
             const val LEGACY_BUFFER_MS = 300
             const val START_MS = 60
@@ -653,7 +653,7 @@ object CallMedia {
         const val MAX_BITRATE = 320_000
         const val AVC_BITRATE_FACTOR = 1.4
         /** Long GOP: receivers ask for a keyframe (report flag) when they lose
-         *  sync, so we do not pay for one every 2 s "just in case". */
+         *  sync, so we do not pay for one every 10 s "just in case". */
         const val KEYFRAME_INTERVAL_S = 10
         /** Where supported, spread intra refresh over this many frames instead
          *  of one big keyframe burst (which stalls a Tor stream). */

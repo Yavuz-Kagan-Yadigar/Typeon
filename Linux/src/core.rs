@@ -316,7 +316,7 @@ pub fn revoke_contact_device(contact_id: &str, fingerprint: &str) -> Result<(), 
 }
 
 /// Blocks the contact permanently. `revoke` shuts down a single device, and the person can come back with a new device. A block targets
-/// the identity, and only an in-person re-pairing lifts it.
+/// the identity, and only an in-person re-pairing or the user's explicit unblock lifts it.
 pub fn block_identity(identity_id: &str) -> Result<(), String> {
     parse_unit(api::block_identity(identity_id))
 }
@@ -906,8 +906,9 @@ pub fn set_server_routing(server_id: &str, enabled: bool) -> Result<(), String> 
     parse_unit(api::set_server_routing(server_id, enabled))
 }
 
-/// Keeping history on the server is separate from message routing, and is OFF by default. The archive is a real backup, but unlike the
-/// ratchet it is NOT forward-secret: if the root archive key ever leaks, all history uploaded up to that point can be read.
+/// Keeping history on the server is separate from message routing. Only one server stores history: a new server gets it only when no
+/// other server has it. The archive is a real backup, but unlike the ratchet it is NOT forward-secret: if the root archive key ever
+/// leaks, all history uploaded up to that point can be read.
 pub fn set_server_history(server_id: &str, enabled: bool) -> Result<(), String> {
     parse_unit(api::set_server_history(server_id, enabled))
 }

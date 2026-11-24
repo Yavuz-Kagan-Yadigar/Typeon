@@ -9,8 +9,8 @@ This implementation follows the P2P Messaging Protocol v0.2 as defined in `Descr
 ### Key Features
 
 - **Hybrid Classical + Post-Quantum Cryptography**
-  - Ed25519 + ML-DSA-65 (Dilithium2) for signatures
-  - X25519 + ML-KEM-768 (Kyber768) for key exchange
+  - Ed25519 + ML-DSA-87 for signatures
+  - X25519 + ML-KEM-1024 for key exchange
   - Fingerprint = SHA3-256(all public keys)
 
 - **Identity/Device Two-Layer Model**
@@ -39,7 +39,7 @@ This implementation follows the P2P Messaging Protocol v0.2 as defined in `Descr
   - Optional message history sync
 
 - **Recovery File**
-  - AES-256-GCM encrypted backup
+  - ChaCha20-Poly1305 encrypted backup, key derived with Argon2id from the password
   - Password-protected master seed
   - Base32 encoded text format
 
@@ -52,19 +52,17 @@ p2p_messenger_android/
 │   │   ├── cpp/
 │   │   │   ├── rust/
 │   │   │   │   ├── Cargo.toml          # Rust dependencies
-│   │   │   │   └── src/lib.rs          # Core protocol implementation
-│   │   │   ├── CMakeLists.txt          # CMake build config
-│   │   │   └── dummy.cpp               # JNI stub
-│   │   ├── java/com/p2pmessenger/
+│   │   │   │   └── src/lib.rs          # Core protocol (topic modules under src/)
+│   │   ├── java/com/p2p/messenger/
 │   │   │   ├── MainActivity.kt         # Main UI
-│   │   │   ├── rust/P2PLib.kt          # JNI bindings
+│   │   │   ├── P2PLib.kt               # JNI bindings
 │   │   │   ├── service/P2PService.kt   # Background service
 │   │   │   └── ui/ChatAdapter.kt       # Chat list adapter
 │   │   ├── res/                        # Android resources
 │   │   └── AndroidManifest.xml
-│   └── build.gradle.kts
-├── build.gradle.kts
-├── settings.gradle.kts
+│   └── build.gradle
+├── build.gradle
+├── settings.gradle
 └── README.md
 ```
 
@@ -114,7 +112,7 @@ A Gradle run that builds only the debug variant writes `app/src/debug/jniLibs/` 
 
 1. The app generates a new identity with hybrid key pairs
 2. View your **Identity Code** (Base32, 5-char groups)
-3. View your **Safety Number** (5 digits × 4 groups)
+3. View your **Safety Number** (8 groups of 5 digits)
 
 ### Adding Contacts
 
@@ -123,11 +121,12 @@ A Gradle run that builds only the debug variant writes `app/src/debug/jniLibs/` 
 2. Other person scans with their app
 3. Or tap "Scan QR" to scan their code
 
-**Manual Entry:**
+**Manual Entry:** menu "Copy my code" on one phone, then "Add Manually" on the
+other and paste the one-line code:
 ```
-Node Address: /ip4/1.2.3.4/tcp/4001/p2p/<peer_id>
-Identity Code: XXXXX-XXXXX-XXXXX-...
+identity_id|device_fingerprint|nonce|device_name|rendezvous_node
 ```
+`rendezvous_node` is the onion address: `/dns/<host>.onion/tcp/<port>/p2p/<peer_id>`.
 
 ### Creating Groups
 
@@ -138,7 +137,7 @@ Identity Code: XXXXX-XXXXX-XXXXX-...
 
 ### Backup & Recovery
 
-1. Settings → "Backup Identity"
+1. Settings → "Identity Recovery" → "Export Recovery File…"
 2. Enter a strong password
 3. Save the recovery file securely
 4. To restore: enter file content + password on new device
@@ -175,15 +174,9 @@ QRPayload {
 
 ### Recovery File Format
 
-```
------BEGIN P2P RECOVERY FILE-----
-Version: 2
-Created: <timestamp>
-
-<Base32-encoded AES-256-GCM ciphertext>
-
------END P2P RECOVERY FILE-----
-```
+The file is ChaCha20-Poly1305 ciphertext under an Argon2id key from the password.
+The exact layout is in `app/src/main/cpp/rust/src/recovery.rs`; the old
+`BEGIN/END P2P RECOVERY FILE` block was not what the code writes.
 
 ## Security Considerations
 
@@ -193,15 +186,11 @@ Created: <timestamp>
 4. **Keep password secret** - no recovery without it
 5. **Update regularly** for security patches
 
-## Limitations (v0.1 Prototype)
+## Limitations
 
-- No libp2p network layer yet (placeholder for future)
-- Simplified ratchet chain management
-- No message persistence (in-memory only)
-- Single-threaded operation
-- No file transfer support
-- No voice/video calls
+The old v0.1 prototype list (no network, no persistence, no file transfer, no calls) was
+removed: all of those now exist.
 
 ## License
 
-See LICENSE file in root directory.
+The Android client is GPL-3.0-or-later (see the License section of the root README.md). The root `LICENSE` file is Apache-2.0 and covers only the remaining code such as `typeon-crypto`.

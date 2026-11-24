@@ -16,7 +16,7 @@ object ImagePreview {
      *  `compressBitmap` brings it down to the exact target size. */
     fun compressFile(file: File, maxDimension: Int, quality: Int): ByteArray? {
         if (isJxl(file)) {
-            // BitmapFactory cannot read JPEG XL: its first frame as a temp GIF.
+            // BitmapFactory cannot read JPEG XL, so the first frame is converted to a temporary GIF first.
             val tmp = File(file.parentFile, "${file.name}.${System.nanoTime()}.tmp")
             return try {
                 if (P2PLib.jxlToGif(file.absolutePath, tmp.absolutePath) == "OK") compressDecoded(tmp, maxDimension, quality) else null
@@ -109,9 +109,7 @@ object ImagePreview {
         return rotated
     }
 
-    /** Fits the longest side into `maxDimension`. The aspect ratio is KEPT: small images are square in the UI, but the real image's proportions are not
-     *  distorted. The square crop is done only visually, by the `centerCrop` scaleType of the ImageView in `bindAttachment`. This function never crops the
-     *  source. Then it compresses to JPEG. */
+    /** Fits the longest side into `maxDimension`. The aspect ratio is kept. This function never crops the source. Then it compresses to JPEG. */
     fun compressBitmap(bitmap: Bitmap, maxDimension: Int, quality: Int): ByteArray {
         val longEdge = maxOf(bitmap.width, bitmap.height)
         val scaled = if (longEdge > maxDimension) {
@@ -137,8 +135,8 @@ const val MAX_FOREIGN_URI_BYTES = 64L * 1024 * 1024
 
 /**
  * A foreign provider can hand over far more than its `SIZE` column claims
- * (the send path caps the bytes actually copied, see ChatActivity "SIZE
- * column can lie"): copy at most [maxBytes] into [out] and stop. Returns
+ * (the send path caps the bytes actually copied, see ChatActivityAttachments):
+ * copy at most [maxBytes] into [out] and stop. Returns
  * false — with the partial [out] deleted — once more than [maxBytes] was
  * read; a read/write error propagates instead and the caller's `finally`
  * deletes the file (every call site has one).

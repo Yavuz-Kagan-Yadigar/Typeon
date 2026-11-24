@@ -36,8 +36,10 @@ object SelfUpdate {
     /** Downloads take minutes over Tor: never on `ServerService.core`, which serialises start/stop. */
     private val worker = Executors.newSingleThreadExecutor()
 
-    /** ServerService calls this hourly; the core skips a check younger than 20 h, so this is one check a day. */
-    /** `force` (check button, channel change) skips the day wait. */
+    /**
+     * ServerService calls this hourly; the core skips a check younger than 20 h, so this is one check a day.
+     * `force` (check button, channel change) skips the day wait.
+     */
     fun checkNow(context: Context, force: Boolean = false) {
         val ctx = context.applicationContext
         // The APK is ~100 MB: the hourly tick waits for an unmetered network; the button does not.
@@ -73,7 +75,7 @@ object SelfUpdate {
 
     fun install(context: Context, apk: File) {
         val installer = context.packageManager.packageInstaller
-        // A session the user never confirmed keeps its staged APK copy; only the newest one matters.
+        // Abandons older sessions the user never confirmed; only the newest one matters.
         for (old in installer.mySessions) try { installer.abandonSession(old.sessionId) } catch (e: Exception) {}
         val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(context.packageName)

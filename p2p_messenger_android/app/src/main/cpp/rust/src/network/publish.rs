@@ -3,11 +3,10 @@
 use super::*;
 
 impl P2PCore {
-    /// Raw gossip publish only. Does not queue or update state. Shared by `publish_envelope`
+    /// Raw send only, direct or server. Does not queue or update state. Shared by `publish_envelope`
     /// (first attempt) and the retry loop in `poll_events` (later attempts).
     ///
-    /// Reliability: the error is typed now. `MessageTooLarge` (gossipsub `max_transmit_size`
-    /// exceeded) is permanent: the same bytes can never succeed, however often they are
+    /// Reliability: the error is typed. An oversized envelope is permanent: the same bytes can never succeed, however often they are
     /// retried. Before, every error counted as transient and was retried for up to 2 days,
     /// and the user was never told "failed". Also, while `swarm` did not exist yet, publish
     /// silently returned `Ok(())`, marking messages sent without publishing anything. It now
@@ -44,7 +43,7 @@ impl P2PCore {
     }
 
     /// `allow_direct = false`: the `ENVELOPE_PROTOCOL` attempt already failed,
-    /// so use gossipsub/server.
+    /// so use the server.
     pub(crate) fn try_publish_raw_via(
         &mut self,
         target_device_fingerprint: &str,
@@ -69,12 +68,10 @@ impl P2PCore {
             return Err(PublishFailure::Permanent("Recipient deleted their account; not sent".to_string()));
         }
         let bytes = ciborium_bytes(envelope).map_err(PublishFailure::Permanent)?;
-        // Every path caps at 1 MiB (gossipsub `max_transmit_size`, the cbor
-        // request-response default, the server). The direct path has no check
-        // of its own: it reported "sent" and the request then failed, again
-        // on every retry for days.
-        // Headroom: gossipsub measures the whole protobuf frame (topic, seqno,
-        // ...) against the cap, so an envelope of exactly 1 MiB never went out.
+        // Every path caps at 1 MiB (the direct protocol, the server). The check
+        // runs here, before either path, so an oversized envelope is not
+        // reported as "sent" and then failed on every retry.
+        // Headroom for the framing overhead, so an envelope of exactly 1 MiB is refused here.
         if bytes.len() + 4096 > MAX_ENVELOPE_BYTES {
             return Err(PublishFailure::Permanent(format!("Envelope too large ({} bytes)", bytes.len())));
         }
@@ -121,13 +118,13 @@ impl P2PCore {
         };
         let mut deposited = (!direct || critical || unconfirmed_past_first_retry)
             && self.try_server_deposit(target_device_fingerprint, &topic_str, envelope, &bytes, first_attempt_at);
-        // See `ENVELOPE_PROTOCOL`. Failure falls back to gossipsub/server in
+        // See `ENVELOPE_PROTOCOL`. Failure falls back to the server in
         // `poll_events` (`EnvelopeEventLocal::Failed`).
         if direct && allow_direct && self.send_envelope_direct(target_device_fingerprint, envelope, bytes.clone(), first_attempt_at, false) {
             return Ok(());
         }
-        // No direct path, or it failed: the server copy is the delivery
-        // (gossipsub is gone, ). Without one the envelope is queued.
+        // No direct path, or it failed: the server copy is the delivery.
+        // Without one the envelope is queued.
         if !deposited && direct {
             deposited = self.try_server_deposit(target_device_fingerprint, &topic_str, envelope, &bytes, first_attempt_at);
         }
@@ -138,8 +135,8 @@ impl P2PCore {
         }
     }
 
-    /// Publishes any envelope (Handshake, IdentityExchange, Message, GroupUpdate, ...) to the peer's gossip topic. Right after the first
-    /// connection the gossip mesh may not exist yet, and the publish fails with `InsufficientPeers` or `NoPeersSubscribedToTopic`.
+    /// Publishes any envelope (Handshake, IdentityExchange, Message, GroupUpdate, ...) to the peer, directly or through a server. Right after the first
+    /// connection the direct path may not be ready yet, and the publish fails.
     /// Every failed envelope is queued in `pending_envelopes`. `poll_events` resends the SAME envelope each turn (no re-encryption and
     /// no re-signing). This is one central mechanism for all envelope types, replacing per-caller queues that did not cover
     /// HandshakeInit. For a `Message`, `message_status` is updated too (the UI shows send and error icons from it).
@@ -198,8 +195,8 @@ impl P2PCore {
     }
 
     /// Like `publish_envelope`: it tries once right away and updates the status the same way. Unlike that function, it keeps
-    /// re-sending the packet after the first attempt, even on success, until the peer acknowledges it. There is no upper time limit,
-    /// unlike `pending_envelopes`.
+    /// re-sending the packet after the first attempt, even on success, until the peer acknowledges it. The limit is
+    /// `TEXT_RETRY_GIVE_UP_MS` (7 days). `pending_envelopes` gives up sooner (`PENDING_ENVELOPE_TIMEOUT_MS`).
     ///
     /// `original_sent_at_override` and `retry_interval_ms_override` are `Some` ONLY when called from a `regen_content` regeneration
     /// (see the age branch of `retry_unconfirmed_messages`). They keep the message's first queue time and the backoff reached so far.
@@ -312,8 +309,7 @@ impl P2PCore {
             self.mark_connection_suspect(pid, false);
         }
         // A packet sent directly but unacknowledged within `ACK_SUSPECT_MS` is also left on the server, without waiting for the first
-        // 15 s retry (`ACK_RETRY_INITIAL_MS`). If the sender goes offline meanwhile, the message is on the server. Gossip would not
-        // re-send the same bytes anyway (it reports `Duplicate`).
+        // 15 s retry (`ACK_RETRY_INITIAL_MS`). If the sender goes offline meanwhile, the message is on the server.
         for (fp, envelope) in early_deposit {
             // Server copy only (`allow_direct = false`). The direct copy is in flight, and `try_publish_raw` already sent the envelope once.
             if self.is_connected_to_device(&fp) && !self.ready_server_peers().is_empty() {

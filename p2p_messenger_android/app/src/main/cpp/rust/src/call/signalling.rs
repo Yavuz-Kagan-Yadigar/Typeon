@@ -17,7 +17,7 @@ impl P2PCore {
         if self.call.is_some() {
             return Err("A call is already in progress".to_string());
         }
-        // Ring every active device of the contact. The chat key is the lowest fingerprint, which may belong to an old, dead device, so ringing only that one can leave
+        // Ring every active device of the contact. The chat key (`canonical_peer_key`) is one device, which may be an old, dead device, so ringing only that one can leave
         // the call unanswered. The first device to answer wins (see the Accept arm).
         let invited: Vec<String> = self.fanout_targets(&peer_fp).into_iter().filter(|fp| self.ratchets.contains_key(fp)).collect();
         if invited.is_empty() {
@@ -183,8 +183,8 @@ impl P2PCore {
     }
 
     /// Devices a group call we did not start signals to: every member's
-    /// recently seen device, plus every device the caller rang that is an
-    /// active device of a member here (stale or not), plus the caller; never mine.
+    /// recently seen device, plus the devices the caller rang that are active
+    /// devices of a member here, plus the caller; never mine.
     fn group_invited(&self, gid: &str, caller: &str, participants: Vec<String>) -> Vec<String> {
         let mut invited = self.group_call_devices(gid).unwrap_or_default();
         let own = self.get_active_own_device_fingerprint().unwrap_or_default();
@@ -298,8 +298,9 @@ impl P2PCore {
             CallAction::Invite => {
                 // ponytail: the age compares two devices' clocks, so a caller
                 // more than a minute behind never rings and one ahead can ring
-                // late. A clock-free age needs the server to stamp how long it
-                // held the item (`MailItem` carries none).
+                // late. A clock-free age needs the time the server held the item;
+                // `MailItem.deposited_at_ms` is the server's clock, which this
+                // device cannot compare with its own.
                 // Not from the future either: a `sent_at_ms` far ahead passed
                 // the age test for good, and a held invite rang whenever it
                 // was delivered.
@@ -813,7 +814,7 @@ impl P2PCore {
             _ => {}
         }
         let Some(control) = &self.stream_control else { return };
-        // Test knob, debug builds only: an empty `call_force_relay` file in
+        // Test knob, debug builds only: a `call_force_relay` file in
         // the app files dir sends all media through the server even when a
         // direct link exists.
         let force_relay = cfg!(debug_assertions)

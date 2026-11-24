@@ -83,7 +83,7 @@ impl P2PCore {
         })
     }
 
-    /// `Register` for `add`, with a proof for each ID of `prove` (at most `MAX_REGISTER_PROOFS`; the server asks
+    /// `Register` for `add`, with a proof for each ID of `prove` (at most `typeon_crypto::server_proto::MAX_REGISTER_PROOFS`; the server asks
     /// again for the rest).
     pub(super) fn send_register(&mut self, server_id: &str, peer_id: PeerId, mut add: Vec<String>, drop: Vec<String>, prove: &[String]) {
         let enrollment_id = self.servers.iter().find(|s| s.server_id == server_id).and_then(|s| s.enrollment_id.clone());
@@ -133,7 +133,7 @@ impl P2PCore {
             return false;
         }
         // A first-contact topic names only the public fingerprint. Its mailbox ID needs the pairing secret we hold
-        // for the target. With no secret there is no server path (gossip and the direct path still apply).
+        // for the target. With no secret there is no server path (the direct path still applies).
         //
         // Everything sent to that mailbox (Handshake, IdentityExchange, and a Message before a session exists) is
         // sealed with that secret and, when the target's device record is known, to its KEM keys. The server sees
@@ -168,9 +168,9 @@ impl P2PCore {
         };
 
         if sealed.len() > MAX_DEPOSIT_BYTES {
-            // Wire cap (see `MAX_DEPOSIT_BYTES`). It is better not to try and to fall back to gossip than to send a
+            // Wire cap (`typeon_crypto::server_proto::MAX_DEPOSIT_BYTES`). It is better not to try and to fall back to the direct path than to send a
             // silently truncated, corrupt packet.
-            warn!("Envelope exceeds server cap ({} bytes), handing to gossipsub", sealed.len());
+            warn!("Envelope exceeds server cap ({} bytes), direct path only", sealed.len());
             return false;
         }
 
@@ -295,15 +295,15 @@ impl P2PCore {
     /// `already_deposited`
     /// looked only at `message_id`, not at the ciphertext. A regenerated copy (see `retry_unconfirmed_messages` and
     /// `regen_pending_for_peer`) keeps the SAME `message_id` but has a COMPLETELY NEW ciphertext. The old memory
-    /// therefore blocked that fresh copy from the server for 12 hours (see `SERVER_DEPOSIT_MEMORY_MS`). The server,
+    /// therefore blocked that fresh copy from the server for up to 7 days (see `SERVER_DEPOSIT_MEMORY_MS`). The server,
     /// where the recipient could reach it while offline, kept only the OLD copy, which could no longer be decrypted
-    /// after a ratchet rotation. The fresh copy went only over gossip, which fails when the recipient is offline.
+    /// after a ratchet rotation. The fresh copy went only over the direct path, which fails when the recipient is offline.
     /// Clearing the memory on regeneration lets the new ciphertext reach the mailbox. If the recipient gets both
     /// copies, `message_exists_with_id` deduplicates them.
     ///
     /// When a user cancels a pending message, the server copy is also WITHDRAWN.
     /// Before, cancel cleared only the local queue. If the packet had been deposited, it stayed on the server for
-    /// 30 days while the recipient was offline and was eventually delivered. So "I changed my mind" had no effect.
+    /// up to 14 days (the mailbox TTL) while the recipient was offline and was eventually delivered. So "I changed my mind" had no effect.
     /// The server deletes only the row where `depositor == us`, so this path cannot be used to delete someone else's mail.
     pub(crate) fn cancel_server_deposit(&mut self, message_id: &str) {
         // No location yet for a Deposit still in flight: flag it, and the `Deposited` arm withdraws it.
@@ -532,7 +532,7 @@ impl P2PCore {
         self.refetch_held(&server_id, now);
     }
 
-    /// Immediately hands an envelope that could not be deposited to the server to gossip.
+    /// Immediately hands an envelope that could not be deposited to the server back to the publish path.
     pub(super) fn requeue_failed_deposit(&mut self, inflight: &ServerInflight) {
         if let ServerInflight::Deposit { envelope, target_fp, first_attempt_at, cancelled, .. } = inflight {
             // Withdrawn by the user, or confirmed in the meantime: nothing to resend.
@@ -544,7 +544,7 @@ impl P2PCore {
             // NOT `publish_envelope`: that one queues the entry with `current_time_ms()`, and would reset the envelope's age on
             // every server round trip. See the `first_attempt_at` note of `ServerInflight::Deposit`. This is the second half of the endless queue cycle.
             if let Err(e) = self.publish_envelope_at(&target_fp, &envelope, *first_attempt_at) {
-                warn!("Server failed, gossipsub also failed right away (queued): {}", e);
+                warn!("Server failed, re-publish also failed right away (queued): {}", e);
             }
         }
         if let ServerInflight::BlobPut { blob_id, chunk_index, server_id, .. } = inflight {

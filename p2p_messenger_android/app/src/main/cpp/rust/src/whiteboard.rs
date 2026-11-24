@@ -471,9 +471,10 @@ impl P2PCore {
         live
     }
 
-    /// Pages that hold strokes: stroke count and XOR of a per-stroke content
-    /// hash (id, page, shade, width, points, author, signing device), so two
-    /// copies with the same ids but different content do not compare equal.
+    /// Pages that hold strokes: stroke count and a SHA-256 over the sorted
+    /// per-stroke hashes (id, page, shade, width, points, author, signing
+    /// device), so two copies with the same ids but different content do not
+    /// compare equal.
     fn wb_digest(&self, board: &str) -> Vec<WbPageDigest> {
         let mut pages: BTreeMap<u8, Vec<[u8; 32]>> = BTreeMap::new();
         if let Some(conn) = &self.db {
@@ -747,8 +748,9 @@ impl P2PCore {
         }
     }
 
-    /// Runs the two timers. Called from the poll loop and from the UI's own
-    /// pen-up timer (`wb_tick`), so it does not depend on the poll cadence.
+    /// Runs the two timers. Called from the poll loop, after each stroke or
+    /// erase, and from the UI's pen-up timer (`whiteboardTick`), so it does not
+    /// depend on the poll cadence.
     pub(crate) fn wb_sweep(&mut self) {
         if self.wb_outbox.is_empty() {
             return;
@@ -862,7 +864,7 @@ impl P2PCore {
         self.wb_trim_tombstones(&board.key, &touched);
         Self::wb_commit(tx);
         for (page, id) in erased {
-            // The receiver drops a whole packet over this many erase records.
+            // The receiver drops a whole packet over this many bytes of erase records (9 per record).
             if self.wb_outbox.get(&board.key).map_or(false, |o| o.erased.len() >= MAX_TOMBSTONES * 9) {
                 self.wb_flush_ops(&board.key);
             }

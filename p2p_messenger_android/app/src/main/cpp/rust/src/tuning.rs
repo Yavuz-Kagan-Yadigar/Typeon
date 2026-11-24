@@ -37,7 +37,7 @@ pub(crate) fn pending_retry_at(first_attempt_at: u64, now: u64) -> u64 {
 
 /// Queue lifetime for `Handshake` and `IdentityExchange`, which is much longer. These two are `NetworkEnvelope`s, not
 /// `MessageContent`, so they cannot enter `awaiting_confirmation`, and this queue is their only retry path. A 20 s lifetime
-/// was too short: when the peer is offline, `gossipsub.publish` fails with `InsufficientPeers`, `HandshakeInit` is dropped
+/// was too short: when the peer is offline, every send fails, `HandshakeInit` is dropped
 /// after 20 s and never sent again, while the sender already holds a ratchet. The peer buffers the early packets and waits
 /// for a handshake that never arrives.
 /// Five minutes covers a peer that comes back within minutes. For longer outages, `maybe_redo_handshake` refreshes the
@@ -58,17 +58,17 @@ pub(crate) const INBOUND_DEDUP_MAX_ENTRIES: usize = 8192;
 pub(crate) const PAIRING_MAILBOX_TTL_MS: u64 = 15 * 60 * 1000;
 
 /// Minimum time between two handshake refreshes (see `maybe_redo_handshake`). A refresh resets the session (new ephemeral keys,
-/// new root key, new gossip topic), so it is not free. For a device that stays offline for hours, one new attempt every ten
+/// new root key, new mailbox id), so it is not free. For a device that stays offline for hours, one new attempt every ten
 /// minutes is the only way out of "my handshake never arrived".
 pub(crate) const HANDSHAKE_REDO_MIN_INTERVAL_MS: u64 = 10 * 60 * 1000;
 
-/// Keepalive uses a custom request-response protocol (`KeepAliveRequest`, `KeepAliveResponse`, `P2PBehaviour.keepalive`) instead of the
-/// stock `ping::Behaviour`. The stock one applies a single fixed interval to every connection, regardless of how long the connection
-/// has been healthy. Cellular radios stay in a high-power state for 5-15 s after any activity, so a fixed 2 s ping keeps the radio
-/// from ever idling while any peer is connected. This protocol widens the interval to `KEEPALIVE_IDLE_INTERVAL_MS` once a
-/// connection has stayed healthy for `KEEPALIVE_STABILIZE_MS`. A failure or a new connection drops it back to
-/// `KEEPALIVE_FAST_INTERVAL_MS` at once, so a new, unproven connection is still probed quickly. Liveness detection does not slow down.
-/// It only stops over-probing a connection that is already proven and quiet.
+// Keepalive uses a custom request-response protocol (`KeepAliveRequest`, `KeepAliveResponse`, `P2PBehaviour.keepalive`) instead of the
+// stock `ping::Behaviour`. The stock one applies a single fixed interval to every connection, regardless of how long the connection
+// has been healthy. Cellular radios stay in a high-power state for 5-15 s after any activity, so a fixed 2 s ping keeps the radio
+// from ever idling while any peer is connected. This protocol widens the interval to `KEEPALIVE_IDLE_INTERVAL_MS` once a
+// connection has stayed healthy for `KEEPALIVE_STABILIZE_MS`. A failure or a new connection drops it back to
+// `KEEPALIVE_FAST_INTERVAL_MS` at once, so a new, unproven connection is still probed quickly. Liveness detection does not slow down.
+// It only stops over-probing a connection that is already proven and quiet.
 /// How long a revoked own device keeps its connection, so the revoke notice sent to it is delivered first (`revoke_own_linked_device`).
 pub(crate) const REVOKE_DISCONNECT_DELAY_MS: u64 = 30_000;
 pub(crate) const KEEPALIVE_FAILURES_BEFORE_DISCONNECT: u32 = 3;
@@ -122,18 +122,15 @@ pub(crate) const KEEPALIVE_QUIET_PROTOCOL: &str = "/p2pmessenger/keepalive/1.1.0
 /// - Reliable: the peer answers only after it has applied the Acks. If there is no answer (timeout, dropped connection, or an older
 ///   version that does not know the protocol), the same Acks fall back to an encrypted packet, which the server can hold. Without a
 ///   connection or a server, the sender's own retry plus `reack_if_already_handled` covers the gap.
-/// - Efficient: a few bytes per batch, not a hybrid signature (Ed25519+ML-DSA), AEAD, a ratchet step and a gossip publish per Ack.
+/// - Efficient: a few bytes per batch, not a hybrid signature (Ed25519+ML-DSA), AEAD, a ratchet step and a send per Ack.
 ///   A group fan-out of dozens of Acks becomes one request. Not subject to the rate limit (like `file_chunks`).
 /// - Identity: the requester is identified by its Noise-authenticated `PeerId`. `device_to_peer_id` is filled only from packets with
 ///   a verified signature, so there are no forged Acks.
 pub(crate) const ACK_PROTOCOL: &str = "/p2pmessenger/ack/1.0.0";
 /// See `start_network`. Maximum time for one connection to be established (dial, Noise, Yamux). The libp2p builder's fixed 10 s was not enough over Tor.
 pub(crate) const SWARM_CONNECTION_TIMEOUT_SECS: u64 = 60;
-/// Direct delivery to a connected device. Before this, a connected device was reached only through gossipsub, which delivers only if it currently
-/// knows the peer subscribes to the topic. That knowledge is exchanged only when a peer's first connection opens, so connection churn (Tor, relay
-/// and direct paths replacing each other, mobile data) left one side with a live connection but a stale topic list. Publishes then failed with
-/// `InsufficientPeers` and went via the server, taking 5-16 s on the device. A request/response goes over the Noise-authenticated connection
-/// itself, and the response proves the peer got the bytes. Gossipsub and the server stay as the fallback.
+/// Direct delivery to a connected device. A request/response goes over the Noise-authenticated connection itself, and the response
+/// proves the peer got the bytes. The server stays as the fallback.
 pub(crate) const ENVELOPE_PROTOCOL: &str = "/p2pmessenger/envelope/1.0.0";
 /// Largest serialized envelope any path carries.
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
@@ -147,14 +144,14 @@ pub(crate) const MAX_SWARM_EVENTS_PER_TURN: u32 = 256;
 /// (well under `MAX_ENVELOPE_BYTES` and the server's deposit limit); a
 /// bigger sticker goes in several parts.
 pub(crate) const STICKER_SYNC_MAX_BYTES: usize = 768 * 1024;
-/// Most parts of one sticker (`MAX_STICKER_BYTES` / `STICKER_SYNC_MAX_BYTES`, rounded up).
+/// Upper bound on the parts of one sticker. `MAX_STICKER_BYTES` (4 MiB) in parts of `STICKER_SYNC_MAX_BYTES` needs six.
 pub(crate) const STICKER_SYNC_MAX_PARTS: usize = 8;
 /// Stickers being put together from parts at once; the oldest is dropped.
 pub(crate) const STICKER_PARTS_MAX_PENDING: usize = 16;
 pub(crate) const ACK_BATCH_MAX: usize = 256;
 pub(crate) const ACK_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// Upper bound of `known_relay_peers`. Matches the "about 10, most recently seen or most trusted" size of  (see the field's docs).
+/// Upper bound of `known_relay_peers` (see the field's docs).
 pub(crate) const MAX_KNOWN_RELAYS: usize = 10;
 /// See `ensure_relay_reservations`. A reservation that never gets a listen address (never accepted) is dropped after this time and requested again.
 pub(crate) const RELAY_RESERVATION_RETRY_MS: u64 = 2 * 60 * 1000;
@@ -234,11 +231,11 @@ pub(crate) const BULK_GIVEUP_COOLDOWN_MS: u64 = 300_000;
 /// Maximum size of the `contacts` table. The `NewContactTofu` arm of `evaluate_sender_device` is triggered both by the user's own
 /// QR or manual pairing, and by a one-sided `IdentityExchange` arriving unexpectedly on the mailbox topic (`p2p_msg_<own_fingerprint>`, always
 /// subscribed). The second case needs no local action: the sender only has to know the fingerprint, for example from a shared group,
-/// the DHT or a shared relay list. The one-sided QR flow needs this behaviour, so it is kept on purpose (see ). But without a limit,
+/// the DHT or a shared relay list. The one-sided QR flow needs this behaviour, so it is kept on purpose. But without a limit,
 /// an attacker who can create fresh identities for free could flood the contact list and the database (every record is also written to SQLite).
 /// Once the cap is reached, new TOFU records from identities never seen before are dropped silently. Devices of known contacts (
 /// `NewDeviceViaSignedAdd` / `UnverifiedNewDeviceAlert`) are not affected. Only brand new contacts stop. 500 is generous for the target
-/// audience (groups of friends, ) and still caps an attacker's cost.
+/// audience (groups of friends) and still caps an attacker's cost.
 pub(crate) const MAX_CONTACTS: usize = 500;
 
 /// Maximum frequency of sending a mutual `IdentityExchange` reply to one device. See `P2PCore.last_identity_exchange_reply`.
@@ -281,7 +278,7 @@ pub(crate) enum RateVerdict {
 /// Upper bound of `pending_device_alerts`, the same pattern as `known_relay_peers` and `early_packets`. The map was unbounded before. An attacker
 /// who copies a known contact's identity_id, without a signed DeviceAdd chain, could send "new device" packets with fresh keys over and over and grow
 /// the map without limit (memory and disk exhaustion, even if the user never accepts or rejects an alert). When the cap is reached, new alerts are
-/// dropped silently. A user with dozens of pending alerts gains nothing from one more, and the packet stays blocked per  regardless.
+/// dropped silently. A user with dozens of pending alerts gains nothing from one more, and the per-peer rate limit still applies to the packet.
 pub(crate) const MAX_PENDING_DEVICE_ALERTS: usize = 200;
 
 /// `reconnect_sweep` runs at this interval (self-healing reconnect). `poll_events` is called regularly, so no separate timer is needed. The sweep
@@ -311,13 +308,13 @@ pub(crate) const SIBLING_BACKFILL_SINCE_MARGIN_MS: u64 = 10 * 60_000;
 /// Maximum messages requested or sent per contact or group during a backfill.
 pub(crate) const SIBLING_BACKFILL_PER_CONVERSATION: u32 = 30;
 /// Multi-device self-repair: interval at which the device list (roster) is sent again to sibling devices.
-/// Reason (real failure): `handle_handshake_init` rejects a packet from an unknown sender ("Unknown sender device"). If device B has never learned
+/// Reason (real failure): `process_handshake_init` rejects a packet from an unknown sender ("Unknown sender device"). If device B has never learned
 /// device C, the two can never establish a session, so C cannot introduce itself to B either. Only a third device that knows both (for example the
 /// primary that did the linking) can break that asymmetry. If the single announcement during linking (`DeviceSync`) is missed, as happened, nothing
 /// recovered it, and a setup with three or more devices stayed incomplete for good. Now the roster is sent again whenever a link to a sibling comes up,
 /// rate-limited by this interval. The load is low: `build_sync_payload` leaves avatars out on purpose (see that function), so only keys and names go.
 pub(crate) const SIBLING_ROSTER_SYNC_INTERVAL_MS: u64 = 60 * 60 * 1000;
-/// Maximum total records in one `SiblingHistoryResponse`. It must stay well below the gossip 1 MB limit (see `max_transmit_size` in `start_network`).
+/// Maximum total records in one `SiblingHistoryResponse`. It must stay well below the 1 MiB envelope limit (`MAX_ENVELOPE_BYTES`).
 pub(crate) const SIBLING_BACKFILL_MAX_ENTRIES: usize = 300;
 /// `sync_roster_to` skips roster parts a sibling already got; once this long after the last full send, every part goes again.
 pub(crate) const ROSTER_RESEND_ALL_MS: u64 = 24 * 60 * 60 * 1000;
@@ -329,8 +326,8 @@ pub(crate) const SIBLING_JOURNAL_REPLAY_MAX: usize = 200;
 
 /// Delivery limit (`MessageTooLarge`, see `PublishFailure`): the total text payload of one `HistorySyncResponse` or `SiblingHistoryResponse` must not
 /// exceed this many bytes. A row-count limit alone was not enough, because individual message texts can be arbitrarily long. 300 long messages
-/// easily exceed the gossip `max_transmit_size` of 1 MB, before the hybrid signature and ratchet overhead are added. 512 KB leaves room below the
-/// 1 MB limit. The part that is cut off is fetched later by paging.
+/// easily exceed the 1 MiB envelope limit (`MAX_ENVELOPE_BYTES`), before the hybrid signature and ratchet overhead are added. 512 KB leaves room below
+/// that limit. The part that is cut off is fetched later by paging.
 pub(crate) const HISTORY_SYNC_MAX_TEXT_BYTES: usize = 512 * 1024;
 /// See `HISTORY_SYNC_MAX_TEXT_BYTES`. The `limit` field of a request is controlled by the other side, so the row count is limited separately too.
 pub(crate) const HISTORY_SYNC_MAX_MESSAGES: u32 = 200;
@@ -376,7 +373,7 @@ pub(crate) const DURABLE_PARK_RELOAD_MS: u64 = 60_000;
 /// Rate-limited, so a full SQL SUM is not run on every `poll_events` turn.
 pub(crate) const HISTORY_STORAGE_SWEEP_INTERVAL_MS: u64 = 30_000;
 
-/// gossipsub gives no ordering guarantee. The FIRST message of a chat can arrive before the `HandshakeInit` that makes it decryptable. Before, in
+/// Delivery gives no ordering guarantee. The FIRST message of a chat can arrive before the `HandshakeInit` that makes it decryptable. Before, in
 /// that case `receive_message` failed with "No ratchet session for sender" and dropped the packet. A DM recovered through the ack retry, but group
 /// messages had no retry, so they were lost for good. Such packets are now buffered here and replayed once the handshake completes.
 /// The buffer is bounded (memory and DoS protection): at most `MAX_EARLY_PACKETS_PER_PEER` per peer, and entries older than `EARLY_PACKET_TTL_MS` are pruned.
@@ -396,7 +393,7 @@ pub(crate) const UNKNOWN_GROUP_HOLD_PER_GROUP: usize = 64;
 /// `MAX_PENDING_GROUP_MESSAGES_PER_MEMBER`. The limit counts packets, and each message is small.
 pub(crate) const MAX_EARLY_PACKETS_PER_PEER: usize = 200;
 
-/// Fix: gossipsub gives no ordering guarantee. An `Edit` or `Delete` can reach the other side before the `Text` it targets. The target row was
+/// Delivery gives no ordering guarantee. An `Edit` or `Delete` can reach the other side before the `Text` it targets. The target row was
 /// missing, so `message_owned_by_sender` returned `false`, and the packet was acked and rejected for good. When no row exists at all (as opposed
 /// to a row owned by someone else), the packet is now buffered and retried once the target `Text` is archived (see `pending_edits_deletes` and
 /// `replay_buffered_edits_deletes`).
@@ -426,7 +423,7 @@ pub(crate) const HANDSHAKE_MAX_AGE_MS: u64 = TEXT_RETRY_GIVE_UP_MS;
 /// Two inits created this close together (by their own timestamps, not by when
 /// they arrive) are one simultaneous handshake. See `process_handshake_init`.
 /// Colliding inits are created seconds apart. A real re-handshake comes much
-/// later (redo after 25 min).
+/// later (a redo waits at least `HANDSHAKE_REDO_MIN_INTERVAL_MS`).
 pub(crate) const HANDSHAKE_COLLISION_WINDOW_MS: u64 = 90 * 1000;
 /// See `note_undecryptable`.
 pub(crate) const UNDECRYPTABLE_BEFORE_REHANDSHAKE: u32 = 3;
@@ -445,9 +442,9 @@ pub(crate) const DEFAULT_BOOTSTRAP_RELAYS: &[&str] = &[
     // "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWExampleReplaceWithRealAddress",
 ];
 
-/// Deliberate deviation, reliable delivery: packets that carry `Text` (outside groups), `Edit`, `Delete` or `HistorySyncRequest` are resent at
+/// Deliberate deviation, reliable delivery: packets that carry `Text`, `Edit`, `Delete` or `HistorySyncRequest` are resent at
 /// these intervals until the peer acknowledges them (an `Ack`, or a direct `HistorySyncResponse` for HistorySyncRequest). Exponential backoff,
-/// capped at `MAX`. A local `gossipsub.publish` success does not guarantee the peer really received it (see the `awaiting_confirmation` field). So
+/// capped at `MAX`. A local send success does not guarantee the peer really received it (see the `awaiting_confirmation` field). So
 /// unlike the old `pending_envelopes` queue, there is no upper time limit here. Retries continue until the peer confirms.
 pub(crate) const ACK_RETRY_INITIAL_MS: u64 = 15_000;
 pub(crate) const ACK_RETRY_MAX_MS: u64 = 120_000;
@@ -504,7 +501,7 @@ pub(crate) const MAX_GROUP_MEMBERS: usize = 256;
 /// about 70 KB/s download, about 12 KB/s upload. But a FIXED depth was also wrong. On the upload path, going from 6 to 16 in-flight 256 KiB chunks
 /// dropped throughput from about 180 KB/s to about 50 KB/s. Holding 16 x 256 KiB on a Tor circuit of about 200 KB/s builds up queue delay
 /// (bufferbloat), which pushed the round trip to 24 s and ran into the `request_timeout` limit (30 s then, `BLOB_REQUEST_TIMEOUT_MS` now).
-/// So the window adapts, roughly AIMD: +1 on each successful chunk while the round trip is under target, halved on a timeout or error.
+/// So the window adapts, roughly AIMD: +1 on each successful chunk while the round trip is under target, halved on a stall.
 pub(crate) const DOWNLOAD_WINDOW_START: usize = 4;
 pub(crate) const DOWNLOAD_WINDOW_MIN: usize = 2;
 /// Wait before a failed chunk request, or one the server answered with "not

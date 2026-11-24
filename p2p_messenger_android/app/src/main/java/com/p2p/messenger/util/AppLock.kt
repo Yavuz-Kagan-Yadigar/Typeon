@@ -139,8 +139,8 @@ object AppLock {
         unlocked = true
     }
 
-    /** Stored, so a force stop does not hand out fresh attempts. Time since boot, not the wall clock: the user can set the
-     *  wall clock forward. */
+    /** Failed attempts are stored, so a force stop does not reset them. The wait is measured with elapsed time since boot.
+     *  The wall clock is used only to re-anchor the wait after a reboot (see `retryWaitSeconds`). */
     private const val FREE_ATTEMPTS = 5
     private const val KEY_FAILED_ATTEMPTS = "app_lock_failed_attempts"
     private const val KEY_WAIT_FROM = "app_lock_wait_from_elapsed"
@@ -294,7 +294,7 @@ object AppLock {
     }
 
     /**
-     * Called from the `onStart` of EVERY activity (see P2PApplication.onActivityStarted). It is not only in MainActivity,
+     * Called from `onActivityStarted` of EVERY activity (see P2PApplication). It is not only in MainActivity,
      * so that opening ChatActivity straight from a notification cannot skip the lock.
      *
      * If no password has been set yet, the same screen opens in CREATE mode. A state with no password cannot be permanent:

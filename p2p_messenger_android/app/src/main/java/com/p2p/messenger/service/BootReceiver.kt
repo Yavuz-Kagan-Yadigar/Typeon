@@ -8,12 +8,10 @@ import androidx.core.content.ContextCompat
 import com.p2p.messenger.P2PLib
 
 /**
- * Brings the network back after a reboot.
+ * Starts the service after a reboot or an app update, so the network comes back without the user opening the app.
  *
- * Before this fix, after the phone rebooted the app stayed completely dead. No message was received until the user opened the app by hand. The only
- * fallback was `P2PRetryWorker`, which runs hourly. It calls `startForegroundService` from the BACKGROUND, and Android 12+ (API 31) refuses that with
- * `ForegroundServiceStartNotAllowedException` when the app is not exempt from battery optimisation. So the worst case was: the phone rebooted overnight,
- * and no messages had arrived by morning.
+ * `P2PRetryWorker` is only an hourly fallback, and on Android 12+ (API 31) it cannot start a foreground service from the background unless the app
+ * is exempt from battery optimisation.
  *
  * `ACTION_BOOT_COMPLETED` is one of the few broadcasts that Android explicitly exempts from the foreground service start restrictions. So starting from
  * here does not depend on the battery exemption, and it always works.
@@ -28,8 +26,7 @@ class BootReceiver : BroadcastReceiver() {
             Intent.ACTION_MY_PACKAGE_REPLACED -> {}
             else -> return
         }
-        // Opening the database on the main thread held up every other boot
-        // receiver of the process (and can run into the broadcast ANR limit).
+        // Opening the database can be slow: it runs on a thread, and the receiver returns at once.
         val pending = goAsync()
         val app = context.applicationContext
         Thread {

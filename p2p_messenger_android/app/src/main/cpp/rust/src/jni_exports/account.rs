@@ -89,7 +89,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_pbkdf2Sha256<'local>(mut en
         if pw.is_empty() || salt.is_empty() {
             Default::default()
         } else if let Some(it) = std::num::NonZeroU32::new(iterations.clamp(0, 5_000_000) as u32) {
-            // bounded like `out_len` (the app uses 300 000).
+            // bounded like `out_len` (the Kotlin `AppLock.ITERATIONS` is 600 000; the cap is 5 000 000).
             ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, it, &salt, pw.as_bytes(), &mut out[..]);
             out
         } else {

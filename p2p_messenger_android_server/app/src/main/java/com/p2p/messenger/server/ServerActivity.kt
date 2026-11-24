@@ -346,7 +346,8 @@ class ServerActivity : AppCompatActivity() {
                     setOnClickListener { confirmRevoke(id) }
                 })
             }
-            // The user's decision: block sits NEXT TO revoke. Revoke lets the device come back with a fresh invite. Block does not.
+            // Revoke and block both put the device's enrolment key on the block list (see `Store::revoke_enrollment`). Block is shown
+            // separately so the operator can lift it again with unblock.
             row.addView(Button(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
                 setText(if (blocked) R.string.action_unblock else R.string.action_block)
                 setOnClickListener { if (blocked) unblock(id) else confirmBlock(id) }
@@ -379,8 +380,8 @@ class ServerActivity : AppCompatActivity() {
     }
 
     /**
-     * Blocking is different from revoking. It is put on the enrolment key, so the device cannot come back even with a fresh invite. That is why it has its own
-     * confirmation text.
+     * Blocking puts the enrolment key on the block list, so the device cannot come back even with a fresh invite. Revoke does the same; the two
+     * confirmation texts differ only in wording.
      */
     private fun confirmBlock(enrollmentId: String) {
         AlertDialog.Builder(this)
@@ -555,7 +556,7 @@ class ServerActivity : AppCompatActivity() {
         // The service is NOT stopped, only the native core: it stays in the
         // foreground through the copy (the process is not killable half-way)
         // and can bring the core back with the app in the background.
-        // files this move created; a failure removes only those, not what was in the target before.
+        // Files this move created; a failure removes only those, not what was in the target before.
         val created = java.util.concurrent.CopyOnWriteArrayList<java.io.File>()
         Thread {
             val error = try {

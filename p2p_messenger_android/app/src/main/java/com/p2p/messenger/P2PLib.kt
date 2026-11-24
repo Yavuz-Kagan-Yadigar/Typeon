@@ -56,8 +56,8 @@ object P2PLib {
     external fun ownConnectionStatus(): String
     /** Polls the network; returns any messages decrypted during this poll. */
     external fun pollNetwork(): Array<String>
-    /** The address the swarm actually listens on, which the other side can dial (ending in `/p2p/<peer_id>`). The rendezvous_node of the QR and manual
-     *  pairing flow must be this. It can return an empty string until the first few pollNetwork turns after startNetwork (no listen address reported yet). */
+    /** The onion address the other side can dial (`/dns/<host>.onion/tcp/<port>/p2p/<peer_id>`). The rendezvous_node of the QR and manual
+     *  pairing flow must be this. It is an empty string while the onion service is not published yet (Tor bootstrapping); a LAN or listen address is never returned. */
     external fun getNodeAddress(): String
 
     // --- Sections 1.3 and 1.4: QR and manual pairing ---
@@ -116,7 +116,7 @@ object P2PLib {
     /**
      * Blocks a contact. This differs from `revokeContactDevice` on purpose: revoke shuts down ONE device, and the person can come back with a new device.
      * A block targets the IDENTITY: no packet from any of their devices is accepted, no connection is made to any of them, and not even a 'new device' alert is raised.
-     * The only way out of a block is an in-person re-pairing (QR or manual code).
+     * A block is lifted by [unblockIdentity] on the user's explicit request, or by a face-to-face re-pairing (QR or manual code).
      */
     external fun blockIdentity(identityId: String): String
 
@@ -136,10 +136,6 @@ object P2PLib {
     external fun setPowerSave(enabled: Boolean)
 
     /**
-     * Gives FULL trust to a contact met through a group: removes the "added via group, not verified" mark in the UI. The encryption was already the same;
-     * this only changes the trust indicator.
-     */
-    /**
      * A contact's SAFETY CODE, which is what gets compared when the user marks a contact as verified.
      *
      * The code is derived from the contact's device fingerprint, and that fingerprint is a digest of four public keys. A matching code on both sides means both
@@ -148,6 +144,10 @@ object P2PLib {
      */
     external fun contactSafetyCode(identityId: String): String
 
+    /**
+     * Gives FULL trust to a contact met through a group: removes the "added via group, not verified" mark in the UI. The encryption was already the same;
+     * this only changes the trust indicator.
+     */
     external fun trustContact(contactId: String): String
 
     /**
@@ -159,7 +159,7 @@ object P2PLib {
     external fun resendGroupToAll(groupId: String): String
 
     // --- Pending messages (not yet acknowledged) ---
-    //     See lib.rs `awaiting_confirmation`, the `regen_content` extension in types.rs, and the SettingsFragment "Pending Messages" screen.
+    //     See `awaiting_confirmation` in the Rust core, the `regen_content` extension in types.rs, and the SettingsFragment "Pending Messages" screen.
     /** Called when the app comes to the foreground (see P2PApplication's foreground detection and network.rs `retry_all_pending_now`). It retries at once,
      *  without waiting for the exponential back-off interval. */
     external fun retryAllPendingNow()
@@ -172,9 +172,6 @@ object P2PLib {
     external fun retryPendingMessageNow(messageId: String): Boolean
 
     // --- Network reconnect after a change of network ---
-    /** Reports a network interface change (Wi-Fi and cellular switch, or the network disappearing and coming back). See P2PService
-     *  `observeNetworkChangesForReconnect` and session.rs `reconnect_all_known_now`. For ALL known active devices, it tries to reconnect at once,
-     *  ignoring the back-off history. */
     /** Poll thread: blocks until a network event happens, another call needs the core, or `timeoutMs` elapses (see Rust `wait_for_network_activity`).
      *  It replaces a fixed `postDelayed` wait, so messages do not wait for a poll turn. */
     external fun waitForNetworkActivity(timeoutMs: Long)
@@ -183,6 +180,9 @@ object P2PLib {
     external fun wakePoll()
     /** PBKDF2-HMAC-SHA256 (Rust, ring). See `AppLock.derive`. Does not take the core lock. */
     external fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, outLen: Int): ByteArray
+    /** Reports a network interface change (Wi-Fi and cellular switch, or the network disappearing and coming back). See P2PService
+     *  `observeNetworkChangesForReconnect` and session.rs `reconnect_all_known_now`. For ALL known active devices, it tries to reconnect at once,
+     *  ignoring the back-off history. */
     external fun notifyNetworkChanged()
 
     // --- Section 3: Messaging ---

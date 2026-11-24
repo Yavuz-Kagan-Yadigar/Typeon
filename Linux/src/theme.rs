@@ -20,8 +20,9 @@
 //!
 //! ## Shape
 //!
-//! Material 3's shape scale (4 / 8 / 12 / 16 / 28), plus fully rounded "pill" geometry
-//! for everything interactive.
+//! Fully rounded "pill" geometry for everything interactive. Containers use
+//! 20 px corners, and chat bubbles use 20 px with small joins where a run of
+//! bubbles meets.
 
 use crate::prefs::Prefs;
 
@@ -276,7 +277,7 @@ pub fn stylesheet(appearance: &Appearance) -> String {
     };
 
     // Concave fillets and the matching outer corners at a bubble-width step,
-    // in the even radii `chat::seam_radius` can return.
+    // in the even radii `seam_radius` (ui/chat/message_list.rs) can return.
     let mut rd_css = String::new();
     let mut fillet_css = String::new();
     for r in (2..=12).step_by(2) {
@@ -293,7 +294,7 @@ pub fn stylesheet(appearance: &Appearance) -> String {
             ));
         }
     }
-    // Screen-space shade steps (see chat.rs `update_shading`): white tint at the
+    // Screen-space shade steps (see message_list.rs `update_shading`): white tint at the
     // top reaching well down the screen, black tint only near the bottom.
     // Bubbles take `background-color`; fillets use `color` (currentColor fill).
     for (role, base) in [("mine", "@m3_primary_container"), ("theirs", "@m3_surface_high")] {
@@ -641,9 +642,6 @@ avatar {{ border-radius: 9999px; }}
 .bubble.sq-tr {{ border-top-right-radius: 0; }}
 .bubble.sq-bl {{ border-bottom-left-radius: 0; }}
 .bubble.sq-br {{ border-bottom-right-radius: 0; }}
-/* Narrows the gap between bubbles of the same group (see `.chat-messages`). */
-/* (GTK CSS rejects negative margins; the gap is set in chat.rs.) */
-.bubble-row-continued {{ }}
 /* Concave notch at a seam where the width changes (see `mark_group_seam`). GTK CSS has no
    ::before or ::after pseudo-elements, so the notch is a separate widget. Its colour matches the
    background. With a wallpaper set (see the `wallpaper` variable) it sits over the texture as a

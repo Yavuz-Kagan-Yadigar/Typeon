@@ -23,8 +23,7 @@ import com.p2p.messenger.R
 
 /**
  * Classic HSV picker, with a Saturation/Value (SV) square and a Hue bar, plus manual hex entry. It replaces a fixed colour swatch grid. No external
- * library is added (the Gradle build cannot be verified in this environment; see the other notes in this file about avoiding new dependencies). It is
- * drawn entirely by hand with `Canvas` and `Shader`.
+ * library is used. It is drawn entirely by hand with `Canvas` and `Shader`.
  */
 private class SvPickerView(context: Context) : View(context) {
     var hue: Float = 0f

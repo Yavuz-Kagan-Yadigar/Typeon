@@ -16,10 +16,9 @@ import javax.crypto.spec.GCMParameterSpec
  * The Cipher object runs inside the Keystore. The Keystore key itself is never passed to the Rust/JNI side. Only DATA encrypted or decrypted
  * with it crosses over (identity secret keys, the history key).
  *
- * Note: the post-quantum keys (Kyber, Dilithium) and X25519/Ed25519 keys are NOT algorithms the Android Keystore supports (it supports only
- * EC, RSA and AES). So those keys cannot be generated in the Keystore and operated there. Instead, envelope encryption is used. The real secret
- * keys are generated normally on the Rust side. Before being written to disk, they are encrypted with this AES key. A bare secret key never
- * reaches the disk; only the ciphertext does.
+ * The post-quantum keys (Kyber, Dilithium) are not Keystore algorithms, so they cannot live in the Keystore. Envelope encryption is used instead:
+ * the secret keys are generated on the Rust side, and they are encrypted with this AES key before being written to disk. Only the ciphertext
+ * reaches the disk.
  */
 object KeystoreCrypto {
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
@@ -120,7 +119,6 @@ object KeystoreCrypto {
         return cipher.doFinal(ciphertext)
     }
 
-    /** Reports whether the key really is kept in hardware on this device. It can be shown on a diagnostics or settings screen. */
     private val keyFailureShown = java.util.concurrent.atomic.AtomicBoolean(false)
 
     /** A stored key could not be opened, so history or session state is not
@@ -134,6 +132,7 @@ object KeystoreCrypto {
         }
     }
 
+    /** Whether the key is kept in secure hardware on this device (for diagnostics). */
     fun isHardwareBacked(alias: String = ALIAS_IDENTITY): Boolean {
         return try {
             val key = keyStore.getKey(alias, null) as? SecretKey ?: return false

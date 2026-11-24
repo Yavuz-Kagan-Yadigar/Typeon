@@ -465,10 +465,10 @@ impl CallUi {
     }
 
     fn stop_media(&self) {
-        // H131/M147: dropping joins the media threads (the rx worker can sit
-        // in a 200 ms `core::call_recv`, the audio/video senders in 100 ms
-        // `try_pull_sample` polls), which froze the GTK thread through every
-        // hangup and every remote end. `CallMedia` is plain `Send` data
+        // Dropping joins the media threads. A frame wait can last 200 ms
+        // and the sample polls use 100 ms timeouts, so joining on the GTK
+        // thread froze the window through every hangup and every remote end.
+        // `CallMedia` is plain `Send` data
         // (Arc + join handles + GStreamer objects), so hand the teardown to a
         // worker thread instead — the core owns the call state either way.
         if let Some(media) = self.media.borrow_mut().take() {

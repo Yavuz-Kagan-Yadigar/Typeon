@@ -39,8 +39,8 @@ class MergedBubbleDecoration(
 
     // The colour gradient runs from the top of the list to the bottom. Upper bubbles are lighter, lower bubbles keep the current
     // colour. The colour comes from one vertical `LinearGradient` stretched over the whole list, not from each bubble's own
-    // background. So a bubble's tone changes with its position on screen as it scrolls. The shader is rebuilt once per frame,
-    // and only when the height or the colours change.
+    // background. So a bubble's tone changes with its position on screen as it scrolls. The shaders are rebuilt only when
+    // the list height or the colours change.
     private var mineShader: android.graphics.LinearGradient? = null
     private var theirsShader: android.graphics.LinearGradient? = null
     private var shaderHeight = 0
@@ -271,13 +271,13 @@ class MergedBubbleDecoration(
         val outerR = minOf(outer, minHeight / 2f, minWidth / 2f)
         path.moveTo(outerR, top)
         path.lineTo(widths[0] - outerR, top)
-        corner(widths[0] - outerR, top + outerR, outerR, -90f, 90f)  // // top outer corner
+        corner(widths[0] - outerR, top + outerR, outerR, -90f, 90f)  // top outer corner
 
         for (i in 0 until memberCount) {
             val current = widths[i]
             if (i == memberCount - 1) {
                 path.lineTo(current, bottom - outerR)
-                corner(current - outerR, bottom - outerR, outerR, 0f, 90f)  // // bottom outer corner
+                corner(current - outerR, bottom - outerR, outerR, 0f, 90f)  // bottom outer corner
                 break
             }
             val junction = bottoms[i]
@@ -307,9 +307,9 @@ class MergedBubbleDecoration(
         }
 
         path.lineTo(outerR, bottom)
-        corner(outerR, bottom - outerR, outerR, 90f, 90f)  // // bottom aligned corner
+        corner(outerR, bottom - outerR, outerR, 90f, 90f)  // bottom aligned corner
         path.lineTo(0f, top + outerR)
-        corner(outerR, top + outerR, outerR, 180f, 90f)  // // top aligned corner
+        corner(outerR, top + outerR, outerR, 180f, 90f)  // top aligned corner
         path.close()
 
         // From u space to screen coordinates.

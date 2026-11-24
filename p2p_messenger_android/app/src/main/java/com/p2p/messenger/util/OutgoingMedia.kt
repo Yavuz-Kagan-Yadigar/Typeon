@@ -37,7 +37,7 @@ import kotlinx.coroutines.launch
 object OutgoingMedia {
     private const val TAG = "OutgoingMedia"
     private const val JPEG_QUALITY = 90
-    /** Same cap as the core's `attachments::MAX_IMAGE_PIXELS`: a larger
+    /** Same cap as the core's `attachments::jxl_codec::MAX_IMAGE_PIXELS`: a larger
      *  hi-res image becomes JPEG, the receiver could not open the JPEG XL. */
     private const val MAX_JXL_PIXELS = 24_000_000L
     private const val MAX_ANIM_FRAMES = 300

@@ -147,7 +147,7 @@ impl ServerCore {
         // once the last hour's enrollment count reaches `MAX_PUBLIC_ENROLLMENTS_PER_HOUR`. The window counts ALL
         // enrollments, including those opened with a counted invite. The aim is to limit the server's enrollment
         // rate, not one code. The cap is well above the join rate of a real group, and low for an automated flood.
-        // The operator can close the code at once with `rotate_join_code`. The cap is checked BEFORE the counter is
+        // The operator can close the code at once by rotating it (`public_join_token` with rotate). The cap is checked BEFORE the counter is
         // consumed, so a refused attempt must not spend the invite's use.
         if self.store.invite_uses_left(hash.as_slice(), now) == Some(-1) {
             let since = now - 60 * 60 * 1000;
@@ -324,8 +324,8 @@ impl ServerCore {
         match req {
             ServerRequest::Register { add, drop, proofs } => {
                 // Only a proof for an id in `add` is verified, and only one with a valid signature reaches the store.
-                // Each proof is a hybrid verify. Without a server-wide budget, 64 enrollments times 64 proofs would pin
-                // the CPU.
+                // Each proof is a hybrid verify. The per-peer share bounds the CPU: `max_enrollments` peers times one
+                // share, not a server-wide pool (see `REGISTER_VERIFIES_PER_MINUTE`).
                 let checks = proofs.iter().filter(|p| add.contains(&p.mailbox)).count() as u32;
                 if checks > 0 && !self.verify_budget(peer, VerifyPool::Register, checks) {
                     return ServerResponse::Err(ServerErrorCode::RateLimited);
@@ -378,7 +378,8 @@ impl ServerCore {
                     return ServerResponse::Err(ServerErrorCode::TooLarge);
                 }
                 // Depositing into a mailbox that is not registered tells the client "this recipient is not on my
-                // server". That sends the traffic straight to gossipsub, so no round trip is wasted on every message.
+                // server". The client then delivers without this server for a while (its `UnknownMailbox` pause),
+                // so no round trip is wasted on every message.
                 if !self.store.mailbox_has_other_reader(&mailbox, &e.enrollment_id) {
                     return ServerResponse::Err(ServerErrorCode::UnknownMailbox);
                 }
@@ -479,8 +480,9 @@ impl ServerCore {
                 if e.bytes_archive as u64 > limits.max_archive_bytes {
                     return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
                 }
-                // See `total_budget_exceeded`. Unlike mail, the archive has no TTL: once written it stays until an
-                // `ArchivePurge` arrives. It is the largest contributor to the total ceiling.
+                // See `total_budget_exceeded`. Unlike mail (`mailbox_ttl_ms`, 14 days by default), the archive lives 13 months after its last write
+                // (`ARCHIVE_TTL_MS`, swept in `maybe_sweep`) or until an `ArchivePurge` arrives. It is the largest
+                // contributor to the total ceiling.
                 let incoming: usize = records.iter().map(store::archive_row_bytes).sum();
                 if self.total_budget_exceeded(incoming, false) {
                     warn!("Total disk budget full, archive write rejected");

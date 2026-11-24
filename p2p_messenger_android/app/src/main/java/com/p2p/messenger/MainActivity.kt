@@ -96,7 +96,7 @@ class MainActivity : AppCompatActivity() {
             contentDescription = getString(R.string.msg_loading)
         })
         lifecycleScope.launch {
-            // 0 = no database, 1 = identity stored (secrets loaded), 2 = first start
+            // 0 = no database, 1 = identity stored (secrets loaded), 2 = first start, 3 = identity stored but its secrets could not be loaded
             val state = withContext(Dispatchers.IO) {
                 if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) 0
                 else if (P2PLib.hasStoredIdentity()) (if (IdentityManager.loadIfPresent(applicationContext)) 1 else 3)
@@ -461,12 +461,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Asks the user to disable Android's battery optimisation for this app. It is asked on the first
-     * start only, right after a NEW identity is created. Existing users are not asked again, because
-     * `showDeviceNameDialog` runs only once in this flow.
+     * Asks the user to disable Android's battery optimisation for this app. It runs on every start and
+     * right after a NEW identity is created, but after each prompt the question is not asked again for
+     * one day (see the `battery_prompt_last_ms` check below).
      *
      * The app depends on a long-running foreground service and a background delivery and retry loop
-     * (see P2PService and lib.rs `awaiting_confirmation`). Aggressive OEM battery management (Doze,
+     * (see P2PService and `awaiting_confirmation` in the Rust core). Aggressive OEM battery management (Doze,
      * per-app background restrictions) can delay that loop, and messages then look stuck.
      * `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` shows a single system dialog with one tap
      * ("Allow" / "Deny"). That is less friction than searching for a toggle in the settings list.
@@ -523,8 +523,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
-        // Asking on every start would be annoying. If the user declined, the question is not asked again
-        // for one day. (If the exemption is already granted, it was left above.)
+        // Asking on every start would be annoying, so after a prompt the question is not asked again for
+        // one day. (If the exemption is already granted, it was left above.)
         val prefs = getSharedPreferences("p2p_settings", Context.MODE_PRIVATE)
         val lastAsked = prefs.getLong("battery_prompt_last_ms", 0L)
         val now = System.currentTimeMillis()
@@ -659,8 +659,8 @@ class MainActivity : AppCompatActivity() {
                 shownAlertFingerprints.remove(fingerprint)
             }
             // Rejecting closes only THIS alert. If the same device sends packets again, the
-            // alert comes back. Blocking is permanent: no packet from any device of that identity is accepted
-            // again, and it is lifted only by an in-person re-pairing.
+            // alert comes back. Blocking is persistent: no packet from any device of that identity is accepted
+            // again, until the user unblocks it in Contacts or re-pairs in person.
             .setNeutralButton(R.string.action_block) { _, _ ->
                 answerDeviceAlert(fingerprint, accept = false)
                 val identityId = alert.optString("identity_id", "")

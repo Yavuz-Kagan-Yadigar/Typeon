@@ -10,8 +10,8 @@ import com.p2p.messenger.R
 import com.p2p.messenger.util.formatAbsoluteTime
 
 /**
- * The "pending messages" list in Settings: messages that have not been acknowledged by the other side yet (see lib.rs `awaiting_confirmation`
- * and types.rs `regen_content`). See `PendingMessagesActivity`. The expected size is small (a few items in typical use), so it uses the same simple
+ * The "pending messages" list in Settings: messages that have not been acknowledged by the other side yet (see `awaiting_confirmation`
+ * in the Rust core and `regen_content` in types.rs). See `PendingMessagesActivity`. The expected size is small (a few items in typical use), so it uses the same simple
  * pattern as `SimpleChatAdapter`: a plain list with a targeted `notifyItemRemoved`, not `ListAdapter` / `DiffUtil`.
  */
 class PendingMessagesAdapter(

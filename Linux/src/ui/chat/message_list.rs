@@ -5,7 +5,7 @@ use super::*;
 // --- rendering ---
 
 impl ChatView {
-    /// a live event without any id would key an empty-string bubble —
+    /// A live event without any id would key an empty-string bubble:
     /// two such messages then collide on `""` and the second silently
     /// overwrites the first's text in place. Mint a unique view-local key
     /// instead. It is not derivable again after a `reload()` (where the
@@ -65,7 +65,7 @@ impl ChatView {
                 // The position a message will go to (and so which bubble counts as the one before it) must be known BEFORE
                 // `build_bubble`, because the group state affects the bubble's OWN top corners. Only the PREVIOUS bubble is looked
                 // at. If an out-of-order (late) message lands between, the group state of the bubble after it is not recomputed in
-                // this pass (see the "cheap method" note at the top of the file). A rare edge case. The common case, appending at the
+                // this pass (see the "cheap method" note at the top of `chat/mod.rs`). A rare edge case. The common case, appending at the
                 // end, is handled exactly.
         let order = self.order.borrow();
         let position = order
@@ -404,20 +404,16 @@ impl ChatView {
             skin.remove_css_class("bubble");
             skin.remove_css_class(if entry.mine { "bubble-mine" } else { "bubble-theirs" });
         }
-                // If `insert_entry` decided this bubble is in the same group as the one before, its top corners shrink and the gap
-                // narrows. The same class also overrides the tail corner that `.bubble-mine` carries on its own (see theme.rs), with
-                // higher specificity, so `continued-bottom` does not need to remove anything.
         if expire_label.is_some() {
             skin.add_css_class("disappear");
             self.start_disappear_tick();
         }
-        if continued_top {
-            overlay.add_css_class("bubble-row-continued");
-        } else {
+        // `continued_top` (this bubble joins the previous one's run, see `insert_entry`) leaves the 6 px top margin off.
+        // Corner shapes come from the `sq-*`/`rd-*` classes that `mark_group_seam` adds later.
+        if !continued_top {
             overlay.set_margin_top(6);
         }
-                // The measurement is taken here, with the Clamp's upper limit already applied (not the raw `skin`). That way
-                // `mark_group_seam` does not need a second `measure()` call, which could be wrong at that moment.
+        // Measured on the overlay, so the Clamp's upper limit is already applied (not the raw `skin`).
         let content_width = overlay.measure(gtk::Orientation::Horizontal, -1).1;
         let root: gtk::Widget = overlay.clone().upcast();
 
@@ -484,13 +480,10 @@ impl ChatView {
         })
     }
 
-        /// Called after `current` has just joined `previous`'s run. It marks that `previous` is no longer the END of the group
-        /// (see `continued-bottom`). If the two widths differ noticeably, it also marks a small notch that softens the seam
-        /// between them.
-        /// `current` just joined `previous`'s run. The join is drawn like the phone version: the edge both bubbles are aligned to
-        /// stays straight (square corners). Where their widths differ, the wider bubble keeps its outer (convex) corner, while the
-        /// narrower one's corner becomes square, with a concave fillet filling the inside corner between them. The widths are read
-        /// from the real allocation once the rows have been laid out. A measure at build time was off by several pixels.
+    /// `current` just joined `previous`'s run. The join is drawn like the phone version: the edge both bubbles are aligned to
+    /// stays straight (square corners). Where their widths differ, the wider bubble keeps its outer (convex) corner, while the
+    /// narrower one's corner becomes square, with a concave fillet filling the inside corner between them. The widths are read
+    /// from the real allocation once the rows have been laid out (a measure at build time is off by several pixels).
     pub(super) fn mark_group_seam(&self, previous: &Rc<Bubble>, current: &Rc<Bubble>) {
         // Time and ticks only on the last bubble of a run, like the phone.
         previous.meta.set_visible(false);
@@ -569,8 +562,8 @@ impl ChatView {
 }
 
 /// The content box of a bubble. Its margins are the bubble's padding: CSS
-/// `padding` on the styled node does not affect this box's size request (a
-/// 14px-vs-40px change measured identically), whereas margins always do.
+/// `padding` on the styled node does not change this box's size request,
+/// whereas margins do.
 pub(super) fn bubble_content() -> gtk::Box {
     gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -603,11 +596,9 @@ pub(super) fn bubble_text_label(text: &str) -> gtk::Label {
 /// The bubble goes straight into the vertical message box, which allocates
 /// every child the full width — so `halign` alone puts it on the correct side
 /// and simultaneously gives the wrapping label an upper bound to wrap against.
-/// Wrapping each bubble in a *horizontal* row first (the obvious thing, and
-/// what this used to do) is what broke both alignment and wrapping: a
-/// horizontal GtkBox packs its children sequentially from the start and
-/// ignores their `halign`, so every bubble sat on the left and the label was
-/// measured with no width limit at all.
+/// Do not wrap a bubble in a horizontal row: a horizontal GtkBox packs its
+/// children from the start and ignores their `halign`, and the label is then
+/// measured with no width limit.
 pub(super) fn place_bubble(column: &gtk::Box, mine: bool) -> (gtk::Overlay, gtk::Box) {
     let skin = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -643,7 +634,7 @@ pub(super) fn seam_radius(delta: i32, height: i32) -> i32 {
     (r / 2 * 2).max(2)
 }
 
-/// A disappearing message is never shown on the desktop: it cannot block screenshots. The phone can, and shows it there.
+/// A disappearing message is never shown on the desktop, which has no FLAG_SECURE equivalent. The phone shows it; the desktop shows only this placeholder.
 pub(super) const DISAPPEAR_HIDDEN: &str = "Disappearing message, view on primary device";
 
 pub(super) fn display_text(entry: &Entry) -> String {

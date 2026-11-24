@@ -38,8 +38,8 @@ pub const DEVICE_KEY_LENS: [usize; 4] = [32, 2592, 32, 1568];
 
 /// Derives a device fingerprint from its hybrid signing and KEM public keys:
 /// `SHA3-256(sign_ed25519 || sign_mldsa || kem_x25519 || kem_mlkem)`.
-/// Returns 32 bytes as hex. Use `format_fingerprint_base32` or
-/// `format_short_code` for display.
+/// Returns the raw 32 bytes (callers hex-encode them where a string is needed).
+/// Use `format_fingerprint_base32` or `format_short_code` for display.
 ///
 /// The concatenation has no length prefixes, and adding them would change
 /// every existing fingerprint and identity id. It is unambiguous only for keys
@@ -68,7 +68,7 @@ pub fn compute_fingerprint(
 
 /// Checks that four public keys match the device fingerprint they claim. Every
 /// record that carries a device's keys goes through this check (see
-/// `keys_match_fingerprint` in `packet`).
+/// `impl_keys_match_fingerprint` in `packet.rs`).
 pub fn keys_match_fingerprint(
     fingerprint_hex: &str,
     sign_pubkey_ed25519: &[u8],
@@ -82,7 +82,7 @@ pub fn keys_match_fingerprint(
 }
 
 /// Display form: Base32 in groups of five, uppercase, e.g.
-/// `XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF...` (about 52 characters, 8 groups).
+/// `XJ4K2-9QWRT-7YHBM-3ZPLC-VN8DF...` (52 characters in 11 groups for a 32-byte fingerprint).
 pub fn format_fingerprint_base32(raw: &[u8]) -> String {
     let encoded = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, raw);
     let upper = encoded.to_uppercase();

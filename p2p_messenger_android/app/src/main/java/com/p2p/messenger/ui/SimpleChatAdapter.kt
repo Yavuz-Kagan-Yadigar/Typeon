@@ -110,8 +110,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         var previewJpeg: ByteArray? = null,
         /** Voice messages only (mimeType starts with "audio/"). See Rust `FileOffer.duration_ms`. */
         var durationMs: Int? = null,
-        /** The three fields below mirror voice playback only. ChatActivity's single shared
-         *  MediaPlayer owns them (see `updateVoicePlayback`). */
+        /** The three fields below mirror voice playback only. The chat screen's MediaPlayer
+         *  owns them (see `updateVoicePlayback`). */
         var isPlaying: Boolean = false,
         var playbackPositionMs: Int = 0,
         var playbackSpeed: Float = 1f,
@@ -150,9 +150,6 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val senderAvatarJpeg: ByteArray? = null,
         /** When set, this row is a file attachment bubble, not text. `messageId` is then the `file_id`. */
         var attachment: AttachmentInfo? = null,
-        /** Id of the message this one replies to: the stable id (`message_id` in 1:1,
-         *  `group_message_local_id` in groups). When set, a small quote box is drawn in the bubble.
-         *  Tapping it scrolls the chat to that message (see `onBindViewHolder` / `onReplyPreviewClick`). */
         /** Summary of the reactions on this message, for example "👍2 ❤️". Empty means none.
          *  Rust computes it (`reactions_summary`) and sends the same string in history JSON and in
          *  the live `reaction` event. The adapter does not count anything itself. */
@@ -162,6 +159,9 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         /** Caption drawn under an attachment bubble. Empty means none. Text messages do not use
          *  it (their text is `text`). */
         var caption: String = "",
+        /** Id of the message this one replies to: the stable id (`message_id` in 1:1,
+         *  `group_message_local_id` in groups). When set, a small quote box is drawn in the bubble.
+         *  Tapping it scrolls the chat to that message (see `onBindViewHolder` / `onReplyPreviewClick`). */
         var replyToMessageId: String? = null,
         /** Short text summary of the replied-to message, embedded by the sender. The receiver
          *  does NOT need to have that message archived locally. */
@@ -192,7 +192,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
          *  implementation could break ordering in general. */
         val orderKey: Long get() = sentAtMs?.takeIf { it > 0 }
             // The sender's clock is only trusted within bounds: a message cannot have been
-            // sent after we received it, and the server keeps mail for 30 days. A clock far
+            // sent after we received it, and not more than ORDER_MAX_AGE_MS before. A clock far
             // ahead is clamped to the receive time, so it cannot pin the message to the bottom.
             ?.coerceIn(timestamp - ORDER_MAX_AGE_MS, timestamp) ?: timestamp
     }
@@ -617,7 +617,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         return removed
     }
 
-    /** See the `highlightedMessageId` note at the top of the file. Passing `null` clears the
+    /** Sets the search highlight (see `highlightedMessageId`). Passing `null` clears the
      *  highlight (for example after a timer, see the search navigation in ChatActivity / GroupChatActivity). */
     fun setHighlighted(messageId: String?) {
         val previous = highlightedMessageId
@@ -633,7 +633,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     }
 
     fun addMessage(item: Item) {
-        // One message can arrive several times over different paths (LAN, onion, server, gossip).
+        // One message can arrive several times over different paths (direct, server, sibling device).
         // Each copy used to call `addMessage` again, so one message got several bubbles.
         // Now the add is idempotent by `messageId`: if a row with that id exists, no new bubble
         // is added. Rows with random UUIDs (failed or optimistic rows) are already unique.
@@ -661,8 +661,6 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (idx < items.size - 1) notifyItemChanged(idx + 1)
     }
 
-    /** Updates the reaction summary of a message (see the Rust `reaction` event and
-     *  `reactions_summary`). If the target is not in this list, it is ignored silently. */
     /** Tapping the reaction pill opens the "who reacted with what" list (see ChatActivity /
      *  GroupChatActivity `showReactionsDialog`). */
     var onReactionsClick: ((Item) -> Unit)? = null
@@ -670,6 +668,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
     /** Tapping the seen-by avatars lists who saw the message and when (`showSeenByDialog`). */
     var onSeenByClick: ((Item) -> Unit)? = null
 
+    /** Updates the reaction summary of a message (see the Rust `reaction` event and
+     *  `reactions_summary`). If the target is not in this list, it is ignored silently. */
     fun applyReactions(messageId: String, summary: String) {
         val idx = indexOfMessageId(messageId)
         if (idx < 0) return
@@ -860,12 +860,6 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         val groupedWithNext = isGroupedWithNext(position)
         holder.container.gravity = if (item.isMine) Gravity.END else Gravity.START
         placeSideColumn(holder, item.isMine)
-        // The bubble background is applied to the container that wraps the text or attachment
-        // layout AND the meta row together (see item_message_bubble.xml `layoutBubble`), so the
-        // time sits inside the bubble.
-        // Grouped bubbles: the corner radius on the joined edge is reduced, so a run of messages
-        // reads as one stack. The first bubble of a group keeps its normal corners, the others use
-        // the "grouped" variant (see bubble_*_grouped.xml).
         // Grouped bubbles do NOT draw their own background. The merged outline (convex corners and
         // concave steps) is drawn as one path under the list by MergedBubbleDecoration. A drawable
         // per bubble only knows its own bounds, so a gradient across the whole list is not possible.
@@ -905,7 +899,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             if (groupedWithNext) 0 else defaultPaddingPx
         )
 
-        // The row that matches the search is highlighted temporarily. A translucent colour is set on
+        // The row that matches the search is highlighted temporarily. A theme colour is set on
         // the whole row background, instead of changing the bubble drawable (that would need a light
         // and a dark variant).
         holder.container.setBackgroundColor(
@@ -947,7 +941,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         // The status tick and the "seen by" indicator are NOT inside the bubble. They sit BESIDE it,
         // directly on the chat background. They used to inherit the bubble's text colour (`onColor`),
         // which only works inside the bubble. On a dark chat background it was almost invisible.
-        // The correct role for this position is the surface colour.
+        // They use colorOnSurfaceVariant instead.
         val sideColor = MaterialColors.getColor(
             holder.container, com.google.android.material.R.attr.colorOnSurfaceVariant
         )
@@ -1122,7 +1116,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         }
 
         val longPressListener = View.OnLongClickListener {
-            // Attachment bubbles support no edit, delete or copy (see the top of the file). Only plain
+            // Attachment bubbles support no edit, delete or copy. Only plain
             // text messages react to long press. Both my own and received messages react now. The
             // caller (ChatActivity / GroupChatActivity) shows only "Copy" for received messages and the
             // full menu for my own.
@@ -1168,8 +1162,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
 
     /** Fills an attachment bubble. OFFERED / FAILED: "Download" button. DOWNLOADING: progress indicator.
      *  COMPLETE: tap opens the file (download button and progress hidden, whole row tappable).
-     *  Preview images are not part of this version: every file type shows the same generic file icon,
-     *  name and size. Tapping a completed image opens the system viewer (see ChatActivity openAttachment).
+     *  A sender's preview image, when present, is shown above the name and size row. Tapping a
+     *  completed image opens the system viewer (see ChatActivity openAttachmentFile).
      */
     private fun bindAttachment(holder: BubbleViewHolder, item: Item, attachment: AttachmentInfo) {
         holder.layoutAttachment.visibility = View.VISIBLE
@@ -1249,8 +1243,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         if (attachment.status == AttachmentStatus.DOWNLOADING) {
             holder.progressAttachment.visibility = View.VISIBLE
             val max = attachment.totalSize.coerceAtLeast(1L)
-            // `setProgressCompat(.., true)` animates the progress instead of jumping to the new percentage
-            // (see the "real progress" note at the top of the file).
+            // `setProgressCompat(.., true)` animates the progress instead of jumping to the new percentage.
             holder.progressAttachment.max = 1000
             val fraction = ((attachment.bytesDone.toDouble() / max.toDouble()) * 1000).toInt().coerceIn(0, 1000)
             holder.progressAttachment.setProgressCompat(fraction, true)

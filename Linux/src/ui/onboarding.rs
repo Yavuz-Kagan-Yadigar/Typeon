@@ -208,7 +208,7 @@ fn open_fresh_database(data_dir: &Path) -> Option<[u8; 32]> {
     }
     // A database from a first run that ended before its vault was written:
     // its key lived in that process only, so nothing can open it again, and
-    // it blocked every later setup. Only before this process made one.
+    // it blocked every later setup. Only on the first attempt in this process, and only while no vault exists.
     if !first || secrets::exists(data_dir) {
         return None;
     }
@@ -218,8 +218,8 @@ fn open_fresh_database(data_dir: &Path) -> Option<[u8; 32]> {
     core::init_database(&dir, &key).then_some(key)
 }
 
-/// Enables or disables all three start buttons at once (they share a parent box),
-/// so no second create, link or restore can run while the vault is being saved.
+/// Enables or disables the start button and its siblings (they share a parent box),
+/// so no second identity can be created while the vault is being saved.
 fn set_actions_sensitive(button: &gtk::Button, on: bool) {
     match button.parent() {
         Some(parent) => parent.set_sensitive(on),
@@ -285,8 +285,8 @@ fn start_fresh_identity(
                             vault
                         }
                         Err(error) => {
-                            // Without a persisted vault the identity would be lost on exit, so this
-                            // is fatal rather than a warning.
+                            // Without a persisted vault the identity would be lost on exit, so the
+                            // buttons come back and the user has to try again.
                             set_actions_sensitive(&button, true);
                             app.toast(&format!("Could not write the vault: {}", error));
                             return;
@@ -785,8 +785,8 @@ fn hostname_guess() -> String {
     }
 }
 
-/// Kept next to the vault helpers so the settings screen can re-seal without
-/// duplicating the "what does an empty passphrase mean" rule.
+/// Re-seals the vault under `new_passphrase` (empty = no extra passphrase).
+/// The settings screen uses it.
 pub fn reseal_vault(data_dir: &Path, current: &str, new_passphrase: &str) -> Result<(), String> {
     let vault = secrets::load(data_dir, current)?;
     secrets::change_passphrase(data_dir, &vault, new_passphrase)

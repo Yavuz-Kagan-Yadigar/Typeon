@@ -41,8 +41,8 @@ mod bounded {
     }
 }
 
-/// A QR code holds under 3 KB, so a longer pairing code is rejected. This also
-/// bounds every field in it (`known_relays`, `rendezvous_node`).
+/// Upper bound on a pairing code, which also bounds every field in it (`known_relays`,
+/// `rendezvous_node`). A QR code holds about 2.9 KB (see `DeviceLinkRequest`).
 const MAX_PAIRING_CODE_BYTES: usize = 4096;
 
 fn to_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
@@ -101,7 +101,7 @@ fn pairing_code_from_cbor<T: serde::de::DeserializeOwned>(
 pub struct QrPacket {
     pub version: u8,
     pub device_name: String,
-    /// Identity id of the person (carried since v0.2).
+    /// Identity id of the person.
     pub identity_id: String,
     /// Fingerprint of the showing device.
     pub device_fingerprint: String,
@@ -111,8 +111,8 @@ pub struct QrPacket {
     /// Circuit Relay v2 protocol, as known to the showing device. If
     /// `rendezvous_node` is not reachable directly (other network or NAT), the
     /// scanner dials through one of these (`network::dial_with_relay_fallback`).
-    /// `#[serde(default)]`: v1 codes without this field still parse. The current
-    /// version is 2. An older peer may ignore the field, and it then stays empty.
+    /// `#[serde(default)]`: a code without this field parses, with it empty. An older
+    /// peer may ignore the field.
     #[serde(default)]
     pub known_relays: Vec<String>,
     /// Random nonce, issued by the device that shows the code. The scanner proves
@@ -148,7 +148,7 @@ impl QrPacket {
         to_cbor(self)
     }
 
-    /// A code without `nonce` (v1, v2) cannot be used to pair.
+    /// Only `CURRENT_VERSION` codes are accepted (see `pairing_code_from_cbor`).
     pub fn from_cbor(data: &[u8]) -> Result<Self, String> {
         pairing_code_from_cbor(data, Self::CURRENT_VERSION..=Self::CURRENT_VERSION, |p: &Self| p.version)
     }
@@ -212,11 +212,8 @@ pub enum GroupChange {
     /// rule is the same as for the other changes: `validate_group_update` accepts
     /// only the founder's signature (`NotFounder`).
     Delete,
-    /// Transfers the founder role to another member.
-    ///
-    /// Without this, a group whose founder lost all devices was locked for good:
-    /// nobody could add or remove members, or change the name or photo. The only
-    /// way out was to dissolve the group and create it again.
+    /// Transfers the founder role to another member. Without it, a group whose founder
+    /// lost all devices could never change its members, name or photo again.
     /// The permission rule is unchanged: only the current founder's signature is
     /// valid. The target must already be a member (see `group::apply_change`).
     /// Otherwise the role could pass to someone outside the group and lock it.
@@ -271,24 +268,23 @@ pub struct GroupMemberDevice {
 /// Compact, self-verifying evidence of a founder transfer (see
 /// `GroupUpdate.founder_chain`).
 ///
-/// Why it is needed: `GroupChange::TransferFounder` was applied only by members
-/// that received that update. `GroupUpdate` carries the group name, the full
-/// member list and member keys in every message, so those fields repair
-/// themselves (see `members` and `sync_members`). The founder field had no such
-/// repair. A member that missed the transfer (its 7-day retry window expired
-/// while it was offline, or a newer update overwrote the transfer, since
-/// `pending_group_syncs` keeps only the LAST update for each member) kept the old
-/// founder. Every update from the new founder was then rejected with
-/// `NotFounder` and no Ack was sent, so the sender retried for 7 days. That member
-/// was permanently cut off: it could no longer receive member changes, name,
-/// photo or deletion.
+/// Repairs the founder field for a member that missed the transfer.
+///
+/// `GroupUpdate` carries the group name, the full member list and member keys in
+/// every message, so those fields repair themselves (see `members` and
+/// `sync_members`). The founder field has no such repair. A member that missed the
+/// transfer (its retry window expired while it was offline, or a newer update
+/// replaced the transfer in `pending_group_syncs`, which keeps only the LAST update
+/// for each member) keeps the old founder and rejects every later update from the
+/// new one with `NotFounder`. The chain lets it walk forward to the current founder
+/// (`group_ops::heal_founder_chain`).
 ///
 /// Security: this structure is not covered by the outer `GroupUpdate.signature`,
 /// and it does not need to be. It carries its own hybrid signature, made over
 /// `founder_transfer_signing_input` with a domain separator, so a `GroupUpdate`
 /// signature cannot be reused here. An intermediary can delete the list, which
-/// falls back to today's behavior with no data loss. It cannot forge an entry,
-/// because the signature must come from the OLD founder's device.
+/// leaves the missed-transfer case unrepaired but loses no data. It cannot forge an
+/// entry, because the signature must come from the OLD founder's device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FounderTransfer {
     pub group_id: String,
@@ -332,20 +328,13 @@ pub struct GroupUpdate {
     pub change: GroupChange,
     /// The group's current name, carried in every `GroupUpdate` and not only in
     /// `Rename` changes. A member that is added for the first time has no local
-    /// `Group` record yet. Without this field `process_group_update` created the
-    /// group with an empty name (""), and group lists and screens then showed an
-    /// empty title permanently. See the note at the end of the file.
+    /// `Group` record yet, so `process_group_update` takes the name from the update.
     pub group_name: String,
-    /// Full member list after this change, as the founder knows it. Before this
-    /// field existed, `process_group_update` created a new local group with only
-    /// the founder (`Group::new`) and applied the one `change` on top. A member
-    /// added later therefore could not learn the members that were added before
-    /// it. For example, the third device saw the group as [founder, me] and could
-    /// not message the second member. Every update now carries the full list.
-    /// A late joiner gets the full membership, and missed updates heal on their own.
-    /// `#[serde(default)]`: old packets without this field still parse. They are
-    /// covered by the signature, so mixed versions fail verification. All devices
-    /// must update.
+    /// Full member list after this change, as the founder knows it. Every update
+    /// carries it, so a member added later learns the members added before it, and
+    /// missed updates heal on their own.
+    /// `#[serde(default)]`: a packet without this field parses with an empty list.
+    /// The signature covers this field.
     #[serde(default)]
     pub members: Vec<String>,
     /// Members' public keys and last known addresses, vouched for by the founder.
@@ -360,19 +349,18 @@ pub struct GroupUpdate {
     /// a member and impersonate that member inside the group (a group MITM).
     /// Therefore: (a) the field is covered by the signature, so no intermediary can
     /// change it; (b) the receiver never overwrites keys of a device it ALREADY
-    /// knows (see `process_group_update`); (c) entries added this way are marked
-    /// `verified = false` and the UI shows them as "added via group, not verified".
+    /// knows (see `process_group_update`); (c) entries added this way are marked as not
+    /// verified face to face, and the UI warns about them.
     ///
     /// Only the devices new or changed since the founder's previous update are sent
     /// (all of them for a newly added member, and in a reply to
     /// `MessageContent::GroupSyncRequest`).
     #[serde(default)]
     pub member_devices: Vec<GroupMemberDevice>,
-        /// For each vouched device that is not its identity's first device: the
-        /// proof that it belongs to that identity (see `DeviceAddProof`).
-        /// Outside the founder's signature, like `founder_chain`: each proof is
-        /// signed by itself, and a version that does not know the field still
-        /// verifies the update.
+    /// For each vouched device that is not its identity's first device: the proof
+    /// that it belongs to that identity (see `DeviceAddProof`). Outside the founder's
+    /// signature, like `founder_chain`: each proof is signed by itself, and a version
+    /// that does not know the field still verifies the update.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_device_proofs: Vec<DeviceAddProof>,
     /// Must be `founder_identity_id`. The receiver checks this.
@@ -382,10 +370,8 @@ pub struct GroupUpdate {
     /// Classical (Ed25519) signature.
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
-    /// ML-DSA (post-quantum) signature. Before this field, GroupUpdate was
-    /// protected by Ed25519 alone, which was inconsistent with the hybrid model of
-    /// MessagePacket and HandshakeInit. Both signatures are now required, verified
-    /// with `verify_hybrid_signature` as for MessagePacket.
+    /// ML-DSA (post-quantum) signature, hybrid with `signature` as in MessagePacket
+    /// and HandshakeInit. Both are required, verified with `verify_hybrid_signature`.
     #[serde(with = "serde_bytes")]
     pub signature_pq: Vec<u8>,
     /// Founder transfer chain (see `FounderTransfer`). Every update from the founder
@@ -409,10 +395,10 @@ pub struct GroupUpdate {
 /// (2592 bytes) and ML-KEM-1024 (1568 bytes) together come to about 4.2 KB,
 /// which is over the roughly 2.9 KB maximum of a QR code (version 40, lowest
 /// error correction, byte mode). No error-correction level fixes that. The
-/// pattern now matches `QrPacket`: `device_fingerprint` only (SHA3-256, 64 hex
+/// pattern matches `QrPacket`: `device_fingerprint` only (SHA3-256, 64 hex
 /// characters). The approving device connects to `rendezvous_node` and sends
 /// its `IdentityExchange`. The new device replies with its own `IdentityExchange`
-/// (see the `pending_link_target` arm of `process_identity_exchange`). The real
+/// (see `process_identity_exchange`). The real
 /// public keys, and their check against the fingerprint, are learned in that
 /// exchange, as in a normal contact pairing (see `process_qr_packet`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,11 +423,8 @@ pub struct DeviceLinkRequest {
 }
 
 impl DeviceLinkRequest {
-    /// v3: carries `nonce`.
-    /// v2: fingerprint only (see the struct documentation). v1 carried full public
-    /// keys and was over the QR capacity, so it never worked. Old v1 codes no longer
-    /// parse with `from_cbor` (the fields were removed). This is harmless: v1 could
-    /// not be produced on any real device, because it crashed at creation.
+    /// v3 carries `nonce`. Only `CURRENT_VERSION` parses with `from_cbor`. Older
+    /// formats are refused.
     pub const CURRENT_VERSION: u8 = 3;
     pub fn to_cbor(&self) -> Result<Vec<u8>, String> {
         to_cbor(self)
@@ -718,17 +701,14 @@ pub struct SyncedMessage {
     /// by SEND time. 0 = unknown (the local archive time is used instead).
     #[serde(default)]
     pub sent_at_ms: u64,
-    /// Deleted flag. Without it, a history sync reply carried the original text even
-    /// when the local archive marked the row as deleted. A receiver that was getting
-    /// the row from scratch (for example a newly linked secondary device, or a long
-    /// backward scroll) then archived it as if it had never been deleted. Old or
-    /// peer versions without the field read `false` (`#[serde(default)]`).
+    /// Deleted flag. A receiver that gets the row from scratch (a newly linked
+    /// secondary device, or a long backward scroll) archives it as deleted. Versions
+    /// without the field read `false` (`#[serde(default)]`).
     #[serde(default)]
     pub is_deleted: bool,
     /// Edited flag. `text` already holds the current edited content (the local archive
-    /// is changed in place by `apply_edit_to_archive`). Without this flag the receiver
-    /// could only archive the row from scratch, as if it had never been edited. No data
-    /// was lost, because the text was correct. Only the "(edited)" label was missing.
+    /// is changed in place by `apply_edit_to_archive`). The flag lets the receiver show
+    /// the "(edited)" label.
     #[serde(default)]
     pub is_edited: bool,
     /// See `MessageContent::Text.author_proof`. Needed for a group row that the
@@ -749,11 +729,9 @@ pub struct SyncedMessage {
 pub enum MessageContent {
     // The type is recursive (`SiblingEcho` contains `SiblingEchoBody::File.offer`).
     // Parse what a peer sent with `MessageContent::from_cbor`, which bounds the nesting.
-    /// `group_id`: if set, this message is the pairwise (1:1 ratchet) fan-out copy of
-    /// a group message. Without it the receiver could not tell an incoming group
-    /// message from an ordinary 1:1 message. Group chats had no separate place, and
-    /// group messages mixed into the sender's 1:1 chat (see receive.rs `receive_message`
-    /// and the group chat screen).
+    /// `group_id`: if set, this is the pairwise (1:1 ratchet) fan-out copy of a group
+    /// message. Without it the receiver cannot tell a group message from an ordinary
+    /// 1:1 message (see `receive_message` in receive.rs).
     Text {
         /// Group messages only: the author's signature over the message
         /// (`"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`, see
@@ -775,7 +753,7 @@ pub enum MessageContent {
         /// its own device. The receiver shows both the local arrival time and the sender's
         /// real send time (for example "10:42 (sent at 10:41)"; see ChatActivity and
         /// SimpleChatAdapter). This value does NOT change when `awaiting_confirmation`
-        /// resends the message via `regen_content` (see network.rs). The `MessageContent`
+        /// resends the message via `regen_content` (see types.rs). The `MessageContent`
         /// is cloned and encrypted as is, so this field keeps the FIRST write time, which
         /// is the intent. It is not the last retry time. `#[serde(default)]`: old or queued
         /// packets without this field still parse (0 = unknown, and the receiver skips the
@@ -791,8 +769,7 @@ pub enum MessageContent {
         /// The receiver may never have archived the quoted message locally (it never got
         /// it, or history sync did not run). So the sender also sends a short summary of
         /// that message's text here (see `REPLY_PREVIEW_MAX_CHARS` in the chat screens).
-        /// The receiver then does not need to look in its own archive, as Signal and
-        /// WhatsApp do.
+        /// The receiver then does not need to look in its own archive.
         #[serde(default)]
         reply_to_preview: Option<String>,
         /// Meaningful only when `group_id` is present: the `identity_id` of the author of
@@ -812,12 +789,12 @@ pub enum MessageContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expire_secs: Option<u32>,
     },
-    /// For group messages, `target_message_id` in Edit and Delete is actually the
+    /// For group messages, `target_message_id` in Reaction, Edit and Delete is the
     /// `Text.group_message_local_id`. The pairwise fan-out copies carry a different
-    /// `MessagePacketHeader.message_id` for each member (see the `Text` note). So the
-    /// sender can name the target only by this shared local id. Each receiver already
-    /// stores this value as the `message_id` column of its group archive (see the callers
-    /// of `archive_group_message`), so matching is consistent.
+    /// `MessagePacketHeader.message_id` for each member (see the `Text` note), so the
+    /// sender can name the target only by this shared local id. Each receiver stores
+    /// this value as the `message_id` column of its group archive (see the callers of
+    /// `archive_group_message`).
     /// Emoji reaction, long-press on a message.
     /// ONE reaction per person (WhatsApp behavior). A new `Reaction` from the same person
     /// replaces the previous one. An empty `emoji` removes the reaction. So there is no
@@ -825,7 +802,7 @@ pub enum MessageContent {
     /// `target_message_id`: same rule as `Edit` and `Delete`. In 1:1 it is
     /// `MessagePacketHeader.message_id` (the stable `conv_id`). In groups it is
     /// `Text.group_message_local_id`.
-    /// `reacted_at_ms`: same reason as `Edit.edited_at_ms`. Gossipsub gives no ordering
+    /// `reacted_at_ms`: same reason as `Edit.edited_at_ms`. The network gives no ordering
     /// guarantee. If two reactions from the same person arrive out of order, the older
     /// one must not overwrite the newer one.
     Reaction {
@@ -845,7 +822,7 @@ pub enum MessageContent {
         /// As `Text.author_proof`, over the new text.
         #[serde(default)]
         author_proof: Option<String>,
-        /// Sender's local time (ms, epoch) when this edit was made. Gossipsub gives no
+        /// Sender's local time (ms, epoch) when this edit was made. The network gives no
         /// ordering guarantee. Two edits of the same message (for example, a correction
         /// made twice within seconds) can reach the recipient in reverse order. The
         /// recipient compares this stamp with the last stored value, so an older edit
@@ -868,11 +845,10 @@ pub enum MessageContent {
         #[serde(default)]
         author_proof: Option<String>,
     },
-    /// Asks the peer for recent history. Nodes with node mode OFF never archive chat
-    /// history (see `archive_message` in archive.rs). For them the chat screen always
-    /// started empty. If the chat peer has node mode ON, it has archived both directions
-    /// of this conversation. This request asks that archive directly for the last `limit`
-    /// messages. It travels over the same ratchet-encrypted channel as normal messages, so
+    /// Asks the peer for recent history. A peer with node mode off archives no chat
+    /// history (see `archive_message` in archive.rs). With node mode on, the peer has
+    /// archived both directions of this conversation, and this request asks that
+    /// archive for the last `limit` messages. It travels over the same ratchet-encrypted channel as normal messages, so
     /// no new libp2p connection or protocol is needed, and it stays end to end encrypted.
     HistorySyncRequest {
         limit: u32,
@@ -899,8 +875,7 @@ pub enum MessageContent {
     },
     /// `request_id` is the `MessagePacketHeader.message_id` of the matching
     /// `HistorySyncRequest`. The requester uses it to match this response to its request
-    /// and remove the request from the retry queue (`awaiting_confirmation`; see the
-    /// reliable-delivery note in lib.rs). `messages` is ordered oldest first. `direction`
+    /// and remove the request from the retry queue (`awaiting_confirmation`). `messages` is ordered oldest first. `direction`
     /// is given from the responder's point of view ("sent" or "received"). The requester
     /// must reverse it (see `HistorySyncResponse` in receive.rs `receive_message`).
     HistorySyncResponse {
@@ -915,21 +890,19 @@ pub enum MessageContent {
         #[serde(default)]
         more: bool,
     },
-    /// Reliable-delivery ack. The gossipsub `publish()` success only guarantees that the
-    /// local node published the packet to the network, not that the peer actually received
-    /// it (see the `awaiting_confirmation` documentation in lib.rs). When the recipient
+    /// Reliable-delivery ack. A successful local publish only means the packet left this
+    /// node, not that the peer received it (see `awaiting_confirmation`). When the recipient
     /// successfully decrypts and processes a `Text` (not group), `Edit`, `Delete` or
     /// `HistorySyncRequest`, it sends this packet back. The sender keeps re-sending the same
     /// packet, without re-encrypting, until it gets this ack. The Ack itself is not
     /// acknowledged, to avoid an endless loop. If it is lost, the sender's retry of the
     /// original packet makes the recipient send a new Ack.
     Ack { target_message_id: String },
-        /// File, photo, video or audio attachment metadata. The maximum size is 4 GB. The
-        /// packet does not carry the file bytes. It carries small metadata and a fresh AEAD
-        /// key for this file (`file_key`), over the normal ratchet-encrypted channel. The
-        /// bytes are requested and sent in chunks over a separate libp2p `request_response`
-        /// protocol (see `FileChunkRequest` and `FileChunkResponse` in file_transfer.rs and
-        /// attachments.rs).
+    /// File, photo, video or audio attachment metadata. The maximum size is 4 GB. The
+    /// packet does not carry the file bytes. It carries small metadata and a fresh AEAD
+    /// key for this file (`file_key`), over the normal ratchet-encrypted channel. The
+    /// bytes are requested and sent in chunks over a separate libp2p `request_response`
+    /// protocol (see `FileChunkRequest` in attachments/mod.rs).
     FileOffer {
         group_id: Option<String>,
         file_id: String,
@@ -939,8 +912,8 @@ pub enum MessageContent {
         #[serde(with = "serde_bytes")]
         file_key: [u8; 32],
         sha256_hex: String,
-        /// Small preview cover (480p, JPEG at 85% quality, typically a few tens of KB), made
-        /// in advance by the sender for photo and video attachments. It travels in the same
+        /// Small JPEG preview cover, made in advance by the sender for photo and video
+        /// attachments. It travels in the same
         /// ratchet-encrypted channel as everything else, with no separate message or round
         /// trip, so the receiver can show a preview without downloading the full file. `None`
         /// for other file types, or when no preview could be made. Then only a generic file
@@ -963,12 +936,10 @@ pub enum MessageContent {
         reply_to_preview: Option<String>,
         #[serde(default)]
         reply_to_sender_identity_id: Option<String>,
-        /// Chunk size of this file, in bytes. It is not fixed: new files use 512 KiB (see
-        /// `attachments::FILE_CHUNK_SIZE_V2`), because every chunk costs one round trip and a
-        /// round trip over Tor takes 3 to 18 seconds. The size must travel with the offer.
-        /// If the two sides used different steps, the chunk indices would shift and the file
-        /// would be corrupted. `#[serde(default)]` plus `None` means 256 KiB. An offer from an
-        /// old client has no such field, and that transfer keeps the legacy size.
+        /// Chunk size of this file, in bytes. New files use `attachments::FILE_CHUNK_SIZE_V2`.
+        /// The size must travel with the offer: if the two sides used different steps, the
+        /// chunk indices would shift and the file would be corrupted. `None` (an offer from
+        /// an older client, `#[serde(default)]`) means `attachments::FILE_CHUNK_SIZE`, 256 KiB.
         #[serde(default)]
         chunk_size: Option<u32>,
         /// The sender's hashes of the encrypted chunks, 32 bytes per entry (see
@@ -1013,7 +984,7 @@ pub enum MessageContent {
         group_message_local_id: Option<String>,
     },
     /// Profile sync: photo and account name. There is no central directory (this is P2P), so
-    /// each side sends its profile to every contact that it knows. It does so once when a new
+    /// each side sends its profile to every contact that it knows. It does so when a new
     /// pairing completes (see `process_identity_exchange`), and again to all contacts when the
     /// user changes the profile.
     /// This packet is a full snapshot, not a delta. `avatar_jpeg: None` means "the photo was
@@ -1023,23 +994,19 @@ pub enum MessageContent {
     ProfileUpdate {
         #[serde(with = "serde_bytes")]
         avatar_jpeg: Option<Vec<u8>>,
-        /// The user asked to be able to change the account name, and for the change to reach
-        /// contacts automatically. Before, a contact's name was fixed by the `device_name` of
-        /// the first `IdentityExchange` and never changed again.
-        /// `#[serde(default)]`: old packets without this field still parse (`None` means "I am
-        /// not sending a name", so the receiver keeps its current name). An extra field in a
-        /// packet sent from a newer version to an older one is ignored silently. ciborium
-        /// encodes struct variants as maps and skips unknown keys.
+        /// The account name, so a change reaches contacts automatically. Without it a contact's
+        /// name stays the `device_name` of the first `IdentityExchange`.
+        /// `#[serde(default)]`: a packet without this field parses (`None` means "I am
+        /// not sending a name", so the receiver keeps its current name). An unknown field in a
+        /// packet from a newer version is ignored, because ciborium encodes struct variants as
+        /// maps and skips unknown keys.
         #[serde(default)]
         display_name: Option<String>,
     },
-    /// Security fix: group membership, name and avatar changes used to be sent as a bare
-    /// `NetworkEnvelope::GroupUpdate`, signed with Ed25519 only and NOT encrypted. Group
-    /// content such as the avatar or name was therefore spread over gossipsub in plain text.
-    /// They now travel over the same ratchet-encrypted channel as everything else (hybrid
-    /// X25519 and ML-KEM). The inner `GroupUpdate.signature` and `signature_pq` fields (which
-    /// prove the founder's authority, and are a second check independent of the transport
-    /// layer) are kept.
+    /// Group membership, name and avatar changes. They travel over the ratchet-encrypted
+    /// channel (hybrid X25519 and ML-KEM), not as plain envelopes. The inner
+    /// `GroupUpdate.signature` and `signature_pq` prove the founder's authority, a second
+    /// check independent of the transport layer.
     GroupUpdate(GroupUpdate),
     /// A member (not the founder, see `leave_group` in group_ops.rs) leaves the group on its
     /// own. The permission model stays intact: only the founder changes membership (see the
@@ -1048,27 +1015,21 @@ pub enum MessageContent {
     /// over the 1:1 ratchet. When the founder receives it, it runs its own `remove_from_group`,
     /// which already exists and is signed and checked.
     LeaveGroupRequest { group_id: String },
-    /// Network fix: when several devices on the same LAN all have Tor on, and one of them switches to
-    /// mobile data plus Tor, nobody can reach it and all of them look offline. The sender proactively
-    /// tells every known contact its current best address (see `get_node_address` in network.rs, which
-    /// returns the `.onion` address whenever Tor is open or ready). Before this, a contact learned a
-    /// `.onion` address only after a real Tor connection was made (`record_peer_id_if_known` and
-    /// `remember_device_addr` in network.rs). On a shared LAN the direct connection is almost always
-    /// faster than the Tor circuit, even with Tor open on both sides, so the Tor path was never used
-    /// and the `.onion` address was never learned. When a device then changed network, there was no
-    /// known `.onion` to fall back to, and reconnecting failed completely. This packet is sent by
-    /// `announce_address_to_all_contacts` in contacts.rs at three points: after `start_network`, when
-    /// Tor state changes to Ready (bootstrap done and the onion service published, usually minutes
-    /// after pairing), and on a network-change notice. The receiver learns the `.onion` address even
-    /// if no real Tor connection was ever made.
+    /// The sender's current best address, sent proactively to every known contact. Without
+    /// it, a contact learns a `.onion` address only after a real Tor connection, and on a
+    /// shared LAN the direct path is used instead, so a device that switches to mobile
+    /// data has no known `.onion` to fall back to. `get_node_address` (network/power.rs)
+    /// returns the `.onion` address whenever Tor is open or ready. The packet is sent by
+    /// `announce_address_to_all_contacts` (contacts.rs) after `start_network`, when Tor
+    /// becomes Ready, and on a network-change notice. The receiver learns the `.onion`
+    /// address even if no Tor connection was ever made.
     AddressAnnounce { multiaddr: String },
         /// Multi-device (step 5 of linking, and sync): the approving (existing) device sends
         /// this over the 1:1 ratchet to the new device. `device_add` is the authorization
         /// document the approving device signed. The new device stores it and uses it as
         /// proof when it introduces itself to contacts. `sync` is the first full sync
-        /// (contacts and groups). It is carried here instead of as a bare
-        /// `NetworkEnvelope::DeviceAdd`, so contact and group data travels over the
-        /// ratchet-encrypted, reliably delivered channel and never goes as plaintext over gossipsub.
+    /// (contacts and groups). Contact and group data travel over the ratchet-encrypted,
+    /// reliably delivered channel.
     DeviceLinkGrant {
         identity_id: String,
         device_add: DeviceAdd,
@@ -1131,15 +1092,12 @@ pub enum MessageContent {
         group_id: Option<String>,
         body: SiblingEchoBody,
     },
-        /// Multi-device: asks a sibling device for recent messages (backfill after a reconnect).
-        /// Sent only to a device of my own identity.
-        /// The request used to mean "all chats, newest N" every time. A device could not ask
-        /// its own other device for older history of one contact, the way a peer's
-        /// `HistorySyncRequest.before_timestamp` allows. Three new fields (`#[serde(default)]`,
-        /// so old and new versions stay compatible, and if all are `None` the behaviour is
-        /// unchanged): `conversation_identity_id` or `group_id` narrow the request to one chat,
-        /// and `before_timestamp` asks for messages OLDER than that time in that chat
-        /// (infinite-scroll paging, same meaning as `HistorySyncRequest`).
+    /// Multi-device: asks a sibling device for recent messages (backfill after a reconnect).
+    /// Sent only to a device of my own identity. With no `conversation_identity_id` or
+    /// `group_id` it asks for the newest rows of all chats. With one of them it narrows the
+    /// request to that chat, and `before_timestamp` asks for messages OLDER than that time
+    /// (infinite-scroll paging, same meaning as `HistorySyncRequest`). The optional fields
+    /// are `#[serde(default)]`, and `None` for all of them keeps the old behaviour.
     SiblingHistoryRequest {
         per_conversation_limit: u32,
         #[serde(default)]
@@ -1148,7 +1106,7 @@ pub enum MessageContent {
         group_id: Option<String>,
         #[serde(default)]
         before_timestamp: Option<i64>,
-        /// Watermark for the unscoped backfill (M-68): only rows the responder archived (its
+        /// Watermark for the unscoped backfill: only rows the responder archived (its
         /// local `timestamp`, ms) at or after this value.
         #[serde(default)]
         since_timestamp: Option<i64>,
@@ -1275,8 +1233,7 @@ pub enum MessageContent {
     ResendRequest { target_message_id: String },
 }
 
-// No derived `Debug` on these three. It printed file, media and archive keys and message
-// text into logs. Only the variant name is shown.
+// Debug on these three prints only a name, so keys and message text stay out of logs.
 impl std::fmt::Debug for MessageContent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.kind())
@@ -1480,33 +1437,25 @@ pub struct IdentityExchange {
     pub kem_pubkey_x25519: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub kem_pubkey_mlkem: Vec<u8>,
-        /// Signed `DeviceAdd` from the primary device, authorizing this device when it is a
-        /// SECONDARY device.
-        /// The receiver BLOCKS packets from a device it does not know, and shows a warning
-        /// (`UnverifiedNewDeviceAlert`). The silent-accept path (`NewDeviceViaSignedAdd`) checks
-        /// only the `verified_device_adds` map, and that map is filled only if a separate
-        /// `DeviceAddNotice` arrived before. That notice is an ordinary message over the ratchet.
-        /// If the contact was offline, it waits in the retry queue, so packets from the secondary
-        /// device stay blocked until the contact receives the notice.
-        /// Carrying the signature with the introduction removes that dependency. The receiver can
-        /// verify it directly against the primary device's key, which it already knows. The
-        /// security model is unchanged. Verification is the same as in `apply_device_add_notice`
-        /// (`verify_device_auth` plus fingerprint and key consistency). An unsigned claim is still rejected.
+    /// Signed `DeviceAdd` from the primary device, authorizing this device as a SECONDARY
+    /// device. Without it, the receiver blocks packets from the unknown device and shows
+    /// `UnverifiedNewDeviceAlert`. The silent-accept path (`NewDeviceViaSignedAdd`) needs
+    /// the `verified_device_adds` entry, which a separate `DeviceAddNotice` sets. That
+    /// notice is an ordinary ratchet message, so an offline contact may get it late.
+    /// Carrying the signature here lets the receiver verify it against the primary's
+    /// key at once. The checks are those of `apply_device_add_notice` (`verify_device_auth`,
+    /// fingerprint and key consistency). An unsigned claim is still rejected.
     #[serde(default)]
     pub device_add: Option<DeviceAdd>,
-    /// The signed `DeviceRevoke`s of this identity. A revoke used to reach
-    /// only the contacts that existed (and were reachable) when it was made:
-    /// to anyone who paired later, the revoked device's old `DeviceAdd` was
-    /// still good. Left out when empty, so the packet of an identity that
-    /// never revoked a device is unchanged.
+    /// The signed `DeviceRevoke`s of this identity, so a contact who pairs later also
+    /// learns that a device is revoked. Left out when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revokes: Vec<DeviceRevoke>,
     /// The public keys of the device that signed `device_add`. `identity_id`
     /// is the fingerprint of the identity's first device, so when that device
     /// signed the add, these keys prove the claim to someone who knows
     /// neither device: they hash to `identity_id` and verify the signature.
-    /// Without it `identity_id` was a bare claim, and anyone could register
-    /// under an identity we had not met yet.
+    /// Without it `identity_id` is only a claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_add_signer: Option<SyncedDevice>,
     /// `pairing_nonce_proof` of the code this device read from the receiver
@@ -1573,13 +1522,10 @@ pub fn prekey_signing_input(device_fingerprint: &str, id: u64, kem_pubkey_x25519
 }
 
 /// The bytes `IdentityExchange.signature` covers. The keys are covered through
-/// `device_fingerprint`; `device_add`, `revokes` and `device_add_signer` prove
-/// themselves. `recipient_fp` is the device the packet is for (not carried:
-/// the receiver uses its own).
-/// the `revokes` list is covered too (`revokes_digest`): each
-/// revoke proves itself, but the list could be stripped on the way, and a
-/// new contact then took a revoked device back from its old DeviceAdd.
-/// `extras`: `identity_exchange_extras_digest` of the packet, for the same reason.
+/// `device_fingerprint`, and `device_add` and `device_add_signer` prove themselves.
+/// `recipient_fp` is the device the packet is for (not carried: the receiver uses its
+/// own). `revokes` is covered through `revokes_digest`, so the list cannot be stripped
+/// in transit. `extras` is `identity_exchange_extras_digest`, for the same reason.
 pub fn identity_exchange_signing_input(
     identity_id: &str,
     device_fingerprint: &str,
@@ -1660,8 +1606,7 @@ pub enum SiblingEchoBody {
     /// See `MessageContent::Reaction`. A reaction I removed, echoed so my other devices show it too.
     Reaction { target_message_id: String, emoji: String, #[serde(default)] reacted_at_ms: u64 },
     /// An attachment I sent (1:1 or group). `offer` is always a `MessageContent::FileOffer`, and the
-    /// sibling downloads the file from me with that offer. Attachments were never echoed before, so a
-    /// photo sent from the phone did not appear on the laptop.
+    /// sibling downloads the file from me with that offer.
     File { offer: Box<MessageContent> },
     /// A sticker added to my sticker store (imported or saved): the JPEG XL bytes. Its id is the
     /// SHA-256 of those bytes. A large sticker travels in several parts (`part` of `parts`, both 0 for
@@ -1734,14 +1679,10 @@ pub struct SiblingHistoryEntry {
     pub reactions: Vec<(String, String, u64)>,
 }
 
-/// Envelope carrying everything received from the network. Used to tell the variants apart.
-///
-/// Unused variants (`DeviceAdd`, `DeviceRevoke`, `GroupInvite`, `ReadReceipt`) were removed. None of
-/// them was ever produced, and the real mechanisms use other paths: device add and revoke go through
-/// `MessageContent::DeviceAddNotice` and `DeviceRevokeNotice` (the `DeviceAdd` and `DeviceRevoke`
-/// structs are still used), group invites through `MessageContent::GroupUpdate(Add)`, read receipts
-/// through `MessageContent::Seen` and `ReadStateSync`. All of them go over the ratchet-encrypted channel.
-/// Keeping the dead arms would invite someone to fill in an envelope that never worked.
+/// Envelope for everything received from the network. The variant tells the packet kinds
+/// apart. Device add and revoke, group invites and read receipts are not envelope kinds:
+/// they are `MessageContent` variants (`DeviceAddNotice`, `DeviceRevokeNotice`,
+/// `GroupUpdate(Add)`, `Seen`, `ReadStateSync`) over the ratchet-encrypted channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkEnvelope {
     IdentityExchange(IdentityExchange),
@@ -1770,7 +1711,7 @@ mod wire_size_tests {
     use super::*;
 
     /// Byte fields must be encoded as CBOR byte strings. Without `serde_bytes` every byte becomes a
-    /// separate integer, and the packet grows about 1.9x (measured about 15 KB per message on a device).
+    /// separate integer, and the packet grows about 1.9x.
     #[test]
     fn byte_fields_encode_as_cbor_bytes() {
         let raw: Vec<u8> = (0..=255u8).cycle().take(4000).collect();
@@ -1992,7 +1933,7 @@ mod signing_input_tests {
         }
     }
 
-    /// Peer-filled collections stop at their limit while decoding (CRY-9).
+    /// Peer-filled collections stop at their limit while decoding.
     #[test]
     fn collection_counts_are_bounded() {
         let text = |n: usize| MessageContent::Text {

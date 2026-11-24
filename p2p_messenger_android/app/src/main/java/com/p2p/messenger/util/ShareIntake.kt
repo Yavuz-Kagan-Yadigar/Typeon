@@ -35,7 +35,7 @@ object ShareIntake {
             if (value != null) pendingAt = android.os.SystemClock.elapsedRealtime()
         }
 
-    /** The forward handed to the chat screen picked last. */
+    /** The forward handed to the chat screen by [attachTo], until [takeForward] reads it. */
     private var armed: List<Forward.Pending>? = null
     private const val EXTRA_FORWARD = "typeon_forward"
 

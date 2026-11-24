@@ -32,7 +32,7 @@ use tor_rtcompat::tokio::TokioRustlsRuntime;
 /// .onion address across restarts (the Tor counterpart of PeerId persistence).
 const ONION_NICKNAME: &str = "p2pmsg";
 
-/// Current Tor state, shown in the UI (see `tor_status` in network.rs).
+/// Current Tor state, shown in the UI (see `tor_status` in network/power.rs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TorStatus {
     /// Off (the user did not enable Tor).
@@ -96,7 +96,7 @@ impl TorHandle {
     }
 
     /// The published .onion host name (for example "abcd...xyz.onion"), or None if not computed yet. This is ONLY the host name.
-    /// network.rs `get_node_address` builds the full libp2p multiaddr (`/dns/<host>/tcp/<port>/p2p/<peer_id>`).
+    /// `get_node_address` (network/power.rs) builds the full libp2p multiaddr (`/dns/<host>/tcp/<port>/p2p/<peer_id>`).
     pub fn onion_host(&self) -> Option<String> {
         self.onion_addr.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
@@ -495,7 +495,7 @@ impl AsyncWrite for TorStream {
 /// service bridge to the local TCP listener (see `bridge_incoming_stream`).
 ///
 /// `client` is `Option` ON PURPOSE. The transport is added to the swarm even when Tor is off (one swarm setup path, see `start_network` in
-/// network.rs). When it is `None`, every dial returns `MultiaddrNotSupported`, which is correct because no `.onion` address exists while Tor is off.
+/// network/mod.rs). When it is `None`, every dial returns `MultiaddrNotSupported`, which is correct because no `.onion` address exists while Tor is off.
 /// That avoids a conditional or double build path.
 #[derive(Clone)]
 pub struct ArtiDialTransport {

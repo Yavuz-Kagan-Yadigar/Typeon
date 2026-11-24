@@ -49,7 +49,7 @@ impl P2PCore {
             result
         };
         if rotated {
-            // The old topic is not dropped right away (the sender may still publish there). It is dropped at the next rotation.
+            // The previous root key is kept, because the sender may still send on it. It is dropped at the next rotation.
             // Skipped keys of the old chain move into the state (`old_recv`). New keys derived by this decryption are written to the table
             // below. State first: the table rows are written only once the state holding them is on disk.
             if !self.persist_ratchet_state_replacing_skipped(&packet.header.sender_device_fingerprint) {
@@ -75,8 +75,8 @@ impl P2PCore {
             Ok(v) => v,
             Err(e) => {
                 // Observed on two phones: an ack deadlock. Repeated `Message N not found in skipped-key cache (already decrypted, or evicted)`
-                // errors in both directions for minutes. The loop: the SAME envelope arrives twice (normal here, since gossipsub and the server
-                // both carry it, see `should_shadow_on_gossipsub`). The first copy is decrypted, archived and acked. The second copy arrives after
+                // errors in both directions for minutes. The loop: the SAME envelope arrives twice (normal here, since the direct path and the server
+                // both carry it). The first copy is decrypted, archived and acked. The second copy arrives after
                 // the chain has moved on and the skipped key for that message number is already consumed, so it cannot be decrypted. Without
                 // decryption, `message_id` cannot be read, so the packet cannot be deduplicated, so no Ack is sent. The sender keeps retrying the
                 // same envelope, which never decrypts, so the state stays locked. The lock only breaks when `MAX_UNCONFIRMED_AGE_MS` (~25 min)
@@ -309,7 +309,7 @@ impl P2PCore {
                 match self.archive_message_exp(&chat_key, "received", text.as_bytes(), Some(&display_id), None, reply_to_message_id.as_deref(), reply_to_preview.as_deref(), sent_at_ms, expire_secs) {
                     Ok(()) => {
                         self.ack_text_packet(&peer_fp, &message_id, Some(&display_id));
-                        // See `pending_edits_deletes`. If an Edit/Delete for this message arrived BEFORE the Text (gossipsub gives no ordering),
+                        // See `pending_edits_deletes`. If an Edit/Delete for this message arrived BEFORE the Text (messages can arrive out of order),
                         // apply it now.
                         self.replay_buffered_edits_deletes(&display_id);
                     }
@@ -424,7 +424,7 @@ impl P2PCore {
                 })
             }
             MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof } => {
-                // Gossipsub gives no ordering guarantee, so an Edit can arrive before the Text it targets. The target row is then absent from the archive, which is not the same as belonging to someone else. Such an Edit is buffered (see `pending_edits_deletes`). Otherwise `message_owned_by_sender` would find no target, reject the packet permanently, and the Text would never get the edit.
+                // Messages can arrive out of order, so an Edit can arrive before the Text it targets. The target row is then absent from the archive, which is not the same as belonging to someone else. Such an Edit is buffered (see `pending_edits_deletes`). Otherwise `message_owned_by_sender` would find no target, reject the packet permanently, and the Text would never get the edit.
                 if self.edit_target_in_chat(&target_message_id, group_id.as_deref(), &peer_fp) {
                     self.apply_edit_or_delete_content(&peer_fp, &sender_identity_id, &message_id,
                         MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof })
@@ -488,7 +488,7 @@ impl P2PCore {
             }
             MessageContent::HistorySyncRequest { limit, before_timestamp, group_id, after_timestamp } => {
                 // `load_message_history`/`load_group_message_history` return an empty list when `history_key` was never loaded or the archive is empty, so no separate `node_mode_enabled` check is needed. This is a control packet, not a user message, so it is not written to our archive (archive_plaintext: None, see send_message_content).
-                // The `limit` in the request comes from the other side. Row count and total text bytes are capped, so the reply stays under gossipsub's 1 MB `max_transmit_size` (see `PublishFailure`). The cut-off part is fetched later with a paging request (before_timestamp).
+                // The `limit` in the request comes from the other side. Row count and total text bytes are capped, so the reply stays under the 1 MB envelope cap (`MAX_ENVELOPE_BYTES`). The cut-off part is fetched later with a paging request (before_timestamp).
                 // Group history goes only to someone who is a member now. Otherwise anyone who knew the `group_id`, such as a removed member, could page through the history, including messages sent after their removal.
                 if let Some(gid) = &group_id {
                     if !self.groups.get(gid).map_or(false, |g| g.is_member(&sender_identity_id)) {
@@ -1155,8 +1155,8 @@ impl P2PCore {
             }
             // Multi-device: the primary accepted this (secondary) device into its identity. `peer_fp` = sender = primary.
             MessageContent::DeviceLinkGrant { identity_id, device_add, sync, nonce } => {
-                // Acked once adopted: acked first, a failure here lost the
-                // grant and the link never completed.
+                // Acked only once the grant is adopted. A failure here must not
+                // ack, or the primary would take a refused grant as "linked".
                 match self.adopt_device_link(&peer_fp, &identity_id, &device_add, &sync, &nonce) {
                     Ok(linked) => {
                         self.send_ack(&peer_fp, &message_id);
@@ -1694,8 +1694,8 @@ impl P2PCore {
                 }
             }
             MessageContent::SiblingHistoryRequest { per_conversation_limit, conversation_identity_id, group_id, before_timestamp, since_timestamp, after_timestamp, ops_since } => {
-                // Ack widened (network robustness fix): this packet was never acked before. The only guarantee was the periodic re-trigger with a
-                // 5-minute debounce (see `request_sibling_backfill`), so a lost request could go unnoticed for up to 5 minutes. Same reasoning as
+                // The Ack is sent for every history request. Before, a lost request went unnoticed until the periodic re-trigger
+                // (`SIBLING_BACKFILL_INTERVAL_MS`, 30 min, see `request_sibling_backfill`). Same reasoning as
                 // `LeaveGroupRequest`: the Ack is sent in EVERY case, the request has at least reached US, and the sender's `awaiting_confirmation`
                 // retry can stop (even if no reply can be produced or sent, e.g. the sender is no longer a real sibling).
                 self.send_ack(&peer_fp, &message_id);

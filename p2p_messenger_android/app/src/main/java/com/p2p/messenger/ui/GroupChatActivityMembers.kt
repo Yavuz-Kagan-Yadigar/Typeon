@@ -238,11 +238,6 @@ internal fun GroupChatActivity.showGroupInfoDialog() {
 }
 
 /**
- * Asks for confirmation before removing a member (not the founder; see the caller). The removal cannot be undone:
- * Rust `remove_from_group` sends a signed `GroupChange::Remove` to all members.
- * `onRemoved` is the callback the caller passes (while the dialog is open), so the member list can be redrawn after a successful removal.
- */
-/**
  * Hands the group's admin role to another member. After the handover, THIS device can no longer manage the group.
  */
 internal fun GroupChatActivity.confirmTransferFounder(identityId: String, displayName: String, onDone: () -> Unit) {
@@ -269,6 +264,11 @@ internal fun GroupChatActivity.confirmTransferFounder(identityId: String, displa
         .show()
 }
 
+/**
+ * Asks for confirmation before removing a member (not the founder; see the caller). The removal cannot be undone:
+ * Rust `remove_from_group` sends a signed `GroupChange::Remove` to all members.
+ * `onRemoved` is the callback the caller passes (while the dialog is open), so the member list can be redrawn after a successful removal.
+ */
 internal fun GroupChatActivity.confirmRemoveMember(identityId: String, displayName: String, onRemoved: () -> Unit) {
     AlertDialog.Builder(this)
         .setMessage(getString(R.string.confirm_remove_member, displayName))
@@ -333,7 +333,7 @@ internal fun GroupChatActivity.setGroupAvatar(avatarJpeg: ByteArray?) {
     }
 }
 
-/** See the old GroupsFragment.showAddMembersDialog, which moved here. */
+/** Add-members picker for this group: lists the contacts who are not members yet. */
 internal fun GroupChatActivity.showAddMembersDialog() {
     // listContacts takes the core lock: off the main thread.
     lifecycleScope.launch {
@@ -389,11 +389,6 @@ internal fun GroupChatActivity.showAddMembersDialog(contactsJson: String) {
         .show()
 }
 
-/**
- * Sends a group message in the background. `P2PLib.sendGroupMessage` (JNI) runs a separate ratchet encryption, a hybrid signature and a gossipsub
- * publish attempt for EVERY member (see Rust `send_group_message`, the pairwise fan-out). On the main thread that froze touch input for the whole
- * time, which grows with group size. `btnSend` is now disabled while it runs and `progressSending` is shown instead (same pattern as ChatActivity).
- */
 /** Other members as (identity id, display name), for @mentions. */
 internal fun GroupChatActivity.mentionCandidates(): List<Pair<String, String>> =
     memberIdentityIds.filter { it != ownIdentityId }

@@ -964,10 +964,10 @@ impl P2PCore {
                         self.server_unknown_mailboxes.insert(key, now + ttl);
                     }
                 }
-                // The recipient is not on this server: fall back to gossip IMMEDIATELY.
+                // The recipient is not on this server: fall back to the direct path IMMEDIATELY.
                 //
                 // Delivery fix: this arm used to call `try_publish_raw`, the UNQUEUED raw version, and ignored its result with
-                // `let _ =`. If the publish failed at that moment (mesh not yet formed, peer briefly unreachable) the envelope
+                // `let _ =`. If the publish failed at that moment (direct path not ready, peer briefly unreachable) the envelope
                 // was written nowhere. `Message` types survived through `awaiting_confirmation`, but `Handshake` and
                 // `IdentityExchange`, the carriers of pairing and first contact, were dropped silently. Every other error arm
                 // already used `requeue_failed_deposit` (`publish_envelope` into `pending_envelopes`). This was the one exception.
@@ -1084,7 +1084,7 @@ impl P2PCore {
                         self.finish_blob_upload(blob_id);
                     }
                 }
-                // Quota, rate or size: the right behaviour is the same in all of them. Hand this envelope to gossip. Do not lose the message.
+                // Quota, rate or size: the right behaviour is the same in all of them. Hand this envelope back to the publish queue. Do not lose the message.
                 self.requeue_failed_deposit(&inflight);
             }
         }

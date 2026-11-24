@@ -21,7 +21,7 @@ impl ChatView {
         chooser.popup();
     }
 
-    /// Double click on a message: my 5 most used emojis plus "+" for the full chooser, beside the bubble.
+    /// Double click on a message: my 5 most used emojis (the core fills gaps with defaults) plus "+" for the full chooser, beside the bubble.
     pub(super) fn quick_reactions(self: &Rc<Self>, anchor: &gtk::Box, entry: &Entry) {
         // Takes the core lock: read off the GTK thread.
         let (view, anchor, entry) = (self.clone(), anchor.clone(), entry.clone());

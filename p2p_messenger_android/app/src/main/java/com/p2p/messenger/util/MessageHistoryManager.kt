@@ -20,13 +20,8 @@ import java.security.SecureRandom
  */
 object MessageHistoryManager {
     private const val TAG = "MessageHistoryManager"
-    // On a DECRYPT ERROR the key is NOT regenerated.
-    //
-    // This used to call `generateAndPersist` when the file existed but decryption threw. That OVERWROTE the key file with a fresh random key. It
-    // treated "no key" and "the key could not be decrypted this time" as the same thing. A single temporary Keystore failure (a device restored from
-    // backup, a lock-screen change that reset the credential, a StrongBox fault) then destroyed everything encrypted with that key, irreversibly, and
-    // the user saw no warning. The sibling classes (`ArchiveKeyManager`, `IdentityManager`) already behaved correctly: on a decrypt failure they only
-    // return. Regeneration now happens ONLY when the file does not exist at all.
+    // A key file that exists but cannot be decrypted is never regenerated: a new key would make the old history unreadable.
+    // A new key is generated only when the file does not exist.
 
     private const val HISTORY_KEY_FILENAME = "history_key.enc"
 
@@ -34,8 +29,8 @@ object MessageHistoryManager {
         File(context.filesDir, HISTORY_KEY_FILENAME)
 
     /**
-     * Called whenever the app starts while node mode is on (or the first time node mode is turned on). If the key file does not exist, it generates
-     * a new data key, encrypts it and writes it to disk. If it exists, it decrypts it and loads it into Rust.
+     * Called on every app start. If the key file does not exist, it generates a new data key, encrypts it and writes it to disk.
+     * If it exists, it decrypts it and loads it into Rust.
      */
     @Synchronized
     fun ensureHistoryKeyLoaded(context: Context) {
@@ -50,7 +45,7 @@ object MessageHistoryManager {
             try {
                 KeystoreCrypto.decrypt(encrypted, KeystoreCrypto.ALIAS_HISTORY)
             } catch (e: Exception) {
-                // See the TAG note (#04). NEVER regenerate here.
+                // Never regenerate here (see the note above the key file name).
                 com.p2p.messenger.util.Log.e(TAG, "Key could not be decrypted, NOT REGENERATING", e)
                 KeystoreCrypto.reportKeyFailure(context)
                 return

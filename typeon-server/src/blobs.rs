@@ -8,8 +8,8 @@ impl ServerCore {
     // -----------------------------------------------------------------
 
     pub(super) fn blob_path(&self, blob_id: &str) -> PathBuf {
-        // `blob_id` comes from the client. It must be checked as hex/alphanumeric BEFORE it is used as a file path.
-        // Otherwise `../` could write outside the directory.
+        // `blob_id` comes from the client. Callers check it with `is_safe_id` first; `sanitize_id` keeps a
+        // `../` out of the path.
         self.config.blob_dir.join(format!("{}.enc", sanitize_id(blob_id)))
     }
 
@@ -33,7 +33,7 @@ impl ServerCore {
         {
             return ServerResponse::Err(ServerErrorCode::TooLarge);
         }
-        // Before any row exists: `total_chunks: 0` used to mint a free row per request.
+        // Checked before any row exists: a `total_chunks` of 0 would otherwise mint a row per request.
         if chunk_index >= total_chunks {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
@@ -59,15 +59,14 @@ impl ServerCore {
         if e.bytes_blob.max(0) as u64 + growth > limits.max_blob_bytes {
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
-        // Quotas used to be applied only per record. The budget is split by a fixed `EXPECTED_DEVICES = 8`, so with
-        // 20 devices enrolled the real ceiling was 2.5 times the budget. Disk-full on a tablet is exactly what this
-        // mechanism exists to prevent. The total is checked now too.
+        // The per-device quota alone is not enough: the shares together can exceed the disk. The total budget is
+        // checked here as well.
         if self.total_budget_exceeded(growth as usize, false) {
             warn!("Total disk budget full, blob chunk rejected");
             return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
         }
         // Ownership: only the record that started a blob may write to it. A row is created only for an id nobody
-        // holds. The second read also covers a first attempt that failed (busy DB), which used to skip this check.
+        // holds. The second read also covers a first attempt whose insert failed (busy DB).
         if self.store.blob_state(&blob_id).is_none() {
             // Bytes are capped above. This caps files (inodes) and rows.
             if self.store.blob_count(&e.enrollment_id) >= MAX_BLOBS_PER_ENROLLMENT {
@@ -106,10 +105,9 @@ impl ServerCore {
             return ServerResponse::Ok;
         }
 
-        // Positional write, not an append. Appending required chunks to arrive strictly in order. The client could
-        // then send only one chunk at a time, and throughput was limited to chunk/round-trip. A 10 MB upload measured
-        // about 12 KB/s over Tor. The `.enc` format has a fixed stride (see `attachments::read_chunk_from_disk`), so
-        // writing at an offset is safe.
+        // Positional write, not an append. An append would force chunks to arrive strictly in order, so the client
+        // could only send one chunk per round trip. The `.enc` format has a fixed stride (see
+        // `attachments::read_chunk_from_disk`), so writing at an offset is safe.
         use std::io::{Seek, SeekFrom, Write};
         // The stride is stored WITH the blob. `serve_chunk` must read with the same value.
         self.store.blob_set_chunk_size(&blob_id, chunk_size);
@@ -175,8 +173,7 @@ impl ServerCore {
     }
 
     /// Hashes the ENCRYPTED bytes on the blocking pool. The server cannot read the content, but it never serves a
-    /// truncated upload. A blob can be up to `max_blob_bytes` (GiBs). Inside the event loop it stalled every client
-    /// for the duration.
+    /// truncated upload. A blob can be up to `max_blob_bytes` (GiBs), so the hash must not run in the event loop.
     pub(super) fn start_blob_hash(&mut self, blob_id: String, enc_sha256: Vec<u8>, channel: ResponseChannel<ServerResponse>) {
         let waiters = self.blob_hashing.entry(blob_id.clone()).or_default();
         if waiters.len() >= MAX_HASH_WAITERS {
@@ -237,30 +234,22 @@ impl ServerCore {
     /// Serves a file chunk.
     ///
     /// The server counterpart of `serve_chunk_request` in the core. It is deliberately almost identical:
-    /// `read_chunk_from_disk` reads the `.enc` file AS IT IS, because the disk format is the wire format. The server
-    /// encrypts, decrypts and re-frames nothing.
+    /// `read_chunk_from_disk_with` reads the `.enc` file AS IT IS, because the disk format is the wire format. The
+    /// server encrypts, decrypts and re-frames nothing.
     pub(super) fn serve_chunk(
         &mut self,
         peer: PeerId,
         req: FileChunkRequest,
         channel: ResponseChannel<FileChunkResponse>,
     ) {
-                // This path is entirely separate from `handle_request`. It is a distinct request_response behaviour, called
-                // straight from `handle_swarm_event`, and it used to sit outside the enrollment check (`authenticate`). So ANY peer
-                // speaking this protocol, including an unenrolled stranger in node mode, could fetch chunks as soon as it knew or
-                // guessed a `blob_id`. The bytes are encrypted with `file_key`, so content did not leak directly. But the
-                // `NotFound` / `Chunk` split answered "does this file exist on the server" as an oracle, and it let a stranger
-                // cause unlimited disk and CPU work. The core had the same problem (`may_serve_file_to`), which was closed earlier.
-                // The server counterpart had been missed.
-                //
-                // Legitimate clients are not affected. `ready_server_peers` (client) uses a server as a source only when it is
-                // `connected && enrolled`, so a download always arrives here with an enrolled `PeerId`.
-                //
-                // Rate limit: its own budget (`CHUNKS_PER_MINUTE`, 10/s), separate from the RPC budget. Tor carries about one
-                // chunk a second, so only a request loop reaches it. An enrolled peer over budget gets `Busy` (back off, same
-                // source). An unenrolled one gets `NotFound`.
-        // The rate check first, for every peer: it is in memory, while the enrollment lookup is a query. Refusals log at
-        // debug only, or a request loop fills the journal.
+        // This is a separate request_response behaviour, called from `handle_swarm_event`, not from `handle_request`.
+        // It checks enrollment itself, so a stranger cannot fetch chunks by guessing a `blob_id`. An unenrolled peer
+        // within budget gets `NotFound` (the same answer as an unknown file, so it reveals nothing). A peer over its
+        // budget gets `Busy` whether enrolled or not, and should back off to another source.
+        //
+        // The budget is `CHUNKS_PER_MINUTE` (10 per second), separate from the RPC budget. The rate check runs first
+        // for every peer: it is in memory, while the enrollment lookup is a query. Refusals log at debug only, so a
+        // request loop does not fill the journal.
         let reply = if !self.check_rate(peer, true, 1) {
             Some(FileChunkResponse::Busy)
         } else if self.active(peer).is_none() {
@@ -279,14 +268,12 @@ impl ServerCore {
         } else {
             match self.store.blob_state(&req.file_id) {
                 Some(state) if state.complete => {
-                    // Once per download keeps the blob alive. Once per chunk was a DB write for each of thousands of chunks.
+                    // Touched once per download (chunk 0), not once per chunk, which would be a DB write per chunk.
                     if req.chunk_index == 0 {
                         self.store.blob_touch(&req.file_id, now_ms());
                     }
-                    // This branch used to call `read_chunk_from_disk` with a fixed 256 KiB stride. `handle_blob_put`
-                    // takes the stride FROM THE CLIENT (`BlobPut.chunk_size`) and writes by it. The moment the two
-                    // diverged, every blob was read from the wrong offsets. That is the same bug that had spoiled a
-                    // speed measurement. The stride is now stored with the blob.
+                    // The stride is the one `handle_blob_put` stored with the blob (from `BlobPut.chunk_size`). A
+                    // fixed stride here would read from the wrong offsets.
                     match attachments::read_chunk_from_disk_with(
                         &self.blob_path(&req.file_id),
                         req.chunk_index,
@@ -299,8 +286,8 @@ impl ServerCore {
                         _ => FileChunkResponse::NotFound,
                     }
                 }
-                // A partial upload is NEVER served. When the client sees `NotFound`, it switches to another source
-                // immediately (see `handle_chunk_response`, which deliberately does not retry).
+                // A partial upload is never served. On `NotFound` the client switches to another source at once
+                // (see `handle_chunk_response` in the core).
                 _ => FileChunkResponse::NotFound,
             }
         };

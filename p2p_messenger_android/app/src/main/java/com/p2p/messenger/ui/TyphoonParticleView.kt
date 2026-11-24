@@ -12,7 +12,7 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * A particle "typhoon" effect, played when a message is sent to a chat that had no message in the last 15 minutes. It is drawn in 3D:
+ * A particle "typhoon" effect, played when a message is sent or received in a chat that had no message in the last 15 minutes. It is drawn in 3D:
  * wide at the top, narrow at the bottom, and large. So the first version, a spiral thrown outward from one point, was dropped. A real
  * FUNNEL (tornado) geometry replaces it:
  *
@@ -53,7 +53,7 @@ class TyphoonParticleView @JvmOverloads constructor(
         const val FUNNEL_MOUTH_RADIUS = 0.46f
         /** Vertical squash: 1 = circle (seen from above), smaller = flatter. */
         const val ELLIPSE_SQUASH = 0.30f
-        /** Total rotation the particle makes over its life, in radians. */
+        /** Base spin scale, in radians. The real spin is scaled by the particle's `spin` and by its height. */
         const val BASE_SPIN = 7.0f
         /** Time-based length of the longest trail. The real length is scaled with the particle's size (see `Particle.trailSpan`). */
         const val TRAIL_SPAN_MAX = 0.22f

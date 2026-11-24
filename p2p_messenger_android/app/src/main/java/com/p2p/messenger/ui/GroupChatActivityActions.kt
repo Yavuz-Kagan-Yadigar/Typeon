@@ -133,7 +133,7 @@ internal fun GroupChatActivity.retryFailedGroupMessage(item: SimpleChatAdapter.I
 /**
  * Same pattern as ChatActivity.showEditDeleteDialog. Edit and delete also apply to group messages.
  * Attachment bubbles are not supported (see the SimpleChatAdapter long-press guard, `item.attachment == null`), so this fires only for plain text messages.
- * Messages from others also react to a long press, but for them only Copy is shown. Edit, Delete and Resend make sense only for our own messages.
+ * Messages from others also react to a long press, but for them only React, Copy, Forward and Select are shown. Edit, Delete and Resend are for our own messages only.
  */
 internal fun GroupChatActivity.showGroupEditDeleteDialog(item: SimpleChatAdapter.Item) {
     if (!item.isMine) {

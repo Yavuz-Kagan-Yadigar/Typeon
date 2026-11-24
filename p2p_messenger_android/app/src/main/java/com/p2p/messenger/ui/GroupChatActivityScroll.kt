@@ -122,7 +122,6 @@ internal fun GroupChatActivity.onNewIncomingItemAdded() {
     }
 }
 
-/** Unconditional scroll, for our own sent messages and attachments. */
 /**
  * The bottom bar and the quote pill are transparent outside, so the chat shows at the sides and underneath.
  * The list now extends to the bottom of the screen and the bar floats above it (see activity_chat.xml).
@@ -144,6 +143,7 @@ internal fun GroupChatActivity.syncRecyclerBottomInset() {
     recycler.setPadding(recycler.paddingLeft, recycler.paddingTop, recycler.paddingRight, inset)
 }
 
+/** Unconditional scroll, for our own sent messages and attachments. */
 internal fun GroupChatActivity.scrollToLastSettled() {
     // Scroll to the new message when the user is already at the bottom (auto-scroll for new messages).
     // `scrollToPosition` called DIRECTLY is unreliable: the newly added row is not measured yet, so the scroll sometimes does not happen or stops short.

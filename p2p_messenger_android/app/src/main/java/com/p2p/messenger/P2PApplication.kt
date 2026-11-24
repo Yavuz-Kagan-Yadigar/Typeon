@@ -96,9 +96,8 @@ class P2PApplication : Application() {
         )
         com.p2p.messenger.service.SelfUpdate.schedule(this)
 
-        // Dynamic colours derived from the wallpaper, on Android 12 and later. On older devices it is a no-op,
-        // and the static palette in themes.xml is used.
-        // ThemePrefs.applyAccentColor applies it, depending on the dynamic-colour switch.
+        // Wallpaper-derived (dynamic) colours on Android 12 and later are applied per activity by
+        // ThemePrefs.applyAccentColor, see onActivityPreCreated. Older devices keep the static palette in themes.xml.
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityPreCreated(activity: Activity, savedInstanceState: Bundle?) {
@@ -178,8 +177,8 @@ class P2PApplication : Application() {
                 res.updateConfiguration(config, metrics)
             }
 
-            // After the activity's `onCreate`: its views exist. On Android 12+ the text colour comes through the
-            // theme (`applyAccentColor`).
+            // After the activity's `onCreate`: its views exist. Below Android 12 the text colour is painted onto
+            // the views here (`applyTextColorLegacy`); on 12+ the theme carries it (`applyAccentColor`).
             override fun onActivityPostCreated(activity: Activity, savedInstanceState: Bundle?) {
                 ThemePrefs.applyTextColorLegacy(activity)
             }
@@ -240,8 +239,8 @@ class P2PApplication : Application() {
 
             override fun onActivityResumed(activity: Activity) {
                 AppLock.excursionResumed()
-                // `AppLock.guard` hides the content under the prompt and shows it again in `onStart`. A screen that was never
-                // stopped under the prompt gets only this call.
+                // `AppLock.guard` may hide the content under the prompt. It is shown again here, on resume, once unlocked.
+                // A screen that was never stopped under the prompt gets only this call.
                 if (AppLock.isUnlocked()) {
                     activity.findViewById<android.view.View>(android.R.id.content)?.visibility = android.view.View.VISIBLE
                 }

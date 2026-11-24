@@ -275,8 +275,8 @@ impl ChatView {
                 let reason = event.string("error");
                 self.apply_attachment_state(&event.string("file_id"), "failed", Some(reason));
             }
-                        // The file was deleted locally (eviction from the storage limit, or the message was deleted). No client was listening,
-                        // so the bubble kept looking "complete".
+            // The file was deleted locally (eviction from the storage limit, or the message was deleted).
+            // Without this arm the bubble kept looking "complete".
             (_, "file_evicted") => {
                 self.apply_attachment_state(&event.string("file_id"), "offered", None);
             }

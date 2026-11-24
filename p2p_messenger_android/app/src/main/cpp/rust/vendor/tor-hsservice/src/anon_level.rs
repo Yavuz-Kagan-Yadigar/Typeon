@@ -16,7 +16,7 @@ pub enum Anonymity {
     ///
     /// (This is implemented using our "single onion service" design.)
     ///
-    /// Can be represented in a serde-based configuration as`"non_anonymous"`
+    /// Can be represented in a serde-based configuration as `"not_anonymous"`
     /// (case insensitive).
     DangerouslyNonAnonymous,
 }

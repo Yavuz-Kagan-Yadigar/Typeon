@@ -22,15 +22,14 @@ class P2PService : Service() {
         const val NOTIFICATION_ID = 1
         const val PREFS_NAME = "p2p_settings"
         const val KEY_NODE_MODE = "node_mode_enabled"
-        /** Tor onion service preference, persisted. */
         /** Byte limit for history and attachment storage in node mode (see Rust `history_storage_limit_bytes`). */
         const val KEY_HISTORY_STORAGE_LIMIT = "history_storage_limit_bytes"
         const val DEFAULT_HISTORY_STORAGE_LIMIT_BYTES = 2L * 1024 * 1024 * 1024
 
         /** See `pollRunnable` and `nextPollDelayMs`.
          *
-         *  The idle ceiling is 2 s: the Rust keepalive schedule (`KEEPALIVE_FAST_INTERVAL_MS` = 2 s) runs inside poll turns, so a longer ceiling would slow down
-         *  detection of half-open connections in the background. */
+         *  Screen-on idle polls stay between 2 s and 3 s: the Rust keepalive schedule (`KEEPALIVE_FAST_INTERVAL_MS` = 2 s) runs inside poll turns, so a longer
+         *  wait would slow down detection of half-open connections. */
         private const val POLL_INTERVAL_ACTIVE_MS = 1000L
         private const val POLL_IDLE_STEP_MS = 500L
         /** The interval starts widening only after this many consecutive empty background turns (about 5 s), so a short background wake
@@ -44,7 +43,7 @@ class P2PService : Service() {
          * setup and mesh maintenance.
          *
          * The interval therefore depends on THREE real signals: whether a screen is listening, whether the device screen is on, and whether the core has real work
-         * (`busy` from `P2PLib.getOwnConnectionStatus`: a connected peer, an unconfirmed packet, a running download, a queued envelope, server work).
+         * (`busy` from `P2PLib.ownConnectionStatus`: a connected peer, an unconfirmed packet, a running download, a queued envelope, server work).
          * If none of them holds, the only thing to do is accept an incoming connection, which does not need a wake-up every second.
          *
          * The main gain is in the NUMBER of wake-ups: with the screen off and nothing happening, about 2,900 a day instead of about 86,400.
@@ -117,13 +116,13 @@ class P2PService : Service() {
 
         private val powerSaveExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
-        /** True while one of our activities is started (set by P2PApplication). Power save follows this, not just the screen: with the screen on in ANOTHER app,
-         *  the service would run at full rate and the LTE radio would never sleep, all of it charged to us (about 1 mAh per minute of screen-on time, measured on a device). */
         /** The service is up and polling (see `P2PRetryWorker`). */
         @Volatile
         var alive = false
             private set
 
+        /** True while one of our activities is started (set by P2PApplication). Power save follows this, not just the screen: with the screen on in ANOTHER app,
+         *  the service would run at full rate and the LTE radio would never sleep, all of it charged to us (about 1 mAh per minute of screen-on time, measured on a device). */
         @Volatile
         var appVisible = false
             private set
@@ -207,7 +206,7 @@ class P2PService : Service() {
         }
     }
 
-        // See `pollThread` and `activeConversationId`: the poll thread reads these, and onStartCommand and onDestroy write them on the main thread.
+        // The poll thread reads `isRunning`, and onStartCommand and onDestroy write it on the main thread.
         // `@Volatile` gives visibility.
     @Volatile
     private var isRunning = false
@@ -223,7 +222,7 @@ class P2PService : Service() {
     private var startNetRetryDelayMs = START_NET_RETRY_INITIAL_MS
 
     /** Whether the core really has work (see Rust `has_pending_work`). It is not asked on every turn: the query is itself a JNI call that takes the global lock.
-     *  It is refreshed sparsely, only on empty turns. */
+     *  It is refreshed sparsely: only while the screen is off, at most every 15 s (see `refreshCoreBusy`). */
     @Volatile
     private var coreBusy = true
     private var lastBusyCheckAt = 0L
@@ -245,7 +244,7 @@ class P2PService : Service() {
     @Volatile private var heldWakeTimeoutMs = 0L
     /** See `observeNetworkChangesForReconnect`: follows ANY default-network change. */
     private var defaultNetworkCallback: ConnectivityManager.NetworkCallback? = null
-    // This service runs `P2PLib.pollNetwork()` (JNI: message decryption, ratchet cryptography, DB archiving, gossipsub and file-offer event handling) every second, indefinitely.
+    // This service runs `P2PLib.pollNetwork()` (JNI: message decryption, ratchet cryptography, DB archiving, file-offer event handling) every second, indefinitely.
     // It is scheduled on its own `HandlerThread`, not on the UI thread's `Handler`. On the UI thread, any poll turn longer than a few hundred milliseconds (a large
     // `HistorySyncResponse`, a group fan-out, a slow SQLite write under disk I/O contention) would block touch input everywhere in the app, because the service
     // outlives the Activities. It would also show an ANR dialog past 5 seconds.
@@ -253,7 +252,7 @@ class P2PService : Service() {
     // GroupChatActivity `messageListener`), and `maybeNotify` only uses `NotificationManager` and a simple `var` read, so both may be called from any thread.
     private val pollThread = HandlerThread("P2PPollThread").apply { start() }
     private var handler: Handler = Handler(pollThread.looper)
-    /** `pollRunnable` used to run at a fixed 1 s, forever. A JNI call every second in the background (Rust `poll_events`: swarm scan, `reconnect_sweep`,
+    /** `pollRunnable` used to run at a fixed 1 s, forever. A JNI call every second in the background (Rust poll turn: swarm scan, `reconnect_sweep`,
      *  `retry_unconfirmed_messages`, etc.), even when no chat screen was ever opened, is the main cost in modern power models, because the number of wake-ups
      *  weighs more than the cost of any single one. To reduce it without losing or delaying messages: while ANY screen is listening (`listeners` is non-empty,
      *  the user is interacting with the app right now) the speed never changes (`POLL_INTERVAL_ACTIVE_MS`). In the background, after several consecutive turns
@@ -344,7 +343,7 @@ class P2PService : Service() {
     private fun nextPollDelayMs(): Long {
                 // 1) The user is looking at a chat right now.
         if (listeners.isNotEmpty()) return POLL_INTERVAL_ACTIVE_MS
-                // 2) A new event arrived, or there has not been enough quiet yet: the old behaviour (gradually from 1 s to 2 s).
+                // 2) A new event arrived, or there has not been enough quiet yet: poll every 1 s.
         if (consecutiveEmptyPolls < POLL_IDLE_BACKOFF_THRESHOLD) return POLL_INTERVAL_ACTIVE_MS
         // `appVisible` like `inDeepIdle`: with the screen on in ANOTHER app the
         // loop counted as deep idle but still polled every 2-3 s.
@@ -518,9 +517,9 @@ class P2PService : Service() {
 
     /**
      * A fully local notification system that does not depend on Google Play Services or FCM (see the file-header note in NotificationHelper). This service
-     * already scans the network every second, so a separate push infrastructure is not needed. ONLY real new messages ('message' and 'group_message') produce a
-     * notification. Edit, delete and status events are silent. If the related chat is open on screen (activeConversationId matches), the notification is
-     * SUPPRESSED, since the message is already visible live.
+     * already scans the network every second, so a separate push infrastructure is not needed. New messages, attachments, calls and whiteboard strokes produce
+     * a notification. Edit and delete events only update or clear a notification that is already showing. If the related chat is open on screen
+     * (activeConversationId matches), the notification is SUPPRESSED, since the message is already visible live.
      */
     private fun maybeNotify(json: String) {
         val obj = try {
@@ -666,11 +665,11 @@ class P2PService : Service() {
         }
     }
 
-    /** Short label for the attachment notification (see `maybeNotify`, 'file_offer'). */
     /** A disappearing message's content never goes into a notification (it would outlive the message there). */
     private fun shownText(obj: JSONObject, text: String): String =
         if (obj.optLong("expire_secs", 0L) > 0) getString(R.string.disappear_notification) else text
 
+    /** Short label for the attachment notification (see `maybeNotify`, 'file_offer'). */
     private fun attachmentNotificationLabel(mimeType: String, fileName: String, sticker: Boolean): String = when {
         sticker -> getString(R.string.lbl_last_sticker)
         mimeType.startsWith("image/") -> getString(R.string.lbl_last_photo)
@@ -784,8 +783,8 @@ class P2PService : Service() {
                     // Connection testing and automatic reconnecting: see `observeNetworkChangesForReconnect`.
             observeNetworkChangesForReconnect()
                     // Safety net: if the system restarts this service on its own, separately from MainActivity (the process was killed and brought back with START_STICKY),
-                    // initDatabase and the secret key load may not have run yet. These calls are idempotent: calling initDatabase on an open connection is harmless
-                    // (SQLite runs CREATE TABLE IF NOT EXISTS again), and loadIfPresent writes the same values over keys already loaded.
+                    // initDatabase and the secret key load may not have run yet. These calls are idempotent: calling initDatabase again returns at once (P2PLib.initDatabase checks databaseOpen)
+                    // and loadIfPresent writes the same values over keys already loaded.
                     // Measured as an ANR on a device (see /data/anr). All six calls below are heavy JNI and SQLite work, and ALL ran on the main thread. The captured stack
                     // showed the main thread inside `SkippedKeyManager.ensureLoaded` → JNI → `fsync()` in uninterruptible disk wait (`state=D`), which gave an
                     // 'Input dispatching timed out' ANR.
@@ -951,7 +950,7 @@ class P2PService : Service() {
      * This follows ANY default-network change (Wi-Fi to cellular, or the network disappearing and coming
      * back), and tells the Rust side (see `P2PLib.notifyNetworkChanged` and session.rs `reconnect_all_known_now`). Every libp2p connection set up over the OLD
      * network is now an invalid socket on the new interface (the local IP changed). Instead of waiting for the periodic scan (up to 15 s) or a ping (up to about
-     * 25 s, interval plus timeout) to notice, a full reconnect turn is triggered at once.
+     * 30 s, interval plus timeout) to notice, a full reconnect turn is triggered at once.
      * `onCapabilitiesChanged` is deliberately NOT listened to: it fires much more often (for example when signal strength metadata changes), and a full reconnect
      * turn each time would waste battery. `onAvailable` and `onLost` (when the default network changes or disappears completely) are reliable enough and a rarer signal.
      */
@@ -975,9 +974,7 @@ class P2PService : Service() {
         }
     }
 
-    /** Runs the JNI call off the main thread. `ConnectivityManager` callbacks are usually called on the main thread, and `notifyNetworkChanged` (which can start
-     *  a dial turn) must not block it. */
-    /** See `P2PLib.setMeteredNetwork`: the padding setting keeps a cellular radio awake. */
+    /** See `P2PLib.setMeteredNetwork`: on a metered network Tor channel padding is reduced, since padding keeps a cellular radio awake. */
     private fun applyMeteredToTor() {
         try {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -994,6 +991,8 @@ class P2PService : Service() {
     /** If a turn is already queued, another is not added: Android reports one network change through several callbacks, and one turn is enough to reconnect all peers. */
     @Volatile private var networkChangePending = false
 
+    /** Runs the JNI call off the main thread. `ConnectivityManager` callbacks are usually called on the main thread, and `notifyNetworkChanged` (which can start
+     *  a dial turn) must not block it. */
     private fun notifyNetworkChangedInBackground() {
         if (networkChangePending) return
         networkChangePending = true

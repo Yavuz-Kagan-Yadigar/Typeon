@@ -57,7 +57,7 @@ object IdentityManager {
         val ok = try {
             P2PLib.loadSecretBundle(plaintext)
         } finally {
-            plaintext.fill(0)  // // wipe to avoid leaving traces in memory
+            plaintext.fill(0)  // wipe to avoid leaving traces in memory
         }
         if (ok) loaded = true
         return ok

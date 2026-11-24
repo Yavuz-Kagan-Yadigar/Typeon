@@ -5,7 +5,7 @@ fn rec(id: &str, rev: u64, ts: u64, body: &[u8]) -> ArchiveRecord {
 }
 
 /// Reading a mailbox requires a REGISTERED reader (see `mailbox_readers`). In the real flow `Register` always
-/// comes before `Fetch`. The tests used to skip that step.
+/// comes before `Fetch`, and the tests do the same.
 fn register(store: &Store, owner: &[u8], mailbox: &str) {
     store
         .register_mailboxes(owner, &[mailbox.to_string()], &[], 0, 100)
@@ -290,8 +290,8 @@ fn ack_is_cumulative_and_idempotent() {
     assert_eq!(s.ack("mb_1", last, &recipient).unwrap(), 0);
 }
 
-/// See `Store::deposit`. Because of a gap in client-side de-duplication, the same handshake was re-deposited about
-/// once a second and filled the depositor's quota. The server no longer stores a second identical copy.
+/// See `Store::deposit`. A repeated deposit of identical bytes by the same depositor stores one copy only, so it cannot
+/// fill the depositor's quota.
 #[test]
 fn identical_redeposit_is_collapsed_and_does_not_grow_quota() {
     let s = Store::open_in_memory().unwrap();
@@ -306,7 +306,7 @@ fn identical_redeposit_is_collapsed_and_does_not_grow_quota() {
     }
     assert_eq!(s.mailbox_item_count("mb_1"), 1);
 
-    // The quota must grow by only ONE copy. That was the actual crash.
+    // The quota must grow by only ONE copy.
     let e = s.enrollment_by_peer("peerS").unwrap();
     assert_eq!(e.bytes_mail as usize, mail_row_bytes("mb_1", b"ayni-el-sikisma"));
 
@@ -383,8 +383,8 @@ fn a_lurking_reader_can_neither_delete_nor_fill_anothers_mail() {
     assert_eq!(s.ack("mb_fp", seq2, &lurker).unwrap(), 1);
 }
 
-/// In the old version, re-enrolling opened a new `enrollment_id` and left the old reader rows ownerless. That owner
-/// could never acknowledge, and the mail was held until the TTL.
+/// Re-enrolling must not leave the old reader rows ownerless: that owner could never acknowledge, and the mail would
+/// be held until the TTL.
 #[test]
 fn orphaned_reader_does_not_block_deletion() {
     let s = Store::open_in_memory().unwrap();
@@ -396,8 +396,7 @@ fn orphaned_reader_does_not_block_deletion() {
     assert_eq!(s.ack("mb_1", seq, &reader).unwrap(), 1);
 }
 
-/// A ratchet box has TWO registered readers, and one does not overwrite the other's registration. The single-owner
-/// model used to break this.
+/// A ratchet box has TWO registered readers, and one does not overwrite the other's registration.
 #[test]
 fn a_ratchet_mailbox_supports_two_registered_readers() {
     let s = Store::open_in_memory().unwrap();

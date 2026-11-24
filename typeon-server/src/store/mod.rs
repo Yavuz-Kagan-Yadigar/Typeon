@@ -107,11 +107,12 @@ const MAX_READERS_PER_KEY: i64 = 2;
 const READER_EVICT_IDLE_MS: i64 = 7 * 24 * 3600 * 1000;
 
 /// Overhead an archive row costs beyond its two peer-sized columns (bucket, ints, owner, primary key, two index
-/// entries). Charging only `sealed` and `record_id` let a 2-byte record cost 2 bytes against a row of about 150 bytes.
+/// entries). Charging only `sealed` and `record_id` would let a 2-byte record cost 2 bytes against a row of about
+/// 150 bytes.
 const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
-/// The same for a mail row (mailbox id, depositor, hash, three index entries). Charging only `sealed` let 3-byte
-/// items cost 3 bytes against a row of about 250 bytes.
+/// The same for a mail row (mailbox id, depositor, hash, three index entries). Charging only `sealed` would let
+/// 3-byte items cost 3 bytes against a row of about 250 bytes.
 const MAIL_ROW_OVERHEAD: usize = 128;
 
 /// Bytes a mail item is charged against its quota and the server-wide budget.
@@ -232,8 +233,8 @@ impl Store {
             let _ = conn.execute_batch("VACUUM");
         }
         // WAL: the server is one process, but reads and writes interleave. WAL is also much more durable than the
-        // rollback journal on sudden power loss. A volume without WAL support (some SD or exFAT mounts) silently stays
-        // in rollback mode, where the JNI or CLI connection blocks the server.
+        // rollback journal on sudden power loss. A volume without WAL support (some SD or exFAT mounts) stays in
+        // rollback mode, where the JNI or CLI connection blocks the server. The result is logged below.
         match conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
             Ok(mode) if mode.eq_ignore_ascii_case("wal") => {}
             Ok(mode) => log::warn!("SQLite WAL could not be enabled, journal_mode={mode}: server waits while a second connection writes"),
@@ -245,9 +246,9 @@ impl Store {
         // Deleted rows (reader rows, acks, mail) are overwritten with zeros, not left in free pages.
         let _ = conn.pragma_update(None, "secure_delete", "ON");
         // The JNI control surface (`serverStatus`, `joinCode`, `listDevices`, `revokeDevice`) opens a SECOND connection to
-        // the same file. WAL resolves most cases, but without `busy_timeout` conflicting writes returned `SQLITE_BUSY`
-        // at once. Nearly all call sites use `let _ =` or `unwrap_or(0)`, so a failed `deposit`, `ack` or
-        // `blob_record_chunk` was swallowed silently.
+        // the same file. WAL resolves most cases, but without `busy_timeout` a conflicting write fails with `SQLITE_BUSY`
+        // at once. Many call sites use `let _ =` or `unwrap_or(0)`, so such a failure (a `deposit`, `ack` or
+        // `blob_record_chunk`) would be lost without a trace.
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let store = Store { conn };
         store.init_schema()?;
@@ -265,8 +266,8 @@ impl Store {
     /// Schema. Same contract as `init_db` in the core: `CREATE TABLE IF NOT EXISTS`, plus `ALTER TABLE` for columns
     /// added later (only "duplicate column name" is ignored).
     ///
-    /// Runs once per `SCHEMA_VERSION`. Previously every CLI or JNI open re-ran the whole batch, writes included,
-    /// against the database the daemon was serving.
+    /// Runs once per `SCHEMA_VERSION`. A database already at this version skips the batch, so a CLI or JNI connection
+    /// does not re-run schema writes against the database the daemon is serving.
     fn init_schema(&self) -> Result<(), String> {
         let version: i64 = self.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or(0);
         if version == SCHEMA_VERSION {
@@ -315,7 +316,7 @@ impl Store {
                 -- Defter #03: bir kutunun TEK sahibi YOK — bir ratchet
                 -- kutusunu iki taraf da hem yazar hem okur (kutu kimliği
                 -- ortak kök anahtardan türüyor, bkz. `server_seal::
-                -- server_mailbox_id`), o yüzden `mailboxes.mailbox_id`
+                -- session_mailbox_secret`), o yüzden `mailboxes.mailbox_id`
                 -- birincil anahtarı yanlış modeldi. Erişim kontrolü artık
                 -- "bu kutuyu KAYDETMİŞ miydin" sorusu: kaydetmemiş bir
                 -- istemci ne okuyabilir ne silebilir.
@@ -403,12 +404,9 @@ impl Store {
                 -- unutulursa blob yanlış ofsetlerden servis edilir, o yüzden
                 -- blob'la birlikte saklanır.
 
-                -- Hangi parçaların GERÇEKTEN geldiği. Önceden sadece bir
-                -- sayaç vardı ve bu, parçaların KESİN OLARAK sırayla
-                -- gelmesini şart koşuyordu — yani aynı anda tek parça
-                -- havada olabiliyordu ve hız `parça/gidiş-dönüş` ile
-                -- sınırlıydı. Boru hattında parçalar sırasız gelir, o yüzden
-                -- sayaç yetmez: hangi indeksin geldiği tek tek tutulmalı.
+                -- Hangi parçaların GERÇEKTEN geldiği. Bir sayaç yetmez:
+                -- boru hattında parçalar sırasız gelir, o yüzden hangi
+                -- indeksin geldiği tek tek tutulur.
                 CREATE TABLE IF NOT EXISTS blob_chunks (
                     blob_id     TEXT NOT NULL,
                     chunk_index INTEGER NOT NULL,

@@ -8,7 +8,7 @@
 //!
 //! The reliability machinery (`awaiting_confirmation`, `pending_envelopes`,
 //! `pending_durable_retries`, `MessageContent::Ack`) is unchanged. Only the carrier
-//! changes: `try_publish_raw` tries the server before gossip. So this file has no
+//! changes: `try_publish_raw_via` sends direct or to the server. So this file has no
 //! retry loop of its own.
 //!
 //! ## Black-hole rule
@@ -131,7 +131,7 @@ const TOO_MANY_MAILBOXES: &str = "Too many mailboxes for this server";
 /// 256 KiB chunks and a 1 s round trip, 6 parallel requests raise the ceiling to about
 /// 1.5 MB/s.
 ///
-/// This is not fixed. The window adapts to the path (see `BLOB_RTT_TARGET_MS`).
+/// This is not fixed. The window adapts to the path between `BLOB_WINDOW_MIN` and `BLOB_WINDOW_MAX` (see `BLOB_RTT_GROW_FACTOR`).
 pub(crate) const BLOB_WINDOW_START: usize = 4;
 pub(crate) const BLOB_WINDOW_MIN: usize = 2;
 pub(crate) const BLOB_WINDOW_MAX: usize = 40;
@@ -298,7 +298,7 @@ pub(crate) enum ServerInflight {
     Enroll { server_id: String },
     Rebind { server_id: String },
     Register { server_id: String, ids: Vec<String>, dropped: Vec<String> },
-    /// `message_id`, if any. Used to fall back to gossip when delivery fails.
+    /// `message_id`, if any. Used to fall back to the direct path when delivery fails.
     ///
     /// `first_attempt_at`: time of the envelope's FIRST publish attempt. It is kept when the envelope goes back
     /// to the queue after a server error. The earlier code called `publish_envelope`, which stamped the entry
@@ -408,7 +408,7 @@ pub(crate) struct PendingBlobUpload {
     /// SHA-256 of the whole encrypted file. Sent with `BlobFinish`, so the server never serves a truncated
     /// upload. It is empty while queued and is computed by streaming the `.enc` file after the last chunk is
     /// uploaded (so the file is not read through once more early; attachments can reach 4 GiB).
-    /// Chunk indices in flight now (the pipeline, see `BLOB_PIPELINE_DEPTH`). Earlier this was a single
+    /// Chunk indices in flight now (the pipeline, bounded by the blob window). Earlier this was a single
     /// `bool`, so only one chunk could be in flight.
     pub inflight: HashSet<u32>,
     /// Chunks the server has acknowledged.
@@ -862,7 +862,7 @@ impl P2PCore {
         self.server_rt.remove(server_id);
         self.server_cursors.retain(|(sid, _), _| sid != server_id);
         // Its requests in flight: an answer must not write cursors for a server that is gone. A deposit goes over
-        // gossip instead.
+        // the direct path instead.
         let stale: Vec<request_response::OutboundRequestId> = self
             .server_inflight
             .iter()

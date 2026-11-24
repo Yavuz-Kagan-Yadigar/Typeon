@@ -33,10 +33,8 @@ object KeyboardInsets {
         // at the bottom of the list at that moment?
         var wasNearBottomBeforeResize = true
 
-        // On a Note 9S (Android 12), the insets listener below is never called. The chat root sits inside a DrawerLayout that consumes the
-        // insets, and the window resizes by itself (adjustResize works). The flag stayed false. So on keyboard CLOSE, the "not at bottom"
-        // branch scrolled back by the keyboard height ON TOP of LinearLayoutManager's own re-anchoring, and the list jumped up. The flag is
-        // now tracked from real scrolls. Calls with dy == 0 (sent after every layout, including the resize itself) do not touch it, so it
+        // The insets listener is not reliable on every phone: the chat root sits inside a DrawerLayout that can consume the insets. So the flag
+        // is also tracked from real scrolls. Calls with dy == 0 (sent after every layout, including the resize itself) do not touch it, so it
         // still holds the state from before the resize when the layout listener runs.
         recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {

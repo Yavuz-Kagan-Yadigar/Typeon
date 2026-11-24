@@ -78,15 +78,6 @@ internal fun SettingsFragment.confirmLogout() {
         .show()
 }
 
-/**
- * Deletes ALL persistent identity and message data on this device: the SQLite DB (plus its WAL and SHM helper files), the encrypted secret key bundle
- * (`identity_secret.enc`), the other identity keys wrapped by the Keystore (history, skipped-key and ARK; see [com.p2p.messenger.util.LocalWipe]),
- * and the attachment storage directory. The Rust core has no verified way to 'forget' these safely inside a running process (see the `AppRestarter` docs:
- * same reason, delete the files and restart in a clean process instead of resetting identity or network state in a live process).
- * View and theme preferences (`ThemePrefs`) are deliberately left alone: they belong to the device, not the identity.
- */
-/** Deletes the account. First a notice goes to all contacts, groups and sibling devices (see Rust `delete_account`). It waits for confirmations, or at most
- *  [ACCOUNT_DELETE_WAIT_MS] (offline contacts get it through the server), then the local data is deleted with `performLogout`. */
 /** This device is the root of the account (its fingerprint is the identity id). */
 internal fun SettingsFragment.isRootDevice(): Boolean = try {
     val arr = org.json.JSONArray(P2PLib.listLinkedDevices())
@@ -94,6 +85,8 @@ internal fun SettingsFragment.isRootDevice(): Boolean = try {
         .any { it.optBoolean("is_this_device") && it.optString("device_fingerprint") == P2PLib.getOwnIdentityId() }
 } catch (e: Exception) { true }
 
+/** Deletes the account. First a notice goes to all contacts, groups and sibling devices (see Rust `delete_account`). It waits for confirmations, or at most
+ *  [ACCOUNT_DELETE_WAIT_MS] (offline contacts get it through the server), then the local data is wiped with `LocalWipe.wipe` and the app restarts. */
 internal fun SettingsFragment.confirmDeleteAccount() {
     // `isRootDevice()` makes two JNI calls, so it does NOT run on the main thread. The dialog opens on the main thread with the result.
     lifecycleScope.launch(Dispatchers.IO) {
@@ -182,6 +175,13 @@ internal fun SettingsFragment.finishAccountWipe(ctx: android.content.Context, pr
     }
 }
 
+/**
+ * Deletes ALL persistent identity and message data on this device: the SQLite DB (plus its WAL and SHM helper files), the encrypted secret key bundle
+ * (`identity_secret.enc`), the other identity keys wrapped by the Keystore (history, skipped-key and ARK; see [com.p2p.messenger.util.LocalWipe]),
+ * and the attachment storage directory. The Rust core has no verified way to 'forget' these safely inside a running process (see the `AppRestarter` docs:
+ * same reason, delete the files and restart in a clean process instead of resetting identity or network state in a live process).
+ * View and theme preferences (`ThemePrefs`) are deliberately left alone: they belong to the device, not the identity.
+ */
 internal fun SettingsFragment.performLogout() {
     // Disk I/O off the UI thread; the restart hops back to main.
     val app = requireContext().applicationContext
@@ -195,8 +195,8 @@ internal fun SettingsFragment.performLogout() {
 
 /**
  * Takes the passphrase (and its confirmation). If they do not match or it is empty, the user is warned. If they match, it continues with the SAF
- * target picker (see `createRecoveryFileLauncher`). The Rust side (`export_recovery`) hardens the passphrase with Argon2id, so no minimum length or
- * complexity rule is imposed here. A short passphrase is cheaper to brute-force, but that is the user's own risk and preference; no further policy is set here.
+ * target picker (see `createRecoveryFileLauncher`). The Rust side (`export_recovery`) hardens the passphrase with Argon2id. The only rule here
+ * is a minimum of 12 characters.
  */
 internal fun SettingsFragment.showExportRecoveryDialog() {
     val context = requireContext()

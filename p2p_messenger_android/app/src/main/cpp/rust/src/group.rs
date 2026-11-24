@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct GroupMember {
     pub identity_id: String,
     pub added_at: u64,
-    /// Must always be the founder_identity_id. Verified in `apply_update`.
+    /// The founder's identity id: every add is made by the founder.
     pub added_by: String,
 }
 
@@ -21,7 +21,7 @@ pub struct Group {
     pub founder_identity_id: String,
     pub members: Vec<GroupMember>,
     pub created_at: u64,
-    /// Increases every time the membership list changes. Used to reject old or repeated `GroupUpdate` packets.
+    /// Increases with every signed change (membership, name, photo). Used to reject old or repeated `GroupUpdate` packets.
     pub version: u32,
     /// The group profile photo. It changes ONLY through `GroupChange::AvatarUpdate`, so only the founder can change it.
     #[serde(default)]
@@ -35,8 +35,8 @@ pub struct Group {
 
 /// Maximum number of entries kept in the founder transfer chain.
 ///
-/// Each entry carries an ML-DSA-87 signature (about 4.6 KB), and the chain travels with EVERY group update. Leaving it unbounded would use up
-/// gossipsub's 1 MB packet limit. 8 transfers are more than enough in practice. ACCEPTED LIMIT: a member who misses ALL of more than 8 consecutive
+/// Each entry carries an ML-DSA-87 signature (about 4.6 KB), and the chain travels with EVERY group update. Left unbounded, it would push an update
+/// past the envelope size limit (`MAX_ENVELOPE_BYTES`). 8 transfers are more than enough in practice. ACCEPTED LIMIT: a member who misses ALL of more than 8 consecutive
 /// transfers cannot repair itself and must be invited to the group again.
 pub const MAX_FOUNDER_CHAIN: usize = 8;
 
@@ -128,7 +128,6 @@ pub enum GroupUpdateError {
 }
 
 /// Largest forward gap one update may make (missed updates are allowed).
-/// 4096: at 2^20 a founder reached `u32::MAX` in 4096 updates.
 pub const MAX_VERSION_JUMP: u32 = 1 << 12;
 
 /// The type of change to apply. The canonical definition is `packet::GroupChange` (the network packet format, the `GroupUpdate.change` field).
@@ -136,10 +135,10 @@ pub const MAX_VERSION_JUMP: u32 = 1 << 12;
 /// different types with the same name, and callers could mix them up by mistake (a type error).
 pub use crate::packet::GroupChange;
 
-/// The receiver rejects a `GroupUpdate` if `signed_by != founder_identity_id` [...]. Whether `signed_by_device` is a known, ACTIVE
-/// device of the founder is checked separately.
+/// The receiver rejects a `GroupUpdate` if `signed_by` is not the founder. Whether `signed_by_device` is a known, ACTIVE device of the founder
+/// is checked separately.
 ///
-/// `is_signer_device_active_for_identity`: the caller (group_ops.rs) determines whether this device_fingerprint really is an ACTIVE device of the
+/// The caller (group_ops.rs) determines whether this device_fingerprint really is an ACTIVE device of the
 /// `signed_by` identity, by looking at the Contact / known_devices table. This module has no access to crypto or network state, so it takes the
 /// result as a parameter.
 pub fn validate_group_update(
@@ -164,8 +163,7 @@ pub fn validate_group_update(
     Ok(())
 }
 
-/// Applies a verified `GroupChange` to the group. Signature verification must already have been done separately, by `validate_group_update`,
-/// before this function is called.
+/// Applies a `GroupChange` to the group. The caller must have checked the signature and, with `validate_group_update`, the authority and version.
 pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, now: u64) {
     match change {
         GroupChange::Add(identity_id) => {
@@ -182,8 +180,7 @@ pub fn apply_change(group: &mut Group, change: &GroupChange, new_version: u32, n
             }
         }
         GroupChange::Remove(identity_id) => {
-            // The founder stays a member: removed, its updates still validated
-            // while its messages failed the membership check.
+            // The founder cannot be removed: its later updates must still validate.
             if *identity_id != group.founder_identity_id {
                 group.members.retain(|m| m.identity_id != *identity_id);
             }
@@ -323,7 +320,7 @@ mod tests {
         assert!(g.is_member("A") && g.is_member("B"));
     }
 
-    /// Recovery proposal: if the founder loses ALL their devices, the group was locked. A transfer hands authority to another MEMBER.
+    /// Recovery: if the founder loses ALL their devices, the group would be locked. A transfer hands authority to another MEMBER.
     #[test]
     fn founder_can_hand_over_to_a_member() {
         let mut g = Group::new("g1".into(), "Test".into(), "A".into(), 1000);
@@ -332,7 +329,7 @@ mod tests {
 
         apply_change(&mut g, &GroupChange::TransferFounder("B".into()), 2, 3000);
         assert_eq!(g.founder_identity_id, "B", "yetki uyeye gecmeli");
-        // Artik yalnizca B imzalayabilir.
+        // Now only B can sign.
         assert!(validate_group_update(&g, "B", true, 3).is_ok());
         assert_eq!(validate_group_update(&g, "A", true, 3), Err(GroupUpdateError::NotFounder));
     }
@@ -367,12 +364,12 @@ mod tests {
         g.push_founder_transfer(transfer(5, "A", "B"));
         assert_eq!(g.founder_chain.len(), 1, "same transfer must not apply twice");
 
-        // Sirasiz eklense de surume gore siralanmali.
+        // Even when added out of order, the chain is sorted by version.
         g.push_founder_transfer(transfer(3, "Z", "A"));
         assert_eq!(g.founder_chain[0].version, 3);
         assert_eq!(g.founder_chain[1].version, 5);
 
-        // Ust sinir: en eskiler dusmeli, en yeniler kalmali.
+        // Over the limit, the oldest entries are dropped and the newest kept.
         for v in 10..10 + MAX_FOUNDER_CHAIN as u32 {
             g.push_founder_transfer(transfer(v, "X", &format!("Y{}", v)));
         }

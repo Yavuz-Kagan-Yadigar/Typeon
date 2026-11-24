@@ -92,7 +92,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
         let stack = stack.clone();
         let query = query.clone();
         let generation = Rc::new(std::cell::Cell::new(0u64));
-        // A burst of events (16 kinds) collapses into one rebuild.
+        // A burst of events collapses into one rebuild.
         let pending = Rc::new(std::cell::Cell::new(false));
         Rc::new(move || {
             if pending.replace(true) {
@@ -136,12 +136,11 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
                     while let Some(child) = list.first_child() {
                         list.remove(&child);
                     }
-                    // filled in immediately after this closure is
-                    // created, so the old `expect` was fine in practice — but
-                    // a panic inside a GTK callback unwinds into C and aborts
-                    // the process, so fall back to a no-op refresh instead
-                    // (a pin toggle then only moves prefs; the next event or
-                    // 30s tick repaints the list).
+                    // The cell is filled right after this closure is created
+                    // (below). If it is empty, fall back to a no-op refresh:
+                    // a panic inside a GTK callback aborts the process. A pin
+                    // toggle then only moves prefs; the next event or 30 s
+                    // tick repaints the list.
                     let self_refresh: Rc<dyn Fn()> = refresh_cell
                         .upgrade()
                         .and_then(|cell| cell.borrow().clone())
@@ -172,10 +171,9 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     refresh();
 
     // Content changes arrive as events (below), and the stamps are absolute
-    // clock times, so this slow tick is only a backstop for anything the event
-    // list misses. It used to run every 5s, which re-queried every conversation
-    // in the list — two SQLite round-trips each — against the same global core
-    // lock the poll thread holds.
+    // clock times, so this 30 s tick is only a backstop for anything the event
+    // list misses. A shorter tick would re-query every conversation (two
+    // SQLite reads each) against the core lock the poll thread holds.
     {
         let refresh = refresh.clone();
         let container = container.downgrade();
@@ -228,7 +226,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
 }
 
 /// Core reads only — runs off the GTK thread (the core lock is shared with the
-/// poll thread, and this is 2-4 queries per conversation). `unread`/`pinned`
+/// poll thread, and this is about 2 queries per conversation). `unread`/`pinned`
 /// come from prefs, which live on the main thread; `apply_prefs` fills them.
 fn collect_rows(own_identity: &str) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
@@ -483,8 +481,7 @@ fn build_row(main: &Rc<MainUi>, row: &Row, refresh: Rc<dyn Fn()>) -> gtk::ListBo
     action_row.add_controller(gesture);
 
     // `AdwActionRow` *is* a `GtkListBoxRow`, so it goes into the list directly.
-    // Wrapping it in another `GtkListBoxRow` was the bug that stopped chats
-    // from opening: `GtkListBox` only activates its own direct children, so the
-    // nested row never emitted `activated` and the click went nowhere.
+    // A row wrapped in another `GtkListBoxRow` would never be activated, because
+    // `GtkListBox` only activates its own direct children.
     action_row.upcast()
 }

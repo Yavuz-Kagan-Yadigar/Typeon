@@ -5,7 +5,8 @@
 //! - **Signalling** (`MessageContent::Call`) rides the normal ratchet path
 //!   (`send_message_content`), so a ring reaches the peer over a direct libp2p
 //!   connection OR the store-and-forward server, whichever works right now.
-//!   Call signals are sent once and never acknowledged or repeated.
+//!   Call signals are not acknowledged. Group invites are repeated by the call
+//!   sweep (`call_sweep_inner`).
 //! - **Media** never touches the core lock or the poll loop. Kotlin encodes
 //!   (MediaCodec Opus / H.264) and hands opaque frames to `media_send`, which
 //!   encrypts once and pushes into per-link channels. Tokio tasks drain those
@@ -122,7 +123,7 @@ const INBOUND_GRACE: Duration = Duration::from_secs(5);
 /// Receiver -> sender report, see `media_on_packet`. Never reaches Kotlin.
 /// Payload `[target stream id 8][queue ms u16][flags u8]`, flag bit 0 =
 /// "send me a keyframe" (RTCP PLI's job): lets the encoder run a long GOP
-/// instead of paying for a keyframe every 2 s just in case someone lost one.
+/// instead of paying for a keyframe every 10 s just in case someone lost one.
 const KIND_REPORT: u8 = 3;
 const REPORT_EVERY_MS: u64 = 500;
 /// Sender -> everyone: `[flags u8]`, bit 0 muted, bit 1 camera off. Sent by
@@ -437,8 +438,9 @@ lazy_static::lazy_static! {
     static ref INBOX_READY: Condvar = Condvar::new();
     /// `(call id, sender)` of the last Hangups for calls we did not have:
     /// only that sender's Invite for it is then dropped (a Hangup that
-    /// overtook its Invite), not one from another group member. A few, not
-    /// one: two overtaken Hangups in a group let the first Invite ring.
+    /// overtook its Invite), not one from another group member. Up to
+    /// `ENDED_MEMORY` entries, not one: two overtaken Hangups in a group let
+    /// the first Invite ring.
     static ref EARLY_HANGUP: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
     /// Group id -> the last Invite of a group call running there, rung or
     /// not: what "Attend" joins (`start_group_call`).

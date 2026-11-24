@@ -125,7 +125,7 @@ impl P2PCore {
         let Some(up) = self.server_blob_uploads.first().cloned() else { return };
         let Ok(path) = self.enc_path_for(&up.file_id) else { return };
 
-        // Pipeline: up to `BLOB_PIPELINE_DEPTH` chunks may be in flight at once. With one chunk in flight, speed was limited by chunk size / round trip.
+        // Pipeline: up to the blob window's size of chunks may be in flight at once. With one chunk in flight, speed was limited by chunk size / round trip.
         if up.done.len() < up.total_chunks as usize {
             // `.enc` uses FIXED steps; the step is per file (see `file_chunk_size`).
             let chunk_size = self.file_chunk_size(&up.file_id);
@@ -287,7 +287,7 @@ impl P2PCore {
         self.server_sweep_at = 0;
     }
 
-    /// Gives an upload up. Chunks already on a server are deleted there (`BlobDelete`), or they hold its quota until the 24 h sweep.
+    /// Gives an upload up. Chunks already on a server are deleted there (`BlobDelete`), or they hold its quota until the server expires them.
     pub(crate) fn finish_blob_upload(&mut self, file_id: &str) {
         let started = self.server_blob_uploads.iter().find(|u| u.file_id == file_id).and_then(|u| {
             u.server_id.clone().filter(|_| !u.done.is_empty() || !u.inflight.is_empty()).map(|sid| (sid, u.upload_secret.clone()))

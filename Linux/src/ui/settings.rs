@@ -1,7 +1,8 @@
 //! Settings — the desktop form of `SettingsFragment`.
-//! Network, profile, appearance and the two security actions that are specific
-//! to this being a desktop: changing the vault passphrase, and exporting a
-//! recovery file for *this* device's keys.
+//! Three pages: Network, Appearance and Security. Security holds this device's
+//! identity, the profile, the local vault and the account actions. The vault
+//! passphrase change and the recovery-file export are the two actions specific
+//! to this being a desktop; both act on *this* device's keys.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -84,11 +85,9 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
                     prefs.tor_enabled = enabled;
                     prefs.save();
                     drop(prefs);
-                    // the notice is a toast, like the Android client's — the
-                    // transport can only be added when the network starts, so the
-                    // change lands at the next launch.
-                    // One toast: a second one replaces the first. Tor is the only
-                    // transport, so off means no network at all.
+                    // The notice is a toast. The transport is only set up when
+                    // the network starts, so the change lands at the next launch.
+                    // Tor is the only transport: with it off, no network starts.
                     app.toast(if enabled {
                         "Tor setting applies after a restart."
                     } else {
@@ -355,7 +354,7 @@ fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
                     Ok(()) => {
                         app.toast("Server added. Connecting…");
                         row.set_text("");
-                                                // Refresh the window so the row list is redrawn.
+                        // Refresh the window so the row list is redrawn.
                         present_page(&app, Some("Network"));
                     }
                     Err(error) => app.toast(&format!("Rejected: {}", error)),
@@ -370,7 +369,7 @@ fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
 
 fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
     let title = if entry.name.is_empty() { entry.address.clone() } else { entry.name.clone() };
-        // Enrolment uses the join code the operator published. If it fails, the reason shows here.
+    // Enrolment uses the join code the operator published. If it fails, the reason shows here.
     let subtitle = match (&entry.last_error, entry.connected, entry.enrolled) {
         (Some(err), _, _) if !err.is_empty() => err.clone(),
         (_, true, true) => "Connected".to_string(),
@@ -569,9 +568,8 @@ thread_local!(static REBUILDING: std::cell::Cell<bool> = const { std::cell::Cell
 /// "Import a font" at the top).
 fn rebuild_font_model(app: &Rc<App>, active_id: Option<&str>, font_row: &adw::ComboRow) {
     // `set_model` / `set_selected` fire `selected-notify`. Called from inside
-    // that very handler this re-entered it with index 0 — "Load a custom
-    // font…" — which opened the file dialog (modal on Windows: the window
-    // stops responding) before the font had been applied.
+    // that handler, it would re-enter with index 0 ("Load a custom font…")
+    // and open the file dialog before the font had been applied.
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -720,7 +718,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
                 // selection hangs GTK's list view (the window stops responding).
                 apply_theme(&app);
             } else {
-                // Custom font selected (idx > BUILT_IN_FONTS.len() + 1).
+                // Custom font selected (idx > BUILT_IN_FONTS.len(); index 0 is "Load…").
                 let custom_fonts = app.list_custom_fonts();
                 let custom_idx = idx - 1 - BUILT_IN_FONTS.len();
                 if let Some(cf) = custom_fonts.get(custom_idx) {
@@ -1028,8 +1026,8 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
 
     let profile = adw::PreferencesGroup::builder().title("Profile").build();
 
-        // The account name used to be fixed to the device name typed during onboarding. Changing it here notifies every contact over the same
-        // ratchet channel the profile picture uses, so contacts that are offline get it when they return.
+    // Changing the name notifies every contact over the same ratchet channel
+    // the profile picture uses, so offline contacts get it when they return.
     let name_row = adw::EntryRow::builder()
         .title("Account name")
         .show_apply_button(true)
@@ -1455,10 +1453,8 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
         // Fresh temp file (`create_new` => the 0600 mode really applies), checked
         // chmod, fsync, then rename over the target.
         use std::io::Write;
-        // A UNIQUE temp name in the target's directory: the old fixed
-        // "<target>.tmp" was unlinked unconditionally before the write, so
-        // saving over, say, /home/me/important.txt destroyed any unrelated
-        // important.txt.tmp that happened to exist.
+        // A unique temp name in the target's directory, so an unrelated file
+        // that happens to share a fixed temp name is never touched.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
@@ -1470,8 +1466,9 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
             std::process::id(),
             nanos
         ));
-                // A USB stick (FAT or exFAT) has no Unix permissions. The mode stays 0755 whatever is asked for, so the file can never be private there.
-                // The full key set must not sit wide open anywhere, even passphrase-wrapped. So such a location is REFUSED, instead of being written with a warning.
+        // FAT and exFAT have no Unix permissions, so the file cannot be
+        // private there. The key set is not written to such a location, not
+        // even with a warning, however it is passphrase-wrapped.
         let refused = "Recovery file not written: that location cannot make it private. \
                        Choose a folder inside your home directory.";
         // Only a file this `create_new` call actually created may ever be
@@ -1502,8 +1499,7 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
                 }
                 std::fs::rename(&tmp, &path)
             });
-        // The plaintext has left the heap's useful life either way: it is on
-        // disk (or the write failed). Do not leave a copy in memory.
+        // Wipe the plaintext from memory whether or not the write succeeded.
         bytes.zeroize();
         if written.is_err() && created {
             let _ = std::fs::remove_file(&tmp);
@@ -1596,8 +1592,8 @@ pub fn apply_theme(app: &Rc<App>) {
         crate::theme::Appearance::from_prefs(&app.prefs.borrow(), dark, base_font_pt(), custom_font_family);
     let css = crate::theme::stylesheet(&appearance);
 
-    // Dev aid: the generated sheet is ~400 lines of interpolated text and a
-    // wrong brace in it fails silently. `TYPEON_DUMP_CSS=1` prints it.
+    // Dev aid: the generated sheet is long interpolated text, and a wrong
+    // brace in it fails silently. `TYPEON_DUMP_CSS=1` prints it.
     if std::env::var("TYPEON_DUMP_CSS").is_ok() {
         eprintln!("---CSS-START---\n{css}\n---CSS-END---");
     }

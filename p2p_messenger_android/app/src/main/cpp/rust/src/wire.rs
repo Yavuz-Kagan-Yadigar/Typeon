@@ -3,9 +3,8 @@
 use super::*;
 
 
-/// The content of this request/response does not matter. Its only purpose is to check that the connection is still alive.
-/// `request_response::cbor` needs the empty struct to serialize and deserialize as CBOR. `#[derive(Serialize, Deserialize)]` provides that
-/// without extra fields.
+/// The request only checks that the connection is still alive. `request_response::cbor` needs the struct to serialize and deserialize as CBOR,
+/// which `#[derive(Serialize, Deserialize)]` provides.
 /// `bye`: "I am shutting down, do not dial me until I connect again" (desktop Quit). The receiver parks the device (`parked:{fp}` meta), and
 /// `try_reconnect_device` skips it until a new connection from it arrives.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -62,8 +61,7 @@ pub struct AckBatchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AckBatchResponse;
 
-/// One envelope (the same bytes a gossipsub publish carries), sent straight to
-/// a connected device. See `ENVELOPE_PROTOCOL`.
+/// One envelope, sent straight to a connected device. See `ENVELOPE_PROTOCOL`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvelopeRequest {
     #[serde(with = "serde_bytes")]
@@ -223,7 +221,7 @@ pub(crate) type FileChunkCodec = Capped<CborCodec<FileChunkRequest, FileChunkRes
 //
 // Kademlia (DHT) discovery. The Identify protocol is REQUIRED for Kademlia: it lets Kademlia learn the listen addresses of connected peers
 // and add them to the routing table (see docs.rs/libp2p/kad: "the Identify protocol must be manually hooked up to Kademlia").
-// Gossipsub carries the message and handshake packets. The relay carries them blindly ("Node/relay carries this packet blindly").
+// Message and handshake packets travel over the envelope protocol or the server. The relay carries them blindly.
 #[derive(NetworkBehaviour)]
 pub(crate) struct P2PBehaviour {
     /// Server (store-and-forward) RPC. See the `server_client` module.
@@ -245,8 +243,8 @@ pub(crate) struct P2PBehaviour {
     /// Call media streams (`call::MEDIA_PROTOCOL`, and the server relay) —
     /// long-lived streams driven by tokio tasks, see `call` module docs.
     pub(crate) stream: libp2p_stream::Behaviour,
-    /// File attachment chunk transfer. Unlike gossipsub, it sends a request/response (RPC-like) directly to one target `PeerId`. Moving a 4 GB
-    /// file over gossipsub (a pub/sub network designed for small, frequent messages) is impractical. See the attachments.rs module note.
+    /// File attachment chunk transfer. It sends a request/response (RPC-like) directly to one target `PeerId`. Moving a 4 GB file through a
+    /// pub/sub topic (designed for small, frequent messages) would be impractical. See the attachments/mod.rs module note.
     pub(crate) file_chunks: request_response::Behaviour<FileChunkCodec>,
     /// Connectivity through a relay, for reaching peers that cannot be dialed directly (different network, or behind NAT). This device can use a
     /// relay to reach them. It is always enabled on every device.

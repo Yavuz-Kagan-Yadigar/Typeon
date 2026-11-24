@@ -1,5 +1,5 @@
 // Windows only: embed the app icon as resource 1. Explorer shows it on the
-// exe, and GLib's notification backend loads resource 1 for the tray icon.
+// exe, and the tray icon (win.rs) loads resource 1.
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;

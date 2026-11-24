@@ -47,8 +47,8 @@ impl P2PCore {
         self.send_message_content(peer_device_fingerprint.to_string(), &content, None).map(|_| ())
     }
 
-    /// Group counterpart of `request_older_history`. Group messages are pairwise fan-out, so there is no single authority. The request goes to ALL reachable other
-    /// members (same fan-out pattern as `send_group_message`). The first reply fills the gap. Later replies are silently ignored by the `message_exists_with_id`
+    /// Group counterpart of `request_older_history`. Group messages are pairwise fan-out, so there is no single authority. The request goes to up to
+    /// `ASKED_PER_PRESS` reachable other members, the founder and the longest-standing first. The first reply fills the gap. Later replies are silently ignored by the `message_exists_with_id`
     /// check (see there).
     pub(crate) fn request_older_group_history(&mut self, group_id: &str, before: i64, after: i64) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
@@ -192,7 +192,7 @@ impl P2PCore {
         };
         for (row_id, sealed, edited_at_ms) in ops {
             // Each row goes once it applies: one that cannot be opened now
-            // (key not loaded) stays until its `KEEP_MS` expiry.
+            // (key not loaded) stays until its 30-day expiry.
             let event = match sealed {
                 Some(blob) => {
                     let Some(text) = self.open_local_blob(&blob).and_then(|p| String::from_utf8(p).ok()) else { continue };
@@ -276,9 +276,10 @@ impl P2PCore {
         }
     }
 
-    /// `message_exists_with_id` among the 1:1 rows received from the
-    /// identity of `sender_fp` only. The id is the peer's choice: a global
-    /// match let another chat's row re-ack a packet that was never stored.
+    /// Whether a row with this id was received from the identity of `sender_fp`
+    /// (any of its devices, 1:1 chat only). Our own devices are not checked
+    /// per sender: any row with the id counts. The id is the peer's choice: a
+    /// global match let another chat's row re-ack a packet that was never stored.
     pub(crate) fn received_from_sender(&self, message_id: &str, sender_fp: &str) -> bool {
         if self.own_devices.contains_key(sender_fp) {
             return self.message_exists_with_id(message_id);
@@ -548,14 +549,6 @@ impl P2PCore {
             .map(|d| d.identity_id.clone())
     }
 
-    /// Adds a group message to the local archive: the group counterpart of `archive_message`. `peer_device_fingerprint` is deliberately written as an empty string
-    /// (a "this is not a DM" marker that keeps the NOT NULL constraint); the real key is `group_id`. Before, group messages were either NEVER archived (received ones,
-    /// see the receive_message Text/group_id note), or archived under the WRONG key (sent ones: each recipient's 1:1 `peer_device_fingerprint`, a SEPARATE row for each
-    /// copy of the N-way fan-out). The second could never be read back as real group history, and if that recipient was also a 1:1 contact, it leaked into that
-    /// contact's DM history (`load_message_history` filters ONLY by `peer_device_fingerprint`). Now EVERY group message (sent or received) is archived as ONE row,
-    /// keyed by `group_id`.
-    /// `reply_to_message_id` / `reply_to_preview` / `reply_to_sender_identity_id`: same note as `archive_message`. The group counterpart also carries the
-    /// replied-to message's sender `identity_id` (see the packet.rs `reply_to_sender_identity_id` note).
     /// Signs a group message as its author, with this device's hybrid key (Ed25519 and ML-DSA-87, like every other signature here). The result travels with the
     /// message and is stored by every member: `"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`.
     // ponytail: hex text, about 9.4 KB per message (the ML-DSA signature is 4.6 KB raw). Make the field bytes if the size of group packets and history pages matters.
@@ -651,6 +644,14 @@ impl P2PCore {
         }
     }
 
+    /// Adds a group message to the local archive: the group counterpart of `archive_message`. `peer_device_fingerprint` is deliberately written as an empty string
+    /// (a "this is not a DM" marker that keeps the NOT NULL constraint); the real key is `group_id`. Before, group messages were either NEVER archived (received ones,
+    /// see the receive_message Text/group_id note), or archived under the WRONG key (sent ones: each recipient's 1:1 `peer_device_fingerprint`, a SEPARATE row for each
+    /// copy of the N-way fan-out). The second could never be read back as real group history, and if that recipient was also a 1:1 contact, it leaked into that
+    /// contact's DM history (`load_message_history` filters ONLY by `peer_device_fingerprint`). Now EVERY group message (sent or received) is archived as ONE row,
+    /// keyed by `group_id`.
+    /// `reply_to_message_id` / `reply_to_preview` / `reply_to_sender_identity_id`: same note as `archive_message`. The group counterpart also carries the
+    /// replied-to message's sender `identity_id` (see the packet.rs `reply_to_sender_identity_id` note).
     pub(crate) fn archive_group_message(&mut self, group_id: &str, sender_identity_id: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sent_at_ms: u64, author_proof: Option<&str>) -> Result<(), String> {
         self.archive_group_message_exp(group_id, sender_identity_id, direction, plaintext, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, author_proof, None)
     }
@@ -794,7 +795,8 @@ impl P2PCore {
 
     /// Buffers an Edit/Delete whose target is NOT YET in the archive. See the `pending_edits_deletes` field and `EARLY_EDIT_DELETE_TTL_MS` docs. It deliberately sends NO
     /// Ack: the sender's `awaiting_confirmation` retry keeps this packet alive until the target `Text` is archived and `replay_buffered_edits_deletes` runs (or the TTL
-    /// expires). Limited to `MAX_EARLY_EDITS_DELETES_PER_TARGET` per target (the oldest is dropped), so a malicious peer cannot consume unbounded memory.
+    /// expires). Limited to `MAX_EARLY_EDITS_DELETES_PER_TARGET` per target (the sender's own oldest entry is dropped to make room), and to fixed
+    /// totals across all targets and senders, so a malicious peer cannot consume unbounded memory.
     pub(crate) fn buffer_edit_or_delete(&mut self, target_message_id: &str, peer_fp: &str, sender_identity_id: &str, packet_message_id: &str, content: MessageContent) {
         let now = current_time_ms();
         // The per-target cap alone left the number of targets open: a peer
@@ -937,7 +939,7 @@ impl P2PCore {
                 match (&group_id, owns_message) {
                     (Some(gid), true) => serde_json::json!({"type": "group_edit", "group_id": gid, "message_id": target_message_id, "text": new_text}),
                     (None, true) => serde_json::json!({"type": "edit", "peer": chat_key, "message_id": target_message_id, "text": new_text}),
-                    // See instead of publishing a type that no client handles, a diagnostic log plus `noop`.
+                    // Not published as a type no client handles: a diagnostic log and `noop`.
                     (_, false) => {
                         warn!("Edit rejected (ownership not verified): {}", packet_message_id);
                         serde_json::json!({"type": "noop"})
@@ -990,7 +992,7 @@ impl P2PCore {
                 match (&group_id, owns_message || owns_file) {
                     (Some(gid), true) => serde_json::json!({"type": "group_delete", "group_id": gid, "message_id": target_message_id}),
                     (None, true) => serde_json::json!({"type": "delete", "peer": chat_key, "message_id": target_message_id}),
-                    // See same reason.
+                    // Same reason as for Edit.
                     (_, false) => {
                         warn!("Delete rejected (ownership not verified): {}", packet_message_id);
                         serde_json::json!({"type": "noop"})
@@ -1066,7 +1068,7 @@ impl P2PCore {
     /// Without this, history on the server would show a new device the UNEDITED version of messages. Even a deleted message would come back. The protocol solves this
     /// with `ArchiveRecord.rev`: the server accepts only a HIGHER revision for the same `record_id`.
     ///
-    /// The `rev` is the wall clock. The first upload used `sent_at_ms` (a moment in the past), so an edit or delete always produces a larger value. If two devices of
+    /// The `rev` is our wall clock at upload, so an edit or delete always produces a larger value than the upload before it. If two devices of
     /// the same identity upload the same row, the higher revision wins. This is the same behaviour as the local archive's own last-write-wins rule (see `edit_ts`).
     pub(crate) fn requeue_archive_row(&mut self, group_id: Option<&str>, peer_device_fingerprint: &str, target_message_id: &str) {
         let Some(key) = self.history_key else { return };
@@ -1201,9 +1203,6 @@ impl P2PCore {
         }
     }
 
-    /// When a history-sync row is archived FRESH (this device had no copy of it; see the same pattern at the `apply_delete_to_archive` call sites), the responder's
-    /// `is_edited` flag is also set here if it is set on the responder side. Unlike `apply_edit_to_archive`, it does NOT re-encrypt the text. The fresh archive write
-    /// already stored `SyncedMessage.text` (the responder's CURRENT, edited content). The flag is only set here, so that it does not go missing.
     /// The stored text, deleted and edited marks of a group row (decrypted). None: no row, no key, or it does not open.
     pub(crate) fn group_row_text(&self, group_id: &str, message_id: &str) -> Option<(String, bool, bool)> {
         let key = self.history_key?;
@@ -1235,6 +1234,9 @@ impl P2PCore {
         );
     }
 
+    /// When a history-sync row is archived FRESH (this device had no copy of it; see the same pattern at the `apply_delete_to_archive` call sites), the responder's
+    /// `is_edited` flag is also set here if it is set on the responder side. Unlike `apply_edit_to_archive`, it does NOT re-encrypt the text. The fresh archive write
+    /// already stored `SyncedMessage.text` (the responder's CURRENT, edited content). The flag is only set here, so that it does not go missing.
     pub(crate) fn mark_synced_message_edited(&mut self, group_id: Option<&str>, peer_device_fingerprint: &str, target_message_id: &str) {
         let conn = match &self.db {
             Some(c) => c,
@@ -1381,7 +1383,7 @@ impl P2PCore {
                 }
             }
         }
-        results.reverse(); // eskiden yeniye
+        results.reverse(); // the query runs newest first; callers get oldest first
         results
     }
 
@@ -1594,7 +1596,7 @@ impl P2PCore {
                 }
             }
         }
-        results.reverse(); // eskiden yeniye
+        results.reverse(); // the query runs newest first; callers get oldest first
         results
     }
 

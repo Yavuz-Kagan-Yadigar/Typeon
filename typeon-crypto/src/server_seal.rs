@@ -8,8 +8,7 @@
 //!
 //! `MessagePacketHeader` carries `sender_identity_id` and
 //! `sender_device_fingerprint` in plain text (see packet.rs). That is fine on
-//! gossipsub, where the topic name is pseudonymous and an observer sees
-//! "X published to opaque topic T", not "X -> Y". A server, however, writes
+//! the direct path, inside the Noise-encrypted peer connection. A server, however, writes
 //! envelopes to disk and keeps them. A plain sender fingerprint there would
 //! give the operator the full social graph.
 //!
@@ -219,7 +218,7 @@ pub fn archive_epoch_for(ts_ms: u64) -> u64 {
 /// `conv_key` is the counterpart's `identity_id` for 1:1 chats and the `group_id` for groups. It is the
 /// identity id, not the device fingerprint, so the archive stays readable when the counterpart changes
 /// device. Both kinds share this key space with no tag, because a tag would orphan every stored archive.
-/// The caller keeps them apart by format: a group id is `group-<16 hex>`, an identity id is 64 hex
+/// The caller keeps them apart by format: a group id is `group-<16 hex nonce><32 hex tag>`, an identity id is 64 hex
 /// (`group_ops::process_group_update`).
 fn conv_archive_key(archive_root_key: &[u8; 32], conv_key: &str) -> Result<[u8; 32], String> {
     let mut info = Vec::with_capacity(24 + conv_key.len());

@@ -55,18 +55,17 @@ impl P2PCore {
     /// lowered limit applies at once, without waiting for the next
     /// `periodic_storage_sweep` round (see `enforce_history_storage_limit`).
     pub(crate) fn set_history_storage_limit_bytes(&mut self, bytes: u64) {
-        // Both UIs stop at 32 GB. u64::MAX would make the limit meaningless.
+        // The settings slider stops at 32 GB. The core caps the value at 64 GiB, so an
+        // out-of-range value cannot make the limit meaningless.
         self.history_storage_limit_bytes = bytes.min(64 << 30);
         self.enforce_history_storage_limit();
     }
 
-    /// The `rendezvous_node` shown on the QR / "my code" screen and carried to the other
-    /// side: an address the swarm really listens on (`own_listen_addrs`, see
-    /// `poll_events`), plus our PeerId as a `/p2p/<peer_id>` suffix. Without the suffix,
-    /// `extract_peer_id` on the other side never finds a PeerId, and a scanned QR
-    /// address is silently unusable for `kad.add_address` and `dial` (see
-    /// `process_qr_packet`). Prefers the onion address, else a relay circuit address.
-    /// `None` while Tor bootstraps. Never the loopback listener: no peer can dial it.
+    /// The node address shown on the QR / "my code" screen and carried to the other side:
+    /// our `.onion` address with our PeerId as a `/p2p/<peer_id>` suffix. Without the
+    /// suffix, `extract_peer_id` on the other side finds no PeerId, and the scanned address
+    /// is unusable for `kad.add_address` and `dial` (see `process_qr_packet`). `None` while
+    /// Tor is not ready. No listen address is shared.
     pub(crate) fn get_node_address(&self) -> Option<String> {
         let swarm = self.swarm.as_ref()?;
         let peer_id = *swarm.local_peer_id();
@@ -107,13 +106,10 @@ impl P2PCore {
     /// Battery: the swarm advances only while `poll_events` runs (`now_or_never`, no
     /// background task). Opening the poll interval blindly would stall the network:
     /// handshakes, Tor circuit builds and mesh upkeep would slow down too. So the
-    /// interval follows the core's real state. Busy means:
-    ///   * at least one connected peer (an incoming message is possible, keepalive runs),
-    ///   * a packet awaiting confirmation (retry timer runs),
-    ///   * a file download or upload in progress,
-    ///   * an unsent envelope in the queue,
-    ///   * server work to deposit or fetch.
-    /// If none holds, the only thing left is accepting an inbound connection, which
+    /// interval follows the core's real state. Busy means one of the terms in
+    /// `has_pending_work`: a fresh pairing, an active download, a blob upload that can
+    /// run, a deferred incoming packet, or an active call. A connected peer alone is not
+    /// busy. If none holds, the only thing left is accepting an inbound connection, which
     /// needs no poll every second.
     pub(crate) fn has_pending_work(&self) -> bool {
         // Battery: a connected peer alone is not busy. A permanently open Tor or server
@@ -122,14 +118,14 @@ impl P2PCore {
         // awaiting_confirmation, pending_envelopes and pending_group_messages are NOT
         // counted. Messages for an offline peer wait for hours and the retry timer handles
         // them. Counting them would hold the CPU awake (measured: wake lock held 15/15 min).
-        // An active pairing (TTL 15 min) needs fast polls for the IdentityExchange and
-        // Handshake rounds. Without them, pairing stalled in the 60 s waits of deep idle.
+        // A fresh pairing needs fast polls for the IdentityExchange and Handshake rounds.
+        // Without them, pairing stalled in the 60 s waits of deep idle.
         // Server work counts only while connected to a server. While it is unreachable these
         // queues cannot advance, and counting them held the wake lock 24/7 (measured 15/15
         // min). `server_archive_queue` (background sync backlog) is never counted.
         self.pairing_is_fresh()
             || self.downloads_busy() > 0
-            // `server_inflight` is not work. The 30 s fetch sweep is sent in the same poll turn the service checks next, so it always read as busy,
+            // `server_inflight` is not work. The fetch sweep is sent in the same poll turn the service checks next, so it always read as busy,
             // and no phone reached deep idle (measured: wake lock held 30 of 30 minutes, LTE radio active 93 %). Its reply is a network event that
             // wakes the native wait anyway.
             // Not while the server refuses deposits (quota): the upload then only waits for the backoff. Only with a routing server up, since
@@ -176,8 +172,8 @@ impl P2PCore {
     /// Raw network signals of THIS device (not the peer) for the chat header status, as
     /// JSON. The Kotlin side builds the human-readable summary (i18n, adjustable later;
     /// see P2PLib.kt). Rust and libp2p cannot tell whether the internet is reachable,
-    /// since they have no access to OS interfaces. Kotlin adds that as `has_internet`
-    /// via `ConnectivityManager`.
+    /// since they have no access to OS interfaces. Kotlin (`ConnectionStatus.hasInternet`, via
+    /// `ConnectivityManager`) combines that with this JSON; the key is not added here.
     pub(crate) fn own_connection_status(&self) -> serde_json::Value {
         let connected_peers = self.swarm.as_ref().map(|s| s.connected_peers().count()).unwrap_or(0);
         let busy = self.has_pending_work();

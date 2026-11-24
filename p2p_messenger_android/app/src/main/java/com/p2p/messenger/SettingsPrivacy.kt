@@ -62,7 +62,7 @@ import com.p2p.messenger.SettingsFragment.Companion.closestStepIndex
 // SettingsFragment, notification and app lock cards.
 
 /**
- * 'Show messages in notifications' switch. On by default. When off, a notification shows only the sender (for a group message, the sender and the group),
+ * 'Show messages in notifications' switch. Off by default. When off, a notification shows only the sender (for a group message, the sender and the group),
  * not the text. See util.NotificationPrefs and NotificationHelper.
  */
 internal fun SettingsFragment.setupNotificationControls(view: View) {

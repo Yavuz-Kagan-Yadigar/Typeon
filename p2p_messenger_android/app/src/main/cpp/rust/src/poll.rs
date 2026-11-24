@@ -55,7 +55,7 @@ impl P2PCore {
         self.ensure_own_mailbox_subscription();
         // See `pairing_mailbox_subs`. Drop pairing subscriptions whose ratchet is established or whose TTL has passed.
         self.flush_pairing_mailbox_subs();
-        // `Option<PeerId>`: with gossipsub `Signed` authenticity (see `start_network`), each incoming message carries the sender's real `PeerId`.
+        // `Option<PeerId>`: the `PeerId` of the connection the message arrived on, or `None` for server mail.
         // This is the SOURCE of the PeerId mapping that file download (`request_response`, see `device_to_peer_id`) needs.
         let mut incoming: Vec<(Option<PeerId>, Vec<u8>)> = Vec::new();
         // `true` = new, `false` = expired; in event order.
@@ -87,12 +87,8 @@ impl P2PCore {
         // (server peer, answered?) — see `server_rpc_timeouts`
         let mut server_rpc_outcomes: Vec<(PeerId, bool)> = Vec::new();
         let mut envelope_events: Vec<EnvelopeEventLocal> = Vec::new();
-        // Collected when a connection is established, including reconnects. After the loop, if the peer already has a ratchet session,
-        // `resubscribe_ratchet_topic` is called again. Normally this is unnecessary, since gossipsub tells the peer about its
-        // subscriptions on each new connection. But Tor circuits (especially ones built over relay or DCUtR) break and rebuild far
-        // more often than plain TCP. If the automatic announcement fails silently, the mesh can stay broken for this pair, and an
-        // unconfirmed message retries forever (see `awaiting_confirmation`). The call is idempotent and cheap, so it runs on every
-        // connection as a safety net.
+        // Collected when a connection is established, including reconnects. After the loop, the device-to-PeerId
+        // mapping is refreshed from them and queued messages are retried (see below).
         let mut connections_established: Vec<PeerId> = Vec::new();
         // Peers that sent a keepalive with `bye` (shutting down): parked below.
         let mut bye_peers: Vec<PeerId> = Vec::new();
@@ -163,8 +159,8 @@ impl P2PCore {
                     };
                     match event {
                         libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
-                            // The real listen address. The `node_address` shown on the QR / "my code" screen comes from here
-                            // (see `own_listen_addrs` and `get_node_address`).
+                            // The real listen address. Relay circuit addresses are kept in
+                            // `own_listen_addrs`. The QR address is the `.onion` one (`get_node_address`).
                             if address.iter().any(|p| matches!(p, MultiaddrProtocol::P2pCircuit)) {
                                 info!("Relay reservation accepted: {}", address);
                             }
@@ -580,8 +576,7 @@ impl P2PCore {
                 }
             }
         }
-        // See `mark_connection_suspect`. A new connection to a suspect peer arrived, so the old ones are probably dead. Close them, since gossipsub
-        // keeps using the first connection.
+        // See `mark_connection_suspect`. A new connection to a suspect peer arrived, so the old ones are probably dead. Close them.
         for (peer, cid) in &established_conns {
             let suspect = self.keepalive_state.get(peer).map_or(false, |s| s.suspect);
             let others: Vec<libp2p::swarm::ConnectionId> = self.peer_conns.get(peer)
@@ -636,7 +631,7 @@ impl P2PCore {
                 }
             }
         }
-        // Direct envelopes: same path as a gossipsub message, with the
+        // Direct envelopes: same path as an incoming message, with the
         // Noise-proven sender. A packet the rate limit is about to drop gets
         // no answer: the "delivered" reply made the sender skip its early
         // server deposit for a packet nobody processed.
@@ -766,23 +761,14 @@ impl P2PCore {
             }
         }
 
-        // See `connections_established` (above). For every newly established or re-established connection, when a ratchet session already exists, the gossipsub
-        // subscription is triggered again (idempotent, a no-op if already subscribed). This is a safety net against Tor circuit drops silently breaking the mesh.
+        // See `connections_established` (above). For every newly established or re-established connection, a device whose PeerId is not known yet
+        // is tied to the PeerId at the end of its stored address.
         if !connections_established.is_empty() {
-            // Observed on a phone (Note 9S, mobile data): the only
-            // other way to fill `device_to_peer_id` is a packet received over
-            // gossipsub. After a fresh pairing over a slow network (Tor/relay),
-            // the IdentityExchange and Handshake were deposited to the server
-            // before any connection existed. Their gossipsub copies found no
-            // peers and were never retried. The relay connection that came up
-            // seconds later was then never tied to the contact:
-            // `is_connected_to_device` stayed false, the chat showed "Offline",
-            // and every message and Ack went via the server even with a live
-            // connection. The peer id at the end of the pairing address is the
-            // device's own libp2p id (QR/manual code, trusted like the rest of
-            // the code). Noise has just proven the connection is that id, so
-            // tie them together. A mapping learned from a verified packet is
-            // never overwritten.
+            // Without this, a device known only from its pairing address stayed unmapped after a fresh pairing over a slow network. The
+            // IdentityExchange and Handshake were deposited to the server before any connection existed, and the relay connection that came up
+            // later was never tied to the contact. The chat showed "Offline", and every message and Ack went via the server even with a live
+            // connection. The peer id at the end of the pairing address is the device's own libp2p id (QR/manual code). Noise has just proven
+            // the connection is that id, so tie them together. A mapping learned from a verified packet is never overwritten.
             let learned: HashMap<String, PeerId> = self.device_last_addr.iter()
                 .chain(self.device_onion_addr.iter())
                 .filter(|(fp, _)| !self.device_to_peer_id.contains_key(*fp))
@@ -809,9 +795,6 @@ impl P2PCore {
             for fp in &fps {
                 self.meta_del(&format!("parked:{}", fp));
             }
-            // Refresh the subscription FIRST, THEN drain the queue. The order matters: this loop repairs the gossipsub subscription that Tor circuit drops
-            // silently broke. If the pending messages were triggered first, the most valuable first attempt would go out to a broken mesh.
-
             // Reset the retry backoff for this device. Before, nothing reset the backoff when a connection came up. The queue grows exponentially up to
             // `ACK_RETRY_MAX_MS` (120 s), so a sibling device that had been offline stayed in the queue for minutes even though it was connected.
             // A connection being up is the strongest signal for "try now". The interval is also reset to the initial value, since the mesh may still not
@@ -864,13 +847,13 @@ impl P2PCore {
             // Observed on a phone: "QR scanned, nothing happened on either device". The connection was eventually made, but the link still did not complete.
             // For a pending link target (`pending_link_target`), the `IdentityExchange` is sent during QR scanning in `approve_device_link`. At that moment
             // there is no connection yet, so it goes into `pending_envelopes`, and its `PENDING_ENVELOPE_TIMEOUT_MS` (20 s) starts counting from the scan. The
-            // first dial over Tor can take 10-17 s, and it can time out and be retried. So the envelope expired just as the gossip mesh was forming, and was
+            // first dial over Tor can take 10-17 s, and it can time out and be retried. So the envelope expired just as the connection was forming, and was
             // dropped. No path sent it again, and the link stayed incomplete forever.
             //
             // The loop above cannot see this target: `device_to_peer_id` is filled only when a VERIFIED packet arrives from the device (see
             // `record_peer_id_if_known`), which is exactly what has not happened yet. So the PeerId is resolved here by comparing against the address saved
-            // at pairing (`device_last_addr` / `device_onion_addr`). The connection has just been made, so the envelope is sent again. Even if the mesh is
-            // not ready yet, this starts the 20 s window at CONNECTION time, not scan time. That is the critical point.
+            // at pairing (`device_last_addr` / `device_onion_addr`). The connection has just been made, so the envelope is sent again. Even if the direct
+            // path is not ready yet, this starts the 20 s window at CONNECTION time, not scan time. That is the critical point.
             if let Some(fp) = self.pending_link_target.clone() {
                 let link_peer_id = self.device_last_addr.get(&fp)
                     .or_else(|| self.device_onion_addr.get(&fp))
@@ -979,7 +962,7 @@ impl P2PCore {
                             }
                         }
                     }
-                    warn!("Direct envelope send failed ({}), falling back to gossipsub/server: {}", error, &fp[..fp.len().min(8)]);
+                    warn!("Direct envelope send failed ({}), falling back to other routes: {}", error, &fp[..fp.len().min(8)]);
                     match self.try_publish_raw_via(&fp, &envelope, first_attempt_at, false) {
                         Err(PublishFailure::Transient(_)) => {
                             // Tracked messages are resent by `retry_unconfirmed_messages`;
@@ -1018,8 +1001,7 @@ impl P2PCore {
                         .filter(|(_, p)| **p == peer)
                         .map(|(fp, _)| fp.clone())
                         .collect();
-                    // The sender knows our PeerId (from the pairing address) before we know theirs (we learn it only from a packet received over
-                    // gossipsub). Replying here told them "delivered" while every Ack was ignored, so our messages stayed unconfirmed and were
+                    // The sender knows our PeerId (from the pairing address) before we know theirs (we learn it only from a verified packet). Replying here told them "delivered" while every Ack was ignored, so our messages stayed unconfirmed and were
                     // retried for minutes. Dropping the channel fails their request, and they fall back to the encrypted Ack. That one also
                     // teaches us their PeerId.
                     if fps.is_empty() {
@@ -1312,7 +1294,7 @@ impl P2PCore {
         self.flush_outbound_acks();
 
         // See `awaiting_confirmation`. This is the ONLY real end-to-end delivery guarantee for Text (outside groups), Edit, Delete and HistorySyncRequest. Unlike
-        // `pending_envelopes`, it continues indefinitely until the peer acknowledges. After the incoming packets, an Ack read in this turn stops the retry (and
+        // `pending_envelopes`, it continues until the peer acknowledges, or until `TEXT_RETRY_GIVE_UP_MS` (7 days) passes. After the incoming packets, an Ack read in this turn stops the retry (and
         // the suspect probe) that is due in the same turn.
         lock_watch::phase("retry_unconfirmed");
         self.retry_unconfirmed_messages();
@@ -1432,10 +1414,8 @@ impl P2PCore {
     /// See `message_rate_limiter` and `RATE_LIMIT_WINDOW_MS`. `true` means allow. `false` means the limit is exceeded for this window, and the caller must drop the
     /// packet WITHOUT processing it (no signature check, no ratchet decryption).
     ///
-    /// Sibling bursts: a VERIFIED sibling device gets a window cap four times higher. Its PeerId-to-fingerprint mapping is trustworthy because
-    /// `device_to_peer_id` is filled only after signature verification, and a fingerprint with our own identity is a sibling. On reconnect, retried messages, sibling
-    /// echoes, Acks and backfill all arrive within the same seconds, and can legitimately exceed the 60 per 10 s cap. Dropped packets did arrive eventually via retries,
-    /// but the "instant sync on reconnect" goal turned into a crawl window by window. The cap for foreign or ordinary contacts did not change.
+    /// An established peer (a ratchet session and an active known device) gets `RATE_LIMIT_MAX_ESTABLISHED` per window. Any other peer gets
+    /// `RATE_LIMIT_MAX_PER_WINDOW`.
     ///
     /// Is this PeerId an identity-verified peer with an established session? The test is deliberately the PeerId proven by the transport layer, not a claim inside the
     /// packet. `device_to_peer_id` is filled only after the signature is verified (see `record_peer_id_if_known`), so an attacker cannot open this path by writing a
@@ -1718,7 +1698,7 @@ impl P2PCore {
             }
             NetworkEnvelope::Message(m) => {
                 let sender_fp = m.header.sender_device_fingerprint.clone();
-                // See `early_packets` and `EARLY_PACKET_TTL_MS`. If there is no ratchet yet (the message came before the handshake, since gossipsub gives no ordering
+                // See `early_packets` and `EARLY_PACKET_TTL_MS`. If there is no ratchet yet (the message came before the handshake, since the network gives no ordering
                 // guarantee), the packet is NOT dropped. It is buffered and replayed when the handshake arrives. Only KNOWN devices are buffered (an unknown sender was
                 // already rejected, and this also keeps the buffer from filling without bound). `source` is buffered together with the packet (see the `early_packets`
                 // field note). The signature is not verified yet at this point, so the source is not recorded here. `receive_message` records it itself at replay time,

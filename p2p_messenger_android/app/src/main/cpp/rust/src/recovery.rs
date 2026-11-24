@@ -9,7 +9,7 @@ pub(crate) static RECOVERY_TRIMMED: std::sync::atomic::AtomicUsize = std::sync::
 impl P2PCore {
 
     // ---------------------------------------------------------------
-    // Recovery file. The basic version is in place. Full SyncPayload and multi-device integration are the next step.
+    // Recovery file: export and import, with the sibling sync payload and the own devices.
     // ---------------------------------------------------------------
 
     #[cfg(test)]
@@ -203,9 +203,8 @@ pub(crate) fn open_recovery_file(file_bytes: &[u8], passphrase: &str) -> Result<
     // The parameters come from the file. Unchecked, a damaged or crafted
     // file asked for gigabytes of memory (the app is killed) or hours of
     // work, before the passphrase is even tested. `seal_recovery_file`
-    // writes m=64 MiB, t=2, p=1.
-    // also a total-work bound (4x what `export_recovery` writes), or
-    // 256 MiB x 10 passes froze the import screen for minutes.
+    // writes m=64 MiB, t=2, p=1. The limits below allow up to 4x that
+    // total work.
     if file.argon2_m_cost > MAX_RECOVERY_ARGON2_M_COST_KIB || file.argon2_t_cost > 10 || file.argon2_p_cost > 4
         || file.argon2_m_cost as u64 * file.argon2_t_cost as u64 > 4 * 65_536 * 2
     {
@@ -240,10 +239,9 @@ impl P2PCore {
     /// `getPendingSecretBundle`, encrypts it with the Keystore, and writes it to disk (see `IdentityManager.persistNewIdentity`, the same call and flow).
     ///
     /// `device_name` is NOT in the file (`export_recovery`'s `ExportedDevice` carries only the secret keys). So the import asks the user for a new
-    /// name at that moment (the same pattern as Kotlin `ImportRecoveryActivity` / `showDeviceNameDialog`). All public keys EXCEPT ML-KEM can be
-    /// derived deterministically from the secret (Ed25519 / ML-DSA / X25519, the same derivation as `generate_identity`). ML-KEM's
-    /// `encapsulation_key()` also derives the public key (encapsulation key) directly from the secret (decapsulation key). So the file never
-    /// needs to carry a public key: the `export_recovery` output already contained only secrets.
+    /// name at that moment (the same pattern as Kotlin `ImportRecoveryActivity` / `showDeviceNameDialog`). The public keys are derived from the
+    /// secrets: Ed25519, ML-DSA and X25519 by the same derivation as `generate_identity`, and the ML-KEM encapsulation key from the decapsulation
+    /// key. So the file carries only secrets, and no public key.
     #[cfg(test)]
     pub(crate) fn import_recovery(&mut self, file_bytes: &[u8], passphrase: &str, device_name: String) -> Result<(String, Vec<u8>), String> {
         self.import_recovery_precheck()?;

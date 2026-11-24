@@ -15,13 +15,8 @@ import java.security.SecureRandom
  */
 object SkippedKeyManager {
     private const val TAG = "SkippedKeyManager"
-    // On a DECRYPT ERROR the key is NOT regenerated.
-    //
-    // This used to call `generateAndPersist` when the file existed but decryption threw. That OVERWROTE the key file with a fresh random key. It
-    // treated "no key" and "the key could not be decrypted this time" as the same thing. A single temporary Keystore failure (a device restored from
-    // backup, a lock-screen change that reset the credential, a StrongBox fault) then destroyed everything encrypted with that key, irreversibly, and
-    // the user saw no warning. The sibling classes (`ArchiveKeyManager`, `IdentityManager`) already behaved correctly: on a decrypt failure they only
-    // return. Regeneration now happens ONLY when the file does not exist at all.
+    // A key file that exists but cannot be decrypted is never regenerated: a new key would make the old data unreadable.
+    // A new key is generated only when the file does not exist.
 
     private const val KEY_FILENAME = "skipped_key_enc.enc"
 
@@ -57,8 +52,8 @@ object SkippedKeyManager {
         }
     }
 
-    /** `null`: the key file could not be read or decrypted (it is NOT made
-     *  again then, see #04 above), or a first key could not be stored. */
+    /** `null`: the key file could not be read or decrypted (it is never made
+     *  again then), or a first key could not be stored. */
     private fun loadOrCreate(filesDir: File): ByteArray? {
         val file = File(filesDir, KEY_FILENAME)
         if (file.exists()) {

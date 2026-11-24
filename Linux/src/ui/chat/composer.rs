@@ -55,7 +55,7 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
     record_cancel.add_css_class("flat");
     record_cancel.set_visible(false);
     if !crate::audio::is_available() {
-        // No ffmpeg, no capture — say so rather than failing on click.
+        // No capture backend (ffmpeg on Linux, GStreamer on Windows) — say so rather than failing on click.
         record.set_sensitive(false);
         record.set_tooltip_text(Some(
             "Voice messages need ffmpeg installed (it captures through PipeWire).",
@@ -334,13 +334,13 @@ impl ChatView {
         }
 
         // Stop: restore the composer first so the UI never looks stuck while
-        // ffmpeg finalises and the file is encrypted.
+        // the recorder finalises and the file is encrypted.
         Self::reset_recording_ui(button, timer, cancel);
 
         let Some(recording) = self.recording.borrow_mut().take() else {
             return;
         };
-        // Below about a second it is almost always a mis-click.
+        // Under 0.8 s it is almost always a mis-click.
         if recording.elapsed_ms() < 800 {
             recording.cancel();
             self.app().toast("Too short — hold on a moment longer.");
@@ -349,7 +349,7 @@ impl ChatView {
 
         // The microphone stops now, not when the caption is answered:
         // nothing said while the dialog is up may end up in the message.
-        // `finish` waits for ffmpeg to write the trailer, so it runs off the
+        // `finish` waits for the recorder to write the file trailer, so it runs off the
         // GTK thread; the caption is asked once the file is final.
         // A voice message goes through the same flow as photos and files: an
         // optional caption, plus the active reply if there is one.
@@ -504,7 +504,7 @@ impl ChatView {
         // Decoded in the worker below, never on the GTK thread.
         let want_preview = util::is_image(&mime);
 
-                // See the `prompt_attachment_caption` note at the top of the file. If the screen already holds an active reply (the
+                // See the `prompt_attachment_caption` doc. If the screen already holds an active reply (the
                 // same logic as a text message, see `send_message`), the attachment goes with it.
         let reply = self.reply_to.borrow().clone();
         let (reply_id, reply_preview, reply_sender) = match reply {

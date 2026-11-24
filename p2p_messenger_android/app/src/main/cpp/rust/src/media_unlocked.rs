@@ -4,8 +4,7 @@ use super::*;
 
 
 /// See `P2PCore::begin_outgoing_file` for the reason the work is split. Encrypting a file that can take gigabytes must not hold the GLOBAL core
-/// lock, so it runs here, between two short locked phases. The JNI and `api` wrappers now call this instead of the old single-piece
-/// `prepare_and_send_file`.
+/// lock, so it runs here, between two short locked phases. The JNI and `api` wrappers call this instead of one long locked call.
 /// Shared skeleton of the two wrappers below: begin (locked), encrypt (unlocked), finish (locked). If any step fails, nothing of the file stays
 /// behind: neither the `.enc` nor the `files` row / queued server upload that `finish` may already have written (a row marked 'complete' for a
 /// deleted `.enc` made the attachment undownloadable forever).
@@ -329,10 +328,9 @@ pub(crate) fn attachment_jxl_frames_unlocked(file_id: &str) -> Result<(u32, u32,
 /// atomic `rename` puts it in place (the second call's rename wins; both contents are identical).
 pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String, String> {
     let (file_key, sha256_hex, enc_path, decrypted_path) = core_lock().begin_attachment_decrypt(file_id)?;
-    // A JPEG XL ("hi-res" image) is handed out as PNG: no viewer of ours
-    // reads JPEG XL. Lossless both ways.
+    // A JPEG XL ("hi-res" image) is handed out as PNG, because no viewer of ours
+    // reads JPEG XL. An animated one is handed out as GIF instead.
     let jxl = decrypted_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("jxl"));
-    // an animated one as GIF instead.
     // Named by content hash: identical animations share one conversion.
     let gif_path = decrypted_path.with_file_name(format!("anim-{sha256_hex}.gif"));
     if jxl && gif_path.exists() {
@@ -405,9 +403,9 @@ pub(crate) fn attachment_plaintext_path_unlocked(file_id: &str) -> Result<String
     Ok(plain_path.to_string_lossy().to_string())
 }
 
-/// the decrypt ran without the lock. When the attachment was
-/// deleted (or evicted) meanwhile, the plaintext just written goes too, or
-/// it stayed in `plain_cache` with no row to remove it.
+/// Checks that the attachment still exists after a decrypt that ran without the
+/// lock. If it was deleted (or evicted) meanwhile, the plaintext just written is
+/// removed too, or it would stay in `plain_cache` with no row to remove it.
 fn attachment_gone(file_id: &str, written: &std::path::Path) -> bool {
     let present = crate::core_lock_read().db.as_ref().map_or(true, |c| {
         c.query_row("SELECT 1 FROM files WHERE file_id = ?1 AND status = 'complete'", params![file_id], |_| Ok(())).is_ok()

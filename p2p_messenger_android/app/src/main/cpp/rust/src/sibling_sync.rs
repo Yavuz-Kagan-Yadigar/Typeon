@@ -25,7 +25,7 @@ impl P2PCore {
                 identity_id: contact.trusted_identity_id.clone(),
                 display_name: contact.display_name.clone(),
                 added_via_group: contact.added_via_group,
-                // Avatars are deliberately NOT part of the sync: the gossipsub single-message limit is 1 MB (see `max_transmit_size` in start_network),
+                // Avatars are deliberately NOT part of the sync: an envelope is capped at `MAX_ENVELOPE_BYTES` (1 MiB),
                 // and a large contact list plus avatars could exceed it. Avatars travel separately, in each contact's `ProfileUpdate`
                 // (contacts re-send them when the sibling introduces itself). Messaging does not need them.
                 avatar_jpeg: None,
@@ -35,7 +35,7 @@ impl P2PCore {
             });
         }
         contacts.sort_by(|a, b| a.identity_id.cmp(&b.identity_id));
-        // Contact avatars are left out on purpose (the 1 MiB `max_transmit_size` limit). Groups, however, were embedded as-is through
+        // Contact avatars are left out on purpose (the 1 MiB envelope limit). Groups, however, were embedded as-is through
         // `serde_json::to_value(g)`, and `Group.avatar_jpeg` lives inside that struct. Avatars are 720p / 85% JPEG (about 100-250 KB), so a few
         // groups with avatars exceed the `DeviceSync` / `DeviceLinkGrant` limit. `try_publish_raw` treats that as `PublishFailure::Permanent`: no retry,
         // and the message is dropped from `awaiting_confirmation`, so the device sync was silently never sent. The group avatar travels separately,
@@ -1025,7 +1025,7 @@ impl P2PCore {
     }
 
     /// Collects the last `limit` messages from my own archive. This is the answer to a sibling's backfill request. The total number of
-    /// entries is capped by `SIBLING_BACKFILL_MAX_ENTRIES` (gossipsub 1 MB limit).
+    /// entries is capped by `SIBLING_BACKFILL_MAX_ENTRIES`.
     ///
     /// If both `scope_identity_id` and `scope_group_id` are `None`, the old behaviour applies: ALL chats, and `before_timestamp` is ignored
     /// (the automatic `request_sibling_backfill` uses this). If one is set, the request narrows to that single chat, and `before_timestamp`
@@ -1036,7 +1036,7 @@ impl P2PCore {
         // rows come newest first (local `timestamp`), so stop at the first older one.
         let too_old = |m: &ArchivedMessage| since_timestamp.is_some_and(|s| (m.timestamp as i64) < s);
         let mut entries = Vec::new();
-        // The row-count cap alone did not guarantee the gossipsub 1 MB limit (long message texts). See `HISTORY_SYNC_MAX_TEXT_BYTES`.
+        // The row-count cap alone did not guarantee the 1 MiB envelope limit (long message texts). See `HISTORY_SYNC_MAX_TEXT_BYTES`.
         let mut text_budget: usize = HISTORY_SYNC_MAX_TEXT_BYTES;
         let own_id = self.my_identity_id();
         // Unscoped (the automatic backfill): the entry cap is shared. With `limit` rows from each chat, the first ten 1:1 chats filled it,
@@ -1707,7 +1707,7 @@ impl P2PCore {
     }
 
     /// Revokes a SIBLING device of my identity: builds a signed `DeviceRevoke` and broadcasts it to all contacts and the other sibling devices,
-    /// and deactivates it locally. The last active device cannot be revoked.
+    /// and deactivates it locally.
     pub(crate) fn revoke_own_linked_device(&mut self, fp: &str) -> Result<(), String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         if fp == own_fp {
@@ -1723,14 +1723,14 @@ impl P2PCore {
         self.remember_own_revoke(&revoke);
         let content = MessageContent::DeviceRevokeNotice(revoke);
         // The revoked device first, on the session it still has: it wipes
-        // itself (`apply_device_revoke_notice`). It was never told; marked
-        // inactive below, it is in no target list.
+        // itself (`apply_device_revoke_notice`). It is not in the broadcast
+        // targets below; it gets this notice here, and is marked inactive below.
         // One attempt (direct, or the server mailbox when it is offline). The
         // retry entry is dropped with the session below, and a revoked
         // device's Ack is not accepted anyway. If it is lost, the device's
         // next packet brings the revoke back (`answer_revoked_sibling`).
         let _ = self.send_message_content(fp.to_string(), &content, None);
-        // Yerelde iptal et.
+        // Deactivate it locally.
         if let Some(rec) = self.known_remote_devices.get_mut(fp) {
             rec.is_active = false;
             let rec2 = rec.clone();

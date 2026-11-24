@@ -4,11 +4,11 @@
 //! Model: the metadata (file name, size, MIME type, a fresh random AEAD key) travels over the normal ratchet-encrypted message channel
 //! (see the `MessageContent::FileOffer` in file_transfer.rs). The fresh key is therefore protected end to end, and no separate key exchange
 //! is needed. The actual bytes are requested and sent in fixed-size chunks (256 KiB) over a separate libp2p `request_response` protocol.
-//! A 4 GB file cannot practically travel as ONE gossipsub message: gossipsub is designed for small, frequent messages, and the whole file
-//! would have to fit in memory.
+//! A 4 GB file cannot practically travel as ONE message on the ratchet channel: that channel is meant for small messages, and the whole
+//! file would have to fit in memory.
 //!
 //! Each chunk is encrypted SEPARATELY with the file's `file_key`, using a nonce derived from the chunk index
-//! (see `nonce_from_chunk_index`, the same pattern as `nonce_from_message_number` in ratchet.rs). Stepping the Double Ratchet on every chunk
+//! (see `nonce_from_chunk_index`, the same pattern as `nonce_from_message_number` in typeon-crypto/src/ratchet.rs). Stepping the Double Ratchet on every chunk
 //! would be needlessly expensive (thousands of PQ-KEM steps), and it does not fit the design either: the ratchet gives per-message forward
 //! secrecy, and here one "message" is already split into thousands of chunks. Integrity works at two levels: each chunk has its own AEAD tag,
 //! verified as soon as the chunk arrives, and when the file is fully decrypted for display, the whole file is compared against its SHA-256
@@ -194,9 +194,9 @@ pub fn encrypt_file_to_disk_with(
 ) -> Result<(u64, String), String> {
     let cipher = ChaCha20Poly1305::new_from_slice(file_key).map_err(|_| "Invalid file key")?;
     let mut src = File::open(source_path).map_err(|e| e.to_string())?;
-    // A photo goes out without its EXIF/XMP: size and hash below are those
-    // of the bytes that are sent. A JPEG/PNG/JPEG XL the scanner cannot follow
-    // is refused, not sent with its metadata.
+    // JPEG, PNG, JPEG XL and WebP lose their EXIF/XMP here: size and hash below
+    // are those of the bytes that are sent. If the scanner cannot follow one of
+    // them, it is refused, not sent with its metadata.
     let mut magic = [0u8; 8];
     let got = read_full(&mut src, &mut magic).map_err(|e| e.to_string())?;
     const DOUBT: &str = "Photo metadata could not be removed; file not sent";

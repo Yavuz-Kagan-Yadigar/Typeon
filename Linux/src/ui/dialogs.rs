@@ -311,7 +311,7 @@ pub fn add_contact(app: &Rc<App>) {
         move |text| {
             // Core lock — the poll thread can hold it for seconds — so the
             // manual-entry processing runs off the GTK thread and the UI only
-            // reports the result (H125 pattern).
+            // reports the result.
             let app = app_for_submit.clone();
             crate::app::run_in_background(
                 move || core::process_manual_entry(&text),
@@ -452,7 +452,7 @@ pub fn show_own_code(app: &Rc<App>) {
                         // than capturing a clone — capturing would make the
                         // button own a closure that owns the button.
                         copy.connect_clicked(move |button| {
-                            // The pairing code is a 24 h bearer secret: mark it
+                            // The pairing code is a bearer secret while its nonce is valid (30 min): mark it
                             // so clipboard managers do not record/preview it.
                             let text = gtk::gdk::ContentProvider::for_value(&manual.to_value());
                             let hint = gtk::gdk::ContentProvider::for_bytes("x-kde-passwordManagerHint", &glib::Bytes::from_static(b"secret"));
@@ -540,7 +540,7 @@ pub fn linked_devices(app: &Rc<App>) {
             let rows = rows.clone();
             // The core read takes the shared core lock; a poll round can hold
             // it for seconds, so it never runs on the GTK thread — not even
-            // from this 3-second timer (see `watch_device_alerts`).
+            // from the 3-second timer below.
             crate::app::run_in_background(core::list_linked_devices, move |devices| {
                 for row in rows.borrow_mut().drain(..) {
                     group.remove(&row);
@@ -559,7 +559,7 @@ pub fn linked_devices(app: &Rc<App>) {
 
                     // No "Revoke": only the phone (primary device) can revoke; a desktop is secondary.
 
-                    // A revoked device only lingers in the list: hide it here.
+                    // A revoked device stays listed until the user removes it here.
                     if !device.is_active {
                         let forget = gtk::Button::builder().label("Remove from list").valign(gtk::Align::Center).build();
                         let app = app.clone();

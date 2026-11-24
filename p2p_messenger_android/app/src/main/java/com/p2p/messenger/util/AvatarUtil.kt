@@ -76,12 +76,8 @@ object AvatarUtil {
         if (avatarBytes == null || avatarBytes.isEmpty()) return
         try {
             val dir = File(context.cacheDir, "avatar_view").apply { mkdirs() }
-            // Each tap used to write a new plaintext JPEG file here, and NONE of them was deleted. Every other temp file path in the app deletes its
-            // file (see the `tempFile.delete()` pattern in ChatActivity, SettingsFragment and GroupChatActivity). Repeated views of a profile photo
-            // therefore piled up an unlimited number of unencrypted face photos in the app cache. `allowBackup=false` blocks cloud leaks, but anyone with
-            // local file access (root, USB debugging ADB, forensic analysis) could read them for far longer than needed. MediaViewerActivity may still be
-            // showing the file, so deleting ALL of them before writing a new one is risky (it could break a viewer that is open). Instead, old files
-            // older than a reasonable retention time (10 minutes) are pruned. That prevents unbounded growth.
+            // The photo is written as a plaintext file in the app cache. Files older than 10 minutes are deleted on each call, so the cache does
+            // not grow. A file is not deleted at once: MediaViewerActivity may still be showing it.
             val retentionMs = 10 * 60 * 1000L
             val now = System.currentTimeMillis()
             dir.listFiles()?.forEach { old ->

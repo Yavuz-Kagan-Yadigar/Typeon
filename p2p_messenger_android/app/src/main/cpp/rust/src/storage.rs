@@ -5,7 +5,7 @@ use super::*;
 impl P2PCore {
 
     // ---------------------------------------------------------------
-    // Attachments (files, photos, videos, voice). See the attachments.rs module note; maximum size 4 GB.
+    // Attachments (files, photos, videos, voice). See the attachments/mod.rs module note; maximum size 4 GB.
     // Policy: the SENDER always keeps its own copy of a file it sent, regardless of its node mode. On the RECEIVING side, when node mode is on,
     // a new file offer is downloaded and stored automatically (see the receive_message FileOffer arm). When node mode is off, only the metadata
     // is shown and the download waits for the user's "Download" tap. This is the same rule as message-history archiving (stored locally only
@@ -219,7 +219,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// JSON `[{id, animated, created_at}]`, newest first.
+    /// Sets or clears the favorite flag of a sticker.
     /// ponytail: favorites stay on this device (not synced to siblings).
     pub(crate) fn set_sticker_favorite(&self, id: &str, favorite: bool) -> Result<(), String> {
         let conn = self.db.as_ref().ok_or("DB not open")?;
@@ -227,6 +227,7 @@ impl P2PCore {
         Ok(())
     }
 
+    /// JSON `[{id, animated, created_at, favorite}]`, favorites first, then newest.
     pub(crate) fn list_stickers(&self) -> String {
         let Some(conn) = &self.db else { return "[]".to_string() };
         let rows: Vec<serde_json::Value> = conn.prepare("SELECT id, animated, created_at, favorite FROM stickers ORDER BY favorite DESC, created_at DESC")
@@ -325,9 +326,9 @@ impl P2PCore {
 
     /// Applies `history_storage_limit_bytes` live. It runs ONLY while node mode is on. The limit exists because node mode auto-downloads aggressively
     /// (see the field docs). A device with node mode off does not accumulate files without the user asking. If the total size of completed files
-    /// exceeds the limit, it deletes whole files, OLDEST first (by ascending created_at), until the total is under the limit. Each file is removed
-    /// completely (the DB row, the on-disk `.enc` blob, and any `plain_cache` copy). No partial or truncated file is left: a file is either all there
-    /// or gone.
+    /// exceeds the limit, it removes local copies of received files, OLDEST first (by ascending created_at), until the total is under the limit. Each
+    /// removed file loses its `.enc` and any `plain_cache` copy, and its row goes back to 'offered' (see `remove_local_attachment`). Sent files are
+    /// never removed.
     pub(crate) fn enforce_history_storage_limit(&mut self) {
         if !self.node_mode_enabled {
             return;
@@ -520,7 +521,7 @@ impl P2PCore {
         }
     }
 
-    /// Removes one attachment completely (the DB row, the on-disk `.enc` blob, and any `plain_cache` copy). See `enforce_history_storage_limit`.
+    /// Removes one attachment completely (the DB row, the on-disk `.enc` blob, and any `plain_cache` copy).
     pub(crate) fn delete_attachment_file(&mut self, file_id: &str) {
         self.remove_attachment_copy_with(file_id, true, false);
         self.finish_blob_upload(file_id);

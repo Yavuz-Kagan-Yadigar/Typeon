@@ -234,7 +234,7 @@ class ContactsFragment : Fragment() {
     }
 
     /**
-     * Shows a fresh pairing packet and its QR bitmap. The core accepts a pairing code only for one day, and the
+     * Shows a fresh pairing packet and its QR bitmap. The core accepts a pairing code only for 30 minutes, and the
      * code on screen did not match the packet stored in the core: the previous `onResume` produced a new packet
      * and threw the result away. The packet is now used and shown. JNI calls do not run on the main thread.
      */
@@ -382,7 +382,7 @@ class ContactsFragment : Fragment() {
         // Trust here does not mean a key exchange: the keys are ALREADY used end to end. What is missing is
         // checking that those keys really belong to this person. Only the user can do that, by comparing the
         // code over another channel. So the code is shown here, inside the confirmation dialog.
-        // The screen does not block: the code is produced with a JNI call, so it runs off the main thread (`offMain`).
+        // The screen does not block: the code is produced with a JNI call, so it runs on the worker (`runOnWorker`).
         runOnWorker {
             val safetyCode = try {
                 P2PLib.contactSafetyCode(message.identityId)

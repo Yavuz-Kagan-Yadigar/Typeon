@@ -242,10 +242,10 @@ impl P2PCore {
     }
 
 
-    /// Chunk size of a file, stored per file. A NULL value in the row means the legacy
-    /// 256 KiB. The size is stored per file because the `.enc` format uses FIXED steps:
-    /// reading an old file with a new step gives garbage. New files use
-    /// `FILE_CHUNK_SIZE_V2` (512 KiB).
+    /// Chunk size of a file, stored per file. A NULL value in the row means the default
+    /// `FILE_CHUNK_SIZE`. The size is stored per file because the `.enc` format uses FIXED
+    /// steps: reading a file with a different step gives garbage. New files use
+    /// `FILE_CHUNK_SIZE_V2`.
     pub(crate) fn file_chunk_size(&self, file_id: &str) -> usize {
         self.db
             .as_ref()

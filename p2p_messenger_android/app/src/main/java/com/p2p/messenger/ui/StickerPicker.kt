@@ -686,7 +686,7 @@ private const val SELECTION_PAYLOAD = "selection"
 private const val STICKER_CELL = 0
 private const val FOLDER_CELL = 1
 
-/** Byte budget of a sticker drawable cache. */
+/** Byte budget unit of a sticker drawable cache (the grid cache holds twice this). */
 internal const val STICKER_CACHE_BYTES = 32 * 1024 * 1024
 
 /** Approximate pixel bytes of a cached sticker (animated ones keep ~2 frame buffers). */

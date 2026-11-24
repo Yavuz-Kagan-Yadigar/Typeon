@@ -107,7 +107,7 @@ object BatteryLog {
         if (::app.isInitialized) write("STOP")
     }
 
-    /** From `P2PService.acquireWakeLock`; `timeoutMs` 0 = until released. */
+    /** From `P2PService` when it takes the wake lock; `timeoutMs` 0 = until released. */
     @Synchronized
     fun wakeAcquired(timeoutMs: Long) {
         val now = SystemClock.elapsedRealtime()

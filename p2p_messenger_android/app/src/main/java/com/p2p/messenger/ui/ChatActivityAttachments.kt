@@ -142,14 +142,13 @@ internal fun ChatActivity.flushPendingShare() {
 // Ekler
 // ---------------------------------------------------------------
 
-/** Copies a resolved attachment into the 'Downloads/P2P' folder. API 29+ uses MediaStore (no permission needed). Below that, direct file writes
- *  (WRITE_EXTERNAL_STORAGE; see the permission request in onCreate). */
 /**
- * Makes the file name sent by the other side harmless before it is used as a FILE NAME.
+ * Copies a resolved attachment into the 'Downloads/P2P' folder. API 29+ uses MediaStore (no permission needed). Below that, direct file writes
+ * (WRITE_EXTERNAL_STORAGE; see the permission request in onCreate).
  *
- * The core does the same cleaning (Rust `safe_file_name`, `receive_file_offer`), but only for offers received AFTER that change.
- * Rows already in the `files` table keep the raw name, and the API 26-28 branch below does `File(p2pDir, displayName)`.
- * A name such as "../../DCIM/Camera/IMG_0001.jpg" would write to an arbitrary path in shared storage.
+ * The file name sent by the other side is made harmless before it is used as a FILE NAME. The core does the same cleaning (Rust `safe_file_name`,
+ * `receive_file_offer`), but only for offers received AFTER that change. Rows already in the `files` table keep the raw name, and the API 26-28 branch
+ * below does `File(p2pDir, displayName)`. A name such as "../../DCIM/Camera/IMG_0001.jpg" would write to an arbitrary path in shared storage.
  */
 internal fun ChatActivity.saveToPublicDownloads(source: File, displayName: String, mimeType: String): Boolean {
     return try {
@@ -196,8 +195,8 @@ internal fun ChatActivity.saveToPublicDownloads(source: File, displayName: Strin
 }
 
 /**
- * Long press on an attachment bubble (only when it is completed; see SimpleChatAdapter) shows 'Save to Downloads/P2P'.
- * It saves directly, without asking the sender. The file is already downloaded and encrypted on the device, and a sender approval round trip
+ * Long press on a completed attachment bubble (see SimpleChatAdapter) opens a menu with 'Save to Downloads/P2P' and related actions.
+ * Saving does not ask the sender. The file is already downloaded and encrypted on the device, and a sender approval round trip
  * added nothing (it could never arrive while the sender was offline). This applies to incoming and own attachments alike (`item.isMine` is not checked).
  */
 internal fun ChatActivity.onAttachmentLongClicked(item: SimpleChatAdapter.Item) {

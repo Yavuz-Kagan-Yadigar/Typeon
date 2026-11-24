@@ -107,9 +107,9 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_peekDeviceLink<'local>(mut 
 /// device from the QR it scanned. Empty for a QR that is not a link request.
 ///
 /// Someone who sees the QR and puts a QR of their own in front of the
-/// approving device can try nonces until their code matches. Nine digits
-/// through a slow KDF make that hours of GPU work per QR instead of a
-/// second. A code from values exchanged after the scan does not help: a
+/// approving device can try nonces until their code matches. Each guess
+/// costs one PBKDF2 run of 100 000 iterations (`device_link_code`), which
+/// slows the search but does not make a 9-digit code safe. A code from values exchanged after the scan does not help: a
 /// device in the middle picks its own part after seeing the other side's.
 pub(crate) fn device_link_code(request_cbor: &[u8]) -> String {
     let Ok(req) = DeviceLinkRequest::from_cbor(request_cbor) else { return String::new() };

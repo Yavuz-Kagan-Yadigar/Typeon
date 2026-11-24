@@ -267,7 +267,7 @@ pub(super) fn media_send_to(kind: u8, payload: &[u8], only: Option<&str>) -> boo
     any
 }
 
-/// Largest per-link queue depth, in frames (0..=`LINK_QUEUE`).
+/// Congestion signal in frames, see `backlog_of`.
 pub fn media_backlog() -> usize {
     backlog_of(&media())
 }

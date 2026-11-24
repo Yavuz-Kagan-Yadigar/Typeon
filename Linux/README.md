@@ -73,8 +73,8 @@ opt out:
 
 1. Launch `typeon`. Give the device a name (it is what your phone will list
    under "Linked devices") and optionally set a vault passphrase.
-2. Press **Generate link code**. The QR appears once the network has a listening
-   address — a few seconds, longer with Tor.
+2. After **Link to my phone**, the link QR appears by itself once the network has a
+   listening address — a few seconds, longer with Tor.
 3. On the phone: **Settings → Linked devices → Link a device**, and scan.
 4. The desktop switches to the main window on its own once the phone has adopted
    it. If you quit halfway through, relaunching returns you to the same QR.

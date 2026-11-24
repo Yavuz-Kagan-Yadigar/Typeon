@@ -10,9 +10,7 @@ impl P2PCore {
 
     /// `group-<16 hex nonce><32 hex tag>`, the tag a hash of founder and nonce.
     /// The id names its first founder: a group we do not hold is taken only
-    /// from that identity (`process_group_update`). The id used to be free,
-    /// and any contact that knew it could create the group here first, with
-    /// itself as founder; the real founder's updates were then refused.
+    /// from that identity (`process_group_update`).
     pub(crate) fn group_id_for_founder(founder_identity_id: &str, nonce: &str) -> String {
         let tag = compute_fingerprint(b"typeon-group-id", founder_identity_id.as_bytes(), nonce.as_bytes(), b"");
         format!("group-{}{}", nonce, hex::encode(&tag[..16]))
@@ -27,7 +25,7 @@ impl P2PCore {
         Ok(group_id)
     }
 
-    /// See the note at the top of `persist_contact`: the `groups` table was never written either.
+    /// Writes the group row. Called after every change to the group.
     pub(crate) fn persist_group(&self, group: &Group) {
         let conn = match &self.db {
             Some(c) => c,
@@ -94,8 +92,8 @@ impl P2PCore {
     /// The signed `GroupUpdate` for `change` on top of `group`: version + 1, and the member list and vouched devices as they are AFTER the change
     /// (a new member must get the full list, a removed one must not be in it). Shared by every founder action; the caller applies and fans out.
     ///
-    /// `member_devices` holds only the devices new or changed since the previous update of this device (`gvd:` in app_meta). `full` puts every one
-    /// in (for a member just added). See `GroupSyncRequest`.
+    /// Unless `full` is set, only the vouched devices that changed since this device's last update are included (`gvd:` in app_meta). `full`
+    /// includes all of them, for example for a member just added. See `GroupSyncRequest`.
     pub(crate) fn sign_group_change(&self, group: &Group, change: &GroupChange) -> Result<GroupUpdate, String> {
         self.sign_group_change_with(group, change, false)
     }
@@ -259,12 +257,9 @@ impl P2PCore {
             self.persist_group(g);
         }
 
-        // Send pairwise to all members (including the new one).
-        // Earlier, this was sent as a bare, unencrypted `NetworkEnvelope::GroupUpdate` (signed with Ed25519 only, and it spread in CLEARTEXT over
-        // gossipsub). It now goes over the same hybrid ratchet-encrypted channel as everything else (see `MessageContent::GroupUpdate` and the
-        // `needs_delivery_confirmation` list).
-        // Fix: if the target device cannot be resolved yet (see `send_group_update_to_member`), the update is no longer silently lost. It is added to
-        // the pending list and retried periodically.
+        // Send pairwise to all members (including the new one) over the hybrid ratchet channel (see `MessageContent::GroupUpdate` and the
+        // `needs_delivery_confirmation` list). If a target device cannot be resolved yet, `send_group_update_to_member` queues the update and
+        // retries it periodically.
         let targets = self.groups.get(group_id).map(|g| g.member_identity_ids()).unwrap_or_default();
         for member_identity_id in targets {
             if member_identity_id == own_identity_id {
@@ -391,8 +386,6 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Deletes the group for ALL members. Only the founder can call this (the same `validate_group_update` authority rule is enforced on the other
-    /// side too). A signed `GroupChange::Delete` update goes to all members, then the group is removed locally.
     /// Hands the founder role to another MEMBER (see `GroupChange::TransferFounder`). After the handover this device can no longer manage the group:
     /// adding/removing members and changing the name and photo move to the new founder.
     pub(crate) fn transfer_group_founder(&mut self, group_id: &str, new_founder_identity_id: &str) -> Result<(), String> {
@@ -447,6 +440,8 @@ impl P2PCore {
         Ok(())
     }
 
+    /// Deletes the group for ALL members. Only the founder can call this (the same `validate_group_update` authority rule is enforced on the other
+    /// side too). A signed `GroupChange::Delete` update goes to all members, then the group is removed locally.
     pub(crate) fn delete_group(&mut self, group_id: &str) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
@@ -455,9 +450,8 @@ impl P2PCore {
         }
         let update = self.sign_group_change(&group, &GroupChange::Delete)?;
 
-        // Fix: a deleted group was not deleted for all members. Before, this had its own simple loop. If a member's active device could not be resolved at
-        // that moment (e.g. it was offline), the notice was silently LOST. Unlike the retry mechanism (see `pending_group_syncs` and `group_sync_sweep`),
-        // which `invite_to_group`, `remove_from_group` and `set_group_avatar` all use via `send_group_update_to_member`. Now the SAME helper is used.
+        // Each member gets the notice through `send_group_update_to_member`, the same helper as the other group updates. If a member's device
+        // cannot be resolved yet, the notice is queued in `pending_group_syncs` and retried by `group_sync_sweep`.
         for member_identity_id in group.other_members(&own_identity_id) {
             self.send_group_update_to_member(group_id, &member_identity_id, &update);
         }
@@ -650,12 +644,9 @@ impl P2PCore {
         // messages. On the receiving side the group archive is keyed by `group_message_local_id`, so there is no duplication or conflict between devices.
         let devices = self.active_devices_for_identity(member_identity_id);
         if !devices.is_empty() {
-            // Fix: group edits and deletes sometimes reached nobody, silently. Before, if the member's device list was NOT empty, `true` was returned
-            // unconditionally. An `Err` from `send_message_content` for every device (e.g. no ratchet session could be set up with that device) was never
-            // reflected to the callers (`edit_group_message` / `delete_group_message`), which still reported `Ok(())`. An `Ok` from
-            // `send_message_content` does not mean the network publish really succeeded at that moment (temporary network errors are queued for
-            // `awaiting_confirmation` retries anyway, see `publish_with_ack_tracking`). But a PERMANENT error (e.g. an encryption or ratchet error) is
-            // now correctly reflected as `false`.
+            // An `Ok` from `send_message_content` does not mean the publish succeeded: temporary network errors are retried through
+            // `awaiting_confirmation` (see `publish_with_ack_tracking`). A device that refuses (for example no ratchet session) is parked as a
+            // durable retry below, and only when every device refuses does the result become `false`.
             let mut sent_to_any_device = false;
             let mut published = false;
             let mut refused: Vec<String> = Vec::new();
@@ -708,16 +699,14 @@ impl P2PCore {
         let queue = self.pending_group_messages.entry(key).or_default();
         queue.push(content.clone());
         self.persist_pending_group_message(group_id, member_identity_id, content);
-        // This used to return `false`, and the callers (`send_group_message`/`edit_group_message`/`delete_group_message`) treated that as the error
-        // "no reachable group member" and showed an error in the UI. But the content was queued both in memory and ON DISK (`pending_group_messages`),
-        // and `group_sync_sweep` sends it as soon as the member's device resolves. Queueing is not a FAILURE. It is a deferred delivery.
+        // Queued in memory and on disk (`pending_group_messages`); `group_sync_sweep` sends it once the member's device resolves. Queueing is a
+        // deferred delivery, not a failure, so the callers do not show an error.
         (true, false)
     }
 
-    /// a device of a member refused a group packet (no session yet, ...)
-    /// while another device took it, so the member-level queue never sees it.
-    /// A durable row of its own (fresh packet id) is sent again by
-    /// `load_pending_durable_retries_from_db` (start, or the device seen again).
+    /// Parks the copies of a group packet that some of a member's devices refused (no session yet, ...) while other devices took it. The
+    /// member-level queue never sees them. Each gets a durable row of its own (fresh packet id), which
+    /// `load_pending_durable_retries_from_db` sends again (at start, or when the device is seen again).
     pub(crate) fn park_device_copies(&mut self, refused: &[String], content: &MessageContent) {
         let now = current_time_ms();
         for fp in refused {
@@ -730,8 +719,8 @@ impl P2PCore {
         }
     }
 
-    /// Fix: tries to send a `GroupUpdate` to one member. If the target's active device is not yet known (see `pending_group_syncs`), the update is added
-    /// to the pending list for this (group_id, identity_id) pair instead of being silently lost. `group_sync_sweep` retries periodically until the device
+    /// Tries to send a `GroupUpdate` to one member. If the target's active device is not yet known (see `pending_group_syncs`), the update is added
+    /// to the pending list for this (group_id, identity_id) pair instead of being dropped. `group_sync_sweep` retries periodically until the device
     /// can be resolved. This gathers the block that was repeated in the fan-out loops of `invite_to_group`, `remove_from_group`, `set_group_avatar` and `delete_group`.
     pub(crate) fn send_group_update_to_member(&mut self, group_id: &str, member_identity_id: &str, update: &GroupUpdate) {
         // Multi-device: send to ALL of the member's active devices. Otherwise a member's secondary device would keep a stale group membership, name and avatar.
@@ -958,34 +947,28 @@ impl P2PCore {
         walked
     }
 
-    /// Whether this sender is allowed to write to this group.
-    ///
-    /// Group messages (`Text`, `FileOffer`, `Reaction`, all carrying `MessageContent.group_id`) used to pass NO membership check on the receiving side.
-    /// `receive_message` only verified that the packet was signed by a known device and that `sender_identity_id` is that device's registered identity.
-    /// The `group_id` field was entirely the sender's claim. Consequences:
-    ///
-    /// - A member REMOVED from the group could keep writing. Removal only drops that person from the remaining members' send fan-out, and the pairwise
-    ///   ratchet with them stays. The message went into the archive via `archive_group_message` and showed in the UI as a legitimate group message.
-    /// - ANY contact in the list, once it knew a `group_id` (a removed member knows one, and a screenshot can leak one), could inject messages or files
-    ///   into that group.
-    ///
-    /// The rule applies ONLY when we know the group, on purpose. A group we have never seen may be an invite or `GroupUpdate` that has not reached us
-    /// yet (gossipsub gives no ordering guarantee, and the late-joining member case is exactly this, see `sync_members`). Rejecting there would drop
-    /// legitimate first messages. For a known group, a sender who is not a member is not ambiguous: it is a clear lack of authority.
-    ///
-    /// The rejected packet is NOT acked. A legitimate sender who learned of its membership before we did will retry, and be accepted once our
-    /// `GroupUpdate` arrives. The race heals itself.
     /// Whether a received group text @mentions me: my own identity id in its list after dropping non-members (the text itself is not trusted).
     pub(crate) fn group_mentions_me(&self, group_id: &str, mentions: Vec<String>) -> bool {
         let (Some(me), Some(group)) = (self.identity.as_ref(), self.groups.get(group_id)) else { return false };
         filter_mentions(group, None, mentions).iter().any(|id| *id == me.identity_id)
     }
 
+    /// Whether this sender is allowed to write to this group.
+    ///
+    /// Group messages (`Text`, `FileOffer`, `Reaction`) carry the `group_id` as the sender states it. So for a known group the sender must be a
+    /// member, otherwise two things happen: a member removed from the group could keep writing, and any contact that knew a `group_id` (a removed
+    /// member, or a leaked one) could inject messages or files into it.
+    ///
+    /// The rule applies ONLY when we know the group, on purpose. A group we have never seen may be an invite or `GroupUpdate` that has not reached
+    /// us yet, and a late-joining member is exactly this case (see `sync_members`). Rejecting there would drop legitimate first messages.
+    ///
+    /// The rejected packet is NOT acked. A legitimate sender who learned of its membership before we did will retry, and be accepted once our
+    /// `GroupUpdate` arrives. The race heals itself.
     pub(crate) fn sender_may_post_to_group(&self, group_id: &str, sender_identity_id: &str) -> bool {
         match self.groups.get(group_id) {
             Some(group) => group.is_member(sender_identity_id),
             // Unknown: the GroupUpdate may still be on its way. Not so for a group we left, were removed from, or deleted.
-            // Only an id that `create_group` can make is accepted (before, any string up to ~1 MB was archived).
+            // Only an id that `create_group` can make is accepted.
             None => is_group_id(group_id) && !self.group_removed_locally(group_id) && self.unknown_group_has_room(group_id),
         }
     }
@@ -1069,8 +1052,7 @@ impl P2PCore {
             })
         };
 
-        // Before, a group was created here with an empty name (""). Since `GroupUpdate` now always carries the current `group_name` (see packet.rs),
-        // a group seen for the first time can be created with the right name.
+        // A group seen for the first time is created with the name the `GroupUpdate` carries (see packet.rs).
         // A group we left comes back only under the founder it had, or one the carried chain leads to from there. Any contact that knew the id could
         // otherwise re-create it with itself as founder.
         // A group new to us: the founder its id names (`group_id_for_founder`). That is the signer, or the first founder of the carried chain, from which
@@ -1136,9 +1118,8 @@ impl P2PCore {
         if retake {
             check.version -= 1;
         }
-        // The jump limit means something only against a version we hold
-        //past 4096 a group could take no new member. A group
-        // we left keeps its own guard below (`removed`).
+        // The version jump limit only applies against a version we hold. For a group we do not hold, the check starts from the incoming version.
+        // A group we left keeps its own guard below (`removed`).
         if !group_exists {
             check.version = update.new_version.saturating_sub(1);
         }
@@ -1235,13 +1216,8 @@ impl P2PCore {
         }
 
         if !group_exists {
-            // For a group we have NEVER known locally, `validate_group_update` builds `group_ref` via `default_group()` (founder = the signer), so by
-            // definition the check passes. Result: ANY person in the contact list could send a `GroupUpdate` that does NOT include us, and create a group
-            // on our device with an arbitrary name (for example "IT Support"). Since they were the only member and founder, they could also pass
-            // `sender_may_post_to_group` and post messages into it. That is a ready-made social engineering surface.
-            //
-            // Rule: an unknown group is created only if this update makes US a member. For a `members` list that is empty (older senders), the only basis
-            // is `Add(us)`.
+            // An unknown group is created here only when this update makes US a member. Otherwise any contact could create a group on our device
+            // with an arbitrary name and post into it. For a `members` list that is empty, the only basis is `Add(us)`.
             //
             // The caller acks this Err. A group we are really in but lost locally is not refused here: every update carries `members`, which names us.
             let me = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
@@ -1304,9 +1280,9 @@ impl P2PCore {
         }
         // Adopt the chain on every update (not only during a repair). If authority is handed to us, our NEXT updates must be signed with this chain, or
         // the members who missed the handover would reject everything from us. Unverifiable entries are not taken.
-        // The chain is outside the update signature. What is kept: what the walk above verified from our founder onward, and this update's own transfer.
-        // Every self-signed entry used to be kept: a member forwarding a genuine update filled the chain with transfers of its own at versions near
-        // u32::MAX, and no real transfer could heal us again.
+        // The chain is outside the update signature. Only what the walk above verified from our founder onward is kept, plus this update's own
+        // transfer. Unverified entries would let a member fill the chain with transfers of its own near u32::MAX, and no real transfer could
+        // heal us again.
         let own_transfer = update.founder_chain.iter().find(|t| {
             matches!(&update.change, GroupChange::TransferFounder(to) if *to == t.to_identity)
                 && t.version == update.new_version
@@ -1384,7 +1360,6 @@ impl P2PCore {
         }
     }
 
-    /// Finds the known Active device fingerprint for an identity (phase A: there is only one).
     /// On the FOUNDER side, collects the device records to vouch for the given member identities (see `GroupUpdate.member_devices`). Our own devices
     /// come from `own_devices`, the others from `known_remote_devices`. Unknown members are skipped (if the founder does not know them either, it cannot vouch).
     pub(crate) fn collect_vouched_member_devices(&self, group_id: &str, member_ids: &[String]) -> Vec<GroupMemberDevice> {
@@ -1408,8 +1383,8 @@ impl P2PCore {
                     sign_pubkey_mldsa: d.sign_pubkey_mldsa.clone(),
                     kem_pubkey_x25519: d.kem_pubkey_x25519.clone(),
                     kem_pubkey_mlkem: d.kem_pubkey_mlkem.clone(),
-                    // Vouched addresses come from `device_onion_addr` only. It is never overwritten by a LAN or relay address, so a Tor-only peer can always reach it.
-                    // Onion only: a clearnet or UPnP address must never travel inside a group update (the node dials onion only).
+                    // Onion only: a clearnet or UPnP address must never travel inside a group update (the node dials onion only). For another
+                    // member's device this is `device_onion_addr`, which a LAN or relay address never overwrites. Our own device uses its node address.
                     last_addr: if *id == own_identity_id {
                         self.get_node_address()
                     } else {
@@ -1441,7 +1416,7 @@ impl P2PCore {
     /// - The keys of a device we ALREADY know are NEVER overwritten. A malicious founder cannot change the key of a person we trust.
     /// - `device_fingerprint` must be the SHA3-256 of the keys (records that are inconsistent with themselves are rejected).
     /// - Our own identity is skipped.
-    /// - Added contacts get `verified=false` (added via a group, not verified face to face with QR). The UI shows this.
+    /// - Added contacts are marked `added_via_group` (not verified face to face with a QR). The UI shows this.
     pub(crate) fn adopt_vouched_member_devices(&mut self, devices: &[GroupMemberDevice], proofs: &[packet::DeviceAddProof]) {
         let own_identity_id = self.identity.as_ref().map(|i| i.identity_id.clone()).unwrap_or_default();
         for d in devices {
@@ -1455,7 +1430,7 @@ impl P2PCore {
                 continue;
             }
             if self.known_remote_devices.contains_key(&d.device_fingerprint) {
-                continue; // zaten biliyoruz — ASLA ezme
+                continue; // already known: never overwrite
             }
             // Is the fingerprint consistent with the keys? (Same check as in IdentityExchange.)
             if !d.keys_match_fingerprint() {
@@ -1556,11 +1531,10 @@ impl P2PCore {
         }
     }
 
+    /// The smallest active device fingerprint of an identity, if one is known.
     pub(crate) fn resolve_active_device_for_identity(&self, identity_id: &str) -> Option<String> {
-        // Multi-device fix: a DETERMINISTIC choice. `.find()` depended on HashMap iteration order, so when an identity had MORE THAN ONE active device, a
-        // different device could be returned on each call. That made group messages and updates randomly "jump" between a member's devices (one message to
-        // one device, the next to another), leaving each device with a MISSING or inconsistent group history. Now the active device with the smallest
-        // fingerprint (the canonical one) is chosen.
+        // Deterministic: the active device with the smallest fingerprint. HashMap order is random, so with several active devices a different
+        // one would be returned on each call, and group messages would jump between a member's devices.
         self.known_remote_devices.values()
             .filter(|d| d.identity_id == identity_id && d.is_active)
             .map(|d| d.device_fingerprint.clone())
@@ -1650,9 +1624,9 @@ impl P2PCore {
             mentions: filter_mentions(&group, Some(&own_identity_id), mentions),
             expire_secs,
         };
-        // Archive ONCE, as a single row, BEFORE the fan-out loop, not inside it. `send_message_content` is called separately for each member, and passing
-        // `archive_plaintext: Some(...)` there would create N rows for N members (with the WRONG key, see that function's old note). Our own message's
-        // archive should not depend on whether a single member is reached: otherwise, if the FIRST member's send fails, we would never keep our own "sent" record.
+        // Archive ONCE, as a single row, BEFORE the fan-out loop, not inside it. `send_message_content` is called separately for each member, and
+        // passing `archive_plaintext: Some(...)` there would create one row per member. Our own archive must not depend on whether a single member
+        // is reached: if the first member's send failed, we would lose our own "sent" record.
         let (reply_to_id, reply_to_prev, reply_to_sender) = match &content {
             MessageContent::Text { reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, .. } => {
                 (reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref())

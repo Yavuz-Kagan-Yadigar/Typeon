@@ -278,8 +278,8 @@ internal fun ChatActivity.handleIncomingEvent(obj: JSONObject) {
         )
         "file_complete" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.COMPLETE)
         "file_failed" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.FAILED)
-        // Rust emits this event both when the storage limit evicts a file and when an attached message is deleted, but no client listened to it.
-        // The bubble kept showing 'completed', and tapping it found no file. Now it goes back to 'offered', so it looks downloadable again.
+        // Rust emits this event when a local file copy is removed (storage limit, manual eviction, or a deleted attachment).
+        // The bubble goes back to 'offered', so it looks downloadable again instead of 'completed' with no file behind it.
         "file_evicted" -> adapter.applyAttachmentUpdate(obj.optString("file_id"), SimpleChatAdapter.AttachmentStatus.OFFERED)
         // 'Seen' notice: the other side saw the message on its screen. It is shown as a small avatar badge under the bubble (see SimpleChatAdapter.applySeen).
         "seen" -> {

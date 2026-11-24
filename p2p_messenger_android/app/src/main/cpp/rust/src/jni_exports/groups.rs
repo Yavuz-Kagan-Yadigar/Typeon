@@ -133,7 +133,7 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_leaveGroup<'local>(mut env:
 }
 
 /// Sets or removes the group profile picture. See `P2PCore::set_group_avatar`. Succeeds only for the founder. Otherwise it returns "Error: ...".
-/// Unlike `inviteToGroup`/`removeFromGroup`, which return a `jboolean`, this returns a `jstring`, because the reason for a failure is worth showing the user.
+/// Returns a `jstring` (like `inviteToGroup`/`removeFromGroup`), so the reason for a failure can be shown to the user.
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_setGroupProfilePicture<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, group_id: JString<'local>, avatar_jpeg: JByteArray<'local>) -> jstring {
     let gid: String = jstr(&mut env, &group_id).unwrap_or_default();

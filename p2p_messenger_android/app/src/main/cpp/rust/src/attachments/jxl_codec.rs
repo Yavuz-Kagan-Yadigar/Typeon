@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Largest image the JPEG XL paths take, in pixels: 64 MP is 256 MB as RGBA,
+/// Largest image the JPEG XL paths take, in pixels: 24 MP is 96 MB as RGBA,
 /// and a received file names its own size.
 pub const MAX_IMAGE_PIXELS: u64 = 24_000_000;
 
@@ -111,8 +111,8 @@ pub(super) fn jxl_image_header(width: u32, height: u32, alpha: bool, animated: b
 }
 
 /// zune-jpegxl's frame header (one modular pass, kReplace) and its TOC.
-/// `duration` (ticks) only in an animated image; a frame that is not the
-/// last one is not kept as a reference.
+/// `duration` (ticks) only in an animated image. Every frame but the last is
+/// saved to reference slot 0; the last one has no `save_as_reference` field.
 pub(super) fn jxl_frame_header(alpha: bool, duration: Option<u32>, is_last: bool, toc: &[u64]) -> Vec<u8> {
     let mut b = Bits::default();
     b.put(1, 0); // not all_default
@@ -166,7 +166,7 @@ pub(super) fn jxl_frame_header(alpha: bool, duration: Option<u32>, is_last: bool
     b.out
 }
 
-/// an animated image as a lossless animated JPEG XL, no metadata.
+/// Encodes an animated image as a lossless animated JPEG XL, no metadata.
 /// `frames`: RGBA bytes each (as `encode_jxl_lossless`, changed in place),
 /// `delays_ms` one per frame. zune-jpegxl writes single frames only: each is
 /// encoded alone and its frame data is re-framed under an animated header.
@@ -271,7 +271,7 @@ pub fn encode_jxl_sticker(frames: &mut [Vec<u8>], width: u32, height: u32, delay
 
 /// Longest side of a sticker, in pixels.
 pub const STICKER_MAX_SIDE: u32 = 600;
-/// Largest sticker file. Lossless 600 px stills are well under; long
+/// Largest sticker file. Lossy 600 px stills are well under; long
 /// animations can pass it and are refused.
 pub const MAX_STICKER_BYTES: u64 = 4 << 20;
 
@@ -440,7 +440,7 @@ pub(super) fn median_cut_palette(pixels: &[[u8; 3]], opaque: &[bool]) -> Vec<[u8
     }).collect()
 }
 
-/// a received animated JPEG XL as an animated GIF for the viewers
+/// Converts a received animated JPEG XL to an animated GIF for the viewers
 /// (neither Android nor GTK plays JPEG XL). Each frame gets its own median-cut
 /// local palette (255 colours + index 255 transparent; alpha below half is
 /// transparent). ponytail: no dithering; palette from ~16k sampled pixels, pixels
@@ -560,10 +560,6 @@ pub fn convert_cached(src: &Path, out: &Path, conv: fn(&Path, &Path) -> Result<(
     r
 }
 
-/// A received JPEG XL as PNG: no Android version decodes JPEG XL, and the
-/// Linux viewer takes the common formats only. The file is the sender's: its
-/// size is checked before the frame is rendered, and the decoder's
-/// allocations are capped.
 /// The frames of an animated JPEG XL as straight RGBA plus each frame's
 /// duration in ms, at most `GIF_MAX_FRAMES` (evenly picked, like `jxl_to_gif`).
 /// For a player that stops after a few loops (the desktop sticker bubble).
@@ -620,6 +616,10 @@ fn jxl_frames_rgba_inner(src: &Path) -> Result<(u32, u32, Vec<(Vec<u8>, u32)>), 
     Ok((width, height, out))
 }
 
+/// A received JPEG XL as PNG: no Android version decodes JPEG XL, and the
+/// Linux viewer takes the common formats only. The file is the sender's: its
+/// size is checked before the frame is rendered, and the decoder's
+/// allocations are capped.
 pub fn jxl_to_png(src: &Path, out: &Path) -> Result<(), String> {
     no_panic(|| jxl_to_png_inner(src, out))
 }

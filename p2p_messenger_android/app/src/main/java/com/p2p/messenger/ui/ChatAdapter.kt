@@ -61,10 +61,8 @@ class ChatAdapter(
                 isPinned == other.isPinned &&
                 realContactId == other.realContactId && identityId == other.identityId &&
                 isGroup == other.isGroup &&
-                // Both of these fields were missing before. `DiffUtil.ItemCallback.areContentsTheSame` uses this `equals`. So the security
-                // "unverified" mark, driven by `addedViaGroup` (see its use in `bind`), was updated only when ANOTHER field (such as the name
-                // or the last message) changed too. When a contact was verified later and only `addedViaGroup` changed, the row was NOT
-                // rebound, and the old warning mark stayed on screen.
+                // `DiffUtil.ItemCallback.areContentsTheSame` uses this `equals`, so every field that `bind` shows must be compared here.
+                // Otherwise a row whose only change is `addedViaGroup` (the "unverified" mark) is not rebound.
                 addedViaGroup == other.addedViaGroup && isGroupFounder == other.isGroupFounder &&
                 (avatarJpeg?.contentEquals(other.avatarJpeg) ?: (other.avatarJpeg == null))
         }
@@ -144,11 +142,7 @@ class ChatAdapter(
                 onItemClick(message)
             }
             itemView.setOnLongClickListener {
-                // Group rows never carry a realContactId (they're not a
-                // Contact) — the long-press menu still applies to them
-                // (delete-group for the founder), so gate on isGroup too.
-                // Previously this guard was realContactId-only, which
-                // silently swallowed every long-press on a group row.
+                // Group rows have no realContactId, so the long-press menu is also allowed for isGroup rows (delete group for the founder).
                 if (message.isGroup || message.realContactId.isNotEmpty()) {
                     onContactLongClick?.invoke(message)
                     true
@@ -188,8 +182,7 @@ class ChatAdapter(
     private val TIME_PAYLOAD = Any()
     private var labelsMinute = 0L
 
-    /** "Just now" is computed when a row is bound, and an unchanged row is
-     *  never bound again: called on every list refresh, rebinds once a minute. */
+    /** Updates the time labels ("just now", "5 min ago") at most once a minute. Called on every list refresh. */
     fun refreshTimeLabels() {
         val minute = System.currentTimeMillis() / 60_000
         if (minute == labelsMinute) return

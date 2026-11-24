@@ -4,8 +4,8 @@
 //! is kept, and so are the return formats: "Error: ..." prefixed error strings, JSON arrays, and `{"message_id":..,"status":..}` objects.
 //! Reason: the Linux desktop client (see the `Linux/` directory at the repository root) uses exactly the same core: the same crypto,
 //! ratchet, database schema and network protocol. Writing the protocol a second time would let the two apps drift apart silently.
-//! Nothing changes for Android: this module is purely an addition. The JNI exports stay as they are and do not call the `api::*`
-//! functions (both go directly to `P2PCore`).
+//! Nothing changes for Android: this module is purely an addition. Most JNI exports go directly to `P2PCore`. A few (account, linking,
+//! files, messages) call the `api::*` functions below.
 //! The Kotlin `P2PLib` documentation (parameter meanings, which calls must not run on the main thread, return formats) applies to every
 //! function here as well, and is not repeated.
 
@@ -32,8 +32,8 @@ fn ok_result(result: Result<Result<(), String>, String>) -> String {
 
 // --- Identity and device ---
 
-/// `storage_key`: the 32-byte local storage key, the same one later handed
-/// to `set_skipped_key_encryption_key`. The database is encrypted under it.
+/// `storage_key`: the 32-byte local storage key the database is encrypted
+/// under. The skipped-key cache has its own key (`set_skipped_key_encryption_key`).
 pub fn init_database(files_dir: &str, storage_key: &[u8]) -> bool {
     let key: [u8; 32] = match storage_key.try_into() {
         Ok(k) => k,
@@ -118,7 +118,7 @@ pub fn get_own_identity_id() -> String {
     string_result(catch_panic(|| crate::core_lock_read().own_identity_id()))
 }
 
-/// see Kotlin `setHistoryKey` — 32 bayt olmayan anahtar sessizce reddedilir.
+/// See Kotlin `setHistoryKey`. A key that is not 32 bytes is refused silently.
 pub fn set_history_key(key_bytes: &[u8]) -> bool {
     let key: [u8; 32] = match key_bytes.try_into() {
         Ok(k) => k,
@@ -305,9 +305,8 @@ pub fn device_link_code(data: &[u8]) -> String {
     crate::device_link_code(data)
 }
 
-// no `approve_device_link`, `forget_revoked_linked_device` or
-// `import_recovery` here. Desktops are secondary devices only: they never
-// add devices or restore a whole account (owner rule).
+// no `approve_device_link` or `import_recovery` here. Desktops are secondary
+// devices only: they never add devices or restore a whole account (owner rule).
 
 pub fn list_linked_devices() -> String {
     catch_panic(|| serde_json::Value::Array(crate::core_lock_read().list_linked_devices()).to_string())
@@ -376,7 +375,7 @@ pub fn unblock_identity(identity_id: &str) {
     let _ = catch_panic(|| core_lock().unblock_identity(identity_id));
 }
 
-/// Engellenen kimlikler, JSON dizisi.
+/// Blocked identities as a JSON array.
 pub fn list_blocked_identities() -> String {
     catch_panic(|| serde_json::to_string(&crate::core_lock_read().list_blocked_identities()).unwrap_or_else(|_| "[]".to_string()))
         .unwrap_or_else(|_| "[]".to_string())
@@ -558,7 +557,7 @@ pub fn send_seen_receipt(
 ) -> bool {
     let target = target_device_fingerprint.to_string();
     let target_id = target_message_id.to_string();
-    // the send's own result, not only "did not panic".
+    // The send's own result, not only whether it panicked.
     catch_panic(move || {
         let _guard = RUNTIME.enter();
         core_lock().send_seen(&target, &target_id, group_message_local_id)
@@ -1073,7 +1072,6 @@ pub fn export_recovery(passphrase: &str) -> Vec<u8> {
     }
 }
 
-/// The panic path for calls that return a JSON array. It is the same as the `unwrap_or_else(|_| "[]")` pattern on the JNI side.
 /// JNI `listReactions`: the stored reactions of a message, for a chat that is opened again.
 pub fn list_reactions(target_message_id: &str) -> String {
     let id = target_message_id.to_string();
@@ -1091,6 +1089,7 @@ pub fn list_seen_by(message_id: &str) -> String {
     json_list(catch_panic(move || crate::core_lock_read().seen_by_json(&id)))
 }
 
+/// The panic path for calls that return a JSON array: `"[]"`, the same as the `unwrap_or_else(|_| "[]")` pattern on the JNI side.
 fn json_list(result: Result<String, String>) -> String {
     result.unwrap_or_else(|_| "[]".to_string())
 }
@@ -1098,7 +1097,7 @@ fn json_list(result: Result<String, String>) -> String {
 // ---------------------------------------------------------------------------
 // Server (store-and-forward) option
 // ---------------------------------------------------------------------------
-// See the core's `server_client` module. The JNI counterparts of these functions are at the end of `jni_exports.rs`. The two must be kept
+// Server and archive calls. The JNI counterparts are in `jni_exports/servers.rs` and `jni_exports/history.rs`. The two must be kept
 // in sync BY HAND (the general rule in this file's module note).
 
 /// Adds a server from an invite code (`typeon-server:<multiaddr>#<token>`). On success returns `{"server_id":".."}`.
@@ -1173,7 +1172,7 @@ pub fn archive_root_key() -> Vec<u8> {
     catch_panic(|| crate::core_lock_read().archive_root_key_bytes().unwrap_or_default()).unwrap_or_default()
 }
 
-// --- Calls (see `call.rs`; mirrors the `P2PLib.startCall`.. JNI exports) ---
+// --- Calls (see `call/`; mirrors the `P2PLib.startCall`.. JNI exports) ---
 
 /// Rings `peer` (a device fingerprint or chat key). Call id or `"Error: .."`.
 pub fn start_call(peer: &str, video: bool) -> String {
@@ -1209,13 +1208,13 @@ pub fn end_call() {
     });
 }
 
-/// `{"state": "idle"|"outgoing"|"incoming"|"active", ...}`.
 /// 0 = no call running in the group (or this device is in it), 1 = voice, 2 = video.
 /// `start_group_call` then joins it; changes arrive as `group_call_offer` events.
 pub fn group_call_offer(group_id: &str) -> i32 {
     catch_panic(|| crate::core_lock_read().group_call_offer(group_id)).unwrap_or(0)
 }
 
+/// `{"state": "idle"|"outgoing"|"incoming"|"active", ...}`.
 pub fn call_state() -> String {
     catch_panic(|| crate::core_lock_read().call_state_json()).unwrap_or_else(|_| "{\"state\":\"idle\"}".to_string())
 }
@@ -1249,7 +1248,7 @@ pub fn call_take_avc_request() -> bool {
     catch_panic(crate::call::media_take_avc_request).unwrap_or(false)
 }
 
-/// Send queue depth in 100 ms units — the congestion signal.
+/// Congestion signal in frames, see `media_backlog`.
 pub fn call_backlog() -> usize {
     catch_panic(crate::call::media_backlog).unwrap_or(0)
 }

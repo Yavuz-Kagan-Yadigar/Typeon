@@ -17,11 +17,11 @@ import kotlin.math.roundToInt
  * ([animatedWebp]) keep their frames; anything else is one still frame.
  */
 object StickerImport {
-    /** The core's own cap (attachments::STICKER_MAX_SIDE). */
+    /** The core's own cap (attachments::jxl_codec::STICKER_MAX_SIDE). */
     const val MAX_SIDE = 600
-    /** attachments::MAX_ANIMATION_FRAMES. */
+    /** attachments::jxl_codec::MAX_ANIMATION_FRAMES. */
     const val MAX_FRAMES = 300
-    /** attachments::MAX_IMAGE_PIXELS — the core refuses more (all frames). */
+    /** attachments::jxl_codec::MAX_IMAGE_PIXELS: the core refuses more (all frames). */
     private const val MAX_PIXELS = 24_000_000L
 
     /** [file] is a GIF, PNG, JPEG or WebP. Returns the sticker id or "Error: ...". */

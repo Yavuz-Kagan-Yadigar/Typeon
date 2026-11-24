@@ -39,12 +39,10 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![owner], |r| r.get(0))
             .unwrap_or(0);
         for id in add {
-                        // If already registered, skip the counter check. The call must be idempotent.
-                        //
-                        // The query does not filter by `owner`, but `mailbox_readers` is multi-reader (see the schema note). So a box
-                        // another party registered counted as "already there" for this client too, and the `max_mailboxes` quota was
-                        // skipped. Both sides of a ratchet box register it, so this is the NORMAL case, not an edge case, and the quota
-                        // must still apply on the second side.
+            // Already registered by this owner: skip the quota check, so the call stays idempotent. The lookup
+            // filters by `owner`, because `mailbox_readers` holds one row per reader. A box another party registered
+            // does not count as registered here. Both sides of a ratchet box register it, so the quota applies on the
+            // second side as well.
             let exists: bool = self
                 .conn
                 .query_row(
@@ -125,7 +123,8 @@ impl Store {
             }
         }
         for id in drop {
-            // Only the OWNER can remove it. Not a reader: nothing changed, and the cleanup below scans the whole box.
+            // Each owner drops only its own reader row, so a drop cannot touch another reader's registration. A drop
+            // that changes nothing skips the cleanup below, which scans the whole box.
             let left = self
                 .conn
                 .execute("DELETE FROM mailbox_readers WHERE mailbox_id = ?1 AND owner = ?2", params![id, owner])
@@ -210,16 +209,14 @@ impl Store {
             .unwrap_or((i64::MAX, i64::MAX))
     }
 
-        /// If the SAME bytes from the same depositor are already in this box, no new row is opened. The existing `seq` is
-        /// returned.
-        ///
-        /// Client-side de-duplication used to recognise only `Message` envelopes. A `Handshake` was re-deposited about once
-        /// a second (about 15 KB each). That filled the depositor's `bytes_mail` quota within hours and locked all
-        /// store-and-forward traffic for that device (see `deposit_dedup_key` in the client). The client now de-duplicates
-        /// every kind. This check is the second line of defence: an old or buggy client cannot inflate the server.
-        ///
-        /// Dropping the repeat is safe: the recipient already de-duplicates by `message_id`, and an identical second copy
-        /// carries no information.
+    /// If the SAME bytes from the same depositor are already in this box, no new row is opened. The existing `seq` is
+    /// returned.
+    ///
+    /// The client de-duplicates every envelope kind before it deposits (`deposit_dedup_key`). This check is the second
+    /// line of defence: an old or buggy client cannot fill its quota by re-depositing identical bytes.
+    ///
+    /// Dropping the repeat is safe: the recipient already de-duplicates by `message_id`, and an identical second copy
+    /// carries no information.
     #[cfg(test)]
     pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
         self.deposit_written(mailbox_id, sealed, depositor, now, ttl_ms).map(|(seq, _)| seq)
@@ -370,8 +367,7 @@ impl Store {
                 params![mailbox_id, acker, through_seq.min(i64::MAX as u64) as i64],
             )
             .map_err(|e| e.to_string())?;
-        // The cursor did not move: nothing new to delete. The delete scans the whole box, and a repeated ack ran it 512
-        // times per request.
+        // The cursor did not move: nothing new to delete. The delete scans the whole box, so a repeated ack skips it.
         if moved == 0 {
             return Ok(0);
         }

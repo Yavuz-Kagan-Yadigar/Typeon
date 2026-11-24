@@ -44,7 +44,7 @@ fn replay_window() {
     assert!(r.is_new(4)); // late but unseen
     r.record(200);
     assert!(!r.is_new(100)); // too old
-    // 64 late packets after 300 must not push 300 out of the window.
+    // Late packets down to 237 (63 behind 300) must not push 300 out of the window.
     r.record(300);
     for seq in 237..300 {
         assert!(r.is_new(seq));

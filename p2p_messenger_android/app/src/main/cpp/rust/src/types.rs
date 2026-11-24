@@ -163,8 +163,7 @@ pub struct ArchivedMessage {
     /// Filled ONLY for group messages. In a group there can be several senders (unlike 1:1, where `direction` alone is enough). GroupChatActivity needs this
     /// to show the correct sender name and avatar.
     pub sender_identity_id: Option<String>,
-    /// This row's stable message id (if any). Used for the "seen" match after a reload and for status updates (see the BUGS/LIMITS note at the top of the file;
-    /// now partly resolved).
+    /// This row's stable message id (if any). Used for the "seen" match after a reload and for status updates.
     pub message_id: Option<String>,
     /// The stable id of the message this one replies to (`message_id` in 1:1, `group_message_local_id` in a group). See the `MessageContent::Text.reply_to_message_id` docs in packet.rs.
     pub reply_to_message_id: Option<String>,
@@ -211,7 +210,7 @@ pub struct ArchivedMessage {
     pub expire_at_ms: Option<u64>,
 }
 
-/// Summary for the Groups tab list and detail view. (`list_groups` did not exist before, so the Groups tab never showed a real group list.)
+/// Summary for the Groups tab list and detail view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupSummary {
     pub group_id: String,
@@ -270,7 +269,7 @@ pub struct AttachmentSummary {
     pub expire_at_ms: Option<u64>,
 }
 
-/// In-memory state of an ongoing download (see `download_file`, `request_next_chunk` and the attachments.rs module note). Chunks are ALWAYS requested in
+/// In-memory state of an ongoing download (see `download_file`, `request_next_chunk` and the attachments/mod.rs module note). Chunks are ALWAYS requested in
 /// order (0, 1, 2, ...), so the `.enc` file is only ever APPENDED to, and no seek is needed.
 pub(crate) struct DownloadState {
     /// `FileOffer.chunk_hashes` of this file (from the `files` row): one
@@ -315,15 +314,14 @@ pub(crate) struct DownloadState {
     /// How many times the CURRENT peer was retried without real progress. See `retry_or_give_up_download`: past a threshold, the next candidate is tried.
     /// Reset when the source changes or on real progress (see `handle_chunk_response`).
     pub(crate) retries_on_current_source: u32,
-    /// Chunk indices currently in flight (the pipeline, see `DOWNLOAD_PIPELINE_DEPTH`). Before, only ONE chunk could be in flight, so the speed was capped at
-    /// `chunk size / round-trip time`, whatever the bandwidth. The real figure measured over Tor was about 70 KB/s.
+    /// Chunk indices currently in flight (the pipeline, at most `window` of them).
     pub(crate) inflight_chunks: std::collections::HashSet<u32>,
     /// Chunks already WRITTEN to disk. Chunks arrive out of order in the pipeline, so a counter is not enough: each index that completed has to be tracked.
     /// Only chunks whose group matched `chunk_hashes` are in it.
     pub(crate) received_chunks: std::collections::HashSet<u32>,
-    /// Adaptive pipeline window (see `DOWNLOAD_WINDOW_START`): how many chunks may be in flight at once. It grows on success and halves on a timeout or error.
+    /// Adaptive pipeline window (see `DOWNLOAD_WINDOW_START`): how many chunks may be in flight at once. It grows on fast replies and shrinks on a stall or error.
     pub(crate) window: usize,
-    /// When each in-flight chunk was requested. Used for the round-trip measurement (see `DOWNLOAD_RTT_TARGET_MS`). Removed when a reply or error arrives.
+    /// When each in-flight chunk was requested. Used for the round-trip measurement (see `handle_chunk_response`). Removed when a reply or error arrives.
     pub(crate) chunk_sent_at: std::collections::HashMap<u32, u64>,
     /// The SMALLEST round trip seen in this download: the path's queue-free base latency. The window growth is judged against it (see `DOWNLOAD_RTT_GROW_FACTOR`).
     pub(crate) rtt_min: u64,
@@ -337,8 +335,8 @@ pub(crate) struct DownloadState {
     pub(crate) retry_at: u64,
 }
 
-/// File chunk events collected INSIDE the `RUNTIME.block_on` block of `poll_events` (under the swarm borrow), and processed AFTER the block ends, when `self`
-/// can be accessed freely. Same "collect first, then process" pattern as `incoming` and `new_listen_addrs` (see poll_events).
+/// Envelope delivery events collected INSIDE the `RUNTIME.block_on` block of `poll_events` (under the swarm borrow), and processed AFTER the block ends,
+/// when `self` can be accessed freely. Same "collect first, then process" pattern as `incoming` (see poll_events).
 /// See `ENVELOPE_PROTOCOL`: collected under the swarm borrow, handled afterwards.
 pub(crate) enum EnvelopeEventLocal {
     Delivered { request_id: request_response::OutboundRequestId },
@@ -405,7 +403,7 @@ pub(crate) struct PendingConfirmation {
     /// The peer confirmed receiving the bytes over `ENVELOPE_PROTOCOL`. A late Ack is only latency (Tor round trips often exceed `ACK_SUSPECT_MS`),
     /// not a dead connection. A slow Ack must not mark the connection suspect, which would trigger parallel dials, close surplus connections and drop in-flight requests.
     pub(crate) direct_delivered: bool,
-    /// The identity of the chain GENERATION this packet was encrypted under: a 16-byte topic id derived from the root key. It is not secret; it is already the gossipsub topic name.
+    /// The identity of the chain GENERATION this packet was encrypted under: a 16-byte topic id derived from the root key. It is not secret; it is the mailbox id input (`topic_for_root_key`), not a pub/sub topic.
     ///
     /// Pending packets are refreshed when the generation changes. When we rotate ourselves, `maybe_rotate_ratchet` runs and then `regen_pending_for_peer`. When the other side rotates,
     /// `receive_message` runs `regen_pending_for_peer`. The 25-minute timer is only a fallback.
@@ -415,7 +413,7 @@ pub(crate) struct PendingConfirmation {
     pub(crate) chain_stamp: String,
     pub(crate) peer_device_fingerprint: String,
     /// Already encrypted and signed packet. It is sent AS IS on every retry and is NOT re-encrypted. Encrypting again would advance the ratchet, and the other side
-    /// could then not recognise it as the "same logical message" (see the symmetric chain note in ratchet.rs).
+    /// could then not recognise it as the "same logical message".
     pub(crate) envelope: NetworkEnvelope,
     pub(crate) next_retry_at: u64,
     pub(crate) retry_interval_ms: u64,

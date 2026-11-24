@@ -4,7 +4,7 @@ use super::*;
 
 impl P2PCore {
 
-    /// See the file-top note: the `contacts` table was never written before, so the contact list was lost on every restart (including app updates).
+    /// Writes a contact to the `contacts` table, so the contact list survives a restart (including app updates).
     /// Called from every mutation point (register_contact_from_pairing, evaluate_sender_device, accept_pending_device_alert).
     pub(crate) fn persist_contact(&self, contact: &Contact) {
         if let Err(e) = self.try_persist_contact(contact) {
@@ -96,9 +96,8 @@ impl P2PCore {
         }
     }
 
-    /// See the `persist_contact` note at the top of the file. `known_remote_devices` (the PUBLIC keys of known remote devices; not secret, so no encryption
-    /// needed) was not persistent either. Signature verification and re-handshakes depend on these records, so when they were lost on restart, even messaging an
-    /// existing contact was impossible until a new IdentityExchange arrived.
+    /// Writes a known remote device to `remote_devices`. Its PUBLIC keys are not secret, so no encryption is needed. Signature verification and
+    /// re-handshakes depend on these records, so they must survive a restart; otherwise even messaging an existing contact needs a new IdentityExchange.
     pub(crate) fn persist_remote_device(&self, device: &DeviceRecord) {
         if let Err(e) = self.try_persist_remote_device(device) {
             error!("Could not write device record: {}", e);
@@ -171,8 +170,8 @@ impl P2PCore {
     // Section 2: TOFU and device-change detection
     // ---------------------------------------------------------------
 
-    /// Applies the  decision tree to the sending device of an incoming packet.
-    /// `sender_device_known_pubkeys`: must be downloaded from the other side or already known before this function is called (needed for signature verification).
+    /// Applies the decision tree (`check_incoming_device`) to the sending device of an incoming packet.
+    /// `has_valid_signed_device_add` and `pairing_proved` are computed by the caller.
     pub(crate) fn evaluate_sender_device(&mut self, identity_id: &str, device_fingerprint: &str, has_valid_signed_device_add: bool, device_name_hint: &str, pairing_proved: bool) -> DeviceCheckOutcome {
         let contact_id = self.identity_to_contact.get(identity_id).cloned();
         let contact = contact_id.as_ref().and_then(|id| self.contacts.get(id));
@@ -256,7 +255,7 @@ impl P2PCore {
                     .unwrap_or_else(|_| device_fingerprint.to_string());
 
                 // See `MAX_PENDING_DEVICE_ALERTS`. Updating an existing alert for the same fingerprint is always allowed (it does not add to the alert count). Only a
-                // brand-new fingerprint is silently dropped when the cap is full. The packet stays BLOCKED as the  requires (only no alert is shown in the UI).
+                // brand-new fingerprint is silently dropped when the cap is full. The packet stays BLOCKED as the decision tree requires (only no alert is shown in the UI).
                 // Per identity too: unsigned claims with made-up keys cost the sender nothing, and 200 of them against one contact used up the whole cap, so a real
                 // alert for another contact was lost.
                 let for_this_identity = self.pending_device_alerts.values().filter(|a| a.identity_id == identity_id).count();
@@ -484,7 +483,7 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Called when the user taps "Reject" (the default behaviour, ). My other devices refuse the device too.
+    /// Called when the user taps "Reject". My other devices refuse the device too.
     pub(crate) fn reject_pending_device_alert(&mut self, device_fingerprint: &str) {
         let Some(identity_id) = self.pending_device_alerts.get(device_fingerprint).map(|a| a.identity_id.clone()) else { return };
         self.reject_pending_device_alert_local(device_fingerprint);
@@ -513,7 +512,7 @@ impl P2PCore {
         self.pending_device_alerts.values().cloned().collect()
     }
 
-    /// Known contacts for the UI's chat-picker list. Each contact includes that identity's active device fingerprint (the only one in phase A). The chat screen passes this fingerprint to `sendMessage` as the target.
+    /// Known contacts for the UI's chat-picker list. Each contact includes that identity's active device fingerprint (the canonical one, see `canonical_device_for_identity`). The chat screen passes this fingerprint to `sendMessage` as the target.
     /// A contact met through a group is marked in the UI as "added via group, not verified face to face", because the founder vouched for its keys instead of a scanned code. The user can clear this mark after verifying the person another way (safety number in person or by phone). It affects only display, not encryption.
     /// The SAFETY CODE of a contact is what gets compared. It is derived from the fingerprint of the contact's canonical device, which is the SHA3-256 of four public keys (see `compute_fingerprint`). A matching code proves both sides saw the same keys, and the "mark as verified" action rests on that.
     /// The code is needed because keys of contacts met through a group come from the founder. A malicious founder could hand over its own key as another person's. Only comparing the code over a separate channel tells that apart.

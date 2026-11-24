@@ -25,7 +25,7 @@ pub(crate) fn unknown_inbound_to_close<T>(mut held: Vec<(T, u64)>, now: u64) -> 
 }
 impl P2PCore {
 
-    /// Maps the sender's device fingerprint to the gossip `PeerId` of the packet.
+    /// Maps the sender's device fingerprint to the `PeerId` of the connection the packet arrived on.
     ///
     /// Security precondition: the fingerprint must be trusted. Call this only after
     /// the caller has verified the packet cryptographically (fingerprint derived from
@@ -57,8 +57,7 @@ impl P2PCore {
                 }
                 unproven = known.is_empty();
             }
-            // No PeerId is named for the device, so the carrier is unproven. A gossip author
-            // is chosen by the publisher. Bind only over a live connection from that PeerId,
+            // No PeerId is named for the device, so the carrier is unproven. Bind only over a live connection from that PeerId,
             // never to a server or to another identity's device. Store no address from it:
             // the device's own AddressAnnounce supplies that.
             if unproven {
@@ -201,16 +200,13 @@ impl P2PCore {
                     "/p2pmessenger/1.0.0".to_string(),
                     keypair.public(),
                 ).with_cache_size(0)
-                // Default 5 min per peer. With 3-4 peers the LTE radio woke about every 75 s.
-                // Addresses change rarely; push covers changes.
+                // The default is 5 min per peer, which woke the LTE radio about every 75 s with
+                // 3-4 peers. Addresses change rarely; push covers changes.
                 .with_interval(std::time::Duration::from_secs(3600)));
-                // The library default `request_timeout` (10 s) is often too short over Tor for a
-                // 256 KiB file chunk (`FILE_CHUNK_SIZE`), especially on a congested circuit.
+                // The library default `request_timeout` (10 s) is too short over Tor for a
+                // 256 KiB file chunk (`FILE_CHUNK_SIZE`), so this uses the blob timeout (90 s).
                 // `retry_or_give_up_download` re-requests the same chunk at once on an
-                // OutboundFailure, so a short timeout could retry forever without giving the chunk
-                // enough time. 30 s is generous for a typical chunk over Tor, but still detects a
-                // dead connection in reasonable time (see `DOWNLOAD_STALL_TIMEOUT_MS`).
-                // Requests capped at 4 KiB (`FileChunkCodec`).
+                // OutboundFailure. Requests are capped at 4 KiB (`FileChunkCodec`).
                 let file_chunks: request_response::Behaviour<FileChunkCodec> = request_response::Behaviour::new(
                     [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default()
@@ -266,19 +262,15 @@ impl P2PCore {
                 Ok(P2PBehaviour { server_rpc, kad, identify, file_chunks, relay_client, relay, keepalive, acks, envelopes, stream })
             })(keypair_ref, relay_client)
             .map_err(|e| e.to_string())?;
-            // Idle timeout. The libp2p-swarm default closes a connection with no open protocol
-            // substream, such as quiet periods between two messages. `reconnect_sweep` would
-            // then re-dial each time, adding circuit and handshake traffic. Tor circuit builds
-            // are slow, so each drop can cost minutes. Ten minutes keeps the connection alive
-            // through normal quiet periods and avoids the reconnect loop.
         let mut swarm = Swarm::new(
             transport,
             behaviour,
             local_peer_id,
             libp2p::swarm::Config::with_tokio_executor()
-                // 30 min. Gossipsub is gone. Its mesh once kept a contact's connection open through
-                // the quiet keepalive window (`RADIO_WINDOW_MS`, 8 min), which a dozing phone can
-                // overrun. The keepalive probes still close a dead connection.
+                // Idle timeout, 30 min. The libp2p-swarm default closes a connection with no
+                // open protocol substream, and each re-dial costs circuit and handshake traffic.
+                // Tor circuit builds are slow, so each drop can cost minutes. The keepalive
+                // probes still close a dead connection.
                 .with_idle_connection_timeout(std::time::Duration::from_secs(1800)),
         );
 
@@ -360,18 +352,15 @@ impl P2PCore {
         }
     }
 
-    /// Gossip topic name. It used to be derived directly from the recipient's device fingerprint (`p2p_msg_<fingerprint>`). Any network observer
-    /// could then see which fingerprint received a message, and when, without reading it (traffic analysis; see SECURITY.md). After a ratchet
-    /// session exists, the topic is a pseudorandom name derived with HKDF from that session's `root_key`. Only the two sides of the session share
-    /// that secret, so the name cannot be traced back to the fingerprint. `root_key` changes at each DH/KEM rotation (every 30 min, see ratchet.rs),
-    /// so the topic rotates too.
+    /// Mailbox topic name of a ratchet session. It is derived with HKDF from the session's root key, so
+    /// network observers cannot tie it to a device fingerprint (see SECURITY.md). The root key changes at
+    /// each DH/KEM rotation (every 30 min, see ratchet.rs), so the topic rotates too.
     ///
-    /// Known limit: before any ratchet session exists (the first IdentityExchange and HandshakeInit pair) there is no shared secret, so the old
-    /// `p2p_msg_<fingerprint>` mailbox topic is used. Ongoing conversation traffic is protected. Only the first pairing exchange stays visible by
-    /// fingerprint (documented in SECURITY.md).
+    /// Known limit: before any ratchet session exists (the first IdentityExchange and HandshakeInit pair),
+    /// `publish.rs` uses the fingerprint-based name `p2p_msg_<fingerprint>` instead. Ongoing conversation
+    /// traffic is protected. The first pairing exchange still names the fingerprint.
     ///
     /// The input is `ratchet::root_handle` of a root (`root_handle_now` or `prev_root_key`), never the root itself.
-    /// Since gossipsub was removed, the topic string only names the session's mailbox on the server.
     pub(crate) fn topic_for_root_key(root_key: &[u8]) -> String {
         use sha2::Sha256;
         let hk = Hkdf::<Sha256>::new(None, root_key);
@@ -407,7 +396,7 @@ impl P2PCore {
         if self.ratchets.contains_key(peer_fp) { return; }
         if self.own_mailbox_topic_fp.as_deref() == Some(peer_fp) { return; }
         if self.pairing_mailbox_subs.contains_key(peer_fp) { return; }
-        // No gossip topic any more: the entry only marks "a pairing with this device was started" (see the readers of the map).
+        // The entry only marks "a pairing with this device was started" (see the readers of the map).
         if self.swarm.is_some() {
             self.pairing_mailbox_subs.insert(peer_fp.to_string(), current_time_ms());
         }

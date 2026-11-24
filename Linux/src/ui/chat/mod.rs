@@ -1,5 +1,6 @@
 //! The conversation view — one implementation for both 1:1 and group chats.
-//! On Android these are two ~2200-line activities that duplicate each other
+//! On Android these are two near-identical activities (about 850 lines each,
+//! ChatActivity and GroupChatActivity) that duplicate each other
 //! almost line for line, differing only in which core call to use and whether
 //! a sender name belongs on the bubble. Here that difference is a two-armed
 //! `Conversation` match, so a fix to bubble ordering, reply handling or
@@ -64,8 +65,8 @@ const BUBBLE_MAX_WIDTH: i32 = 460;
 /// `MergedBubbleDecoration` with the same threshold. The edges that touch shrink their corner radius, and the gap between
 /// them narrows. Android draws the full merged outline in one canvas pass. GTK CSS has no `::before` / `::after`
 /// pseudo-elements, so the corner patch needs its own widget (see `mark_group_seam` and `SEAM_NOTCH_SIZE`). So this
-/// side uses the cheap method: corner radii are reduced with CSS classes (see theme.rs `.continued-top` /
-/// `.continued-bottom`), and a small fixed circular notch is added at seams where the width changes. It is not an
+/// side uses the cheap method: corner radii are reduced with the `sq-*` and `rd-*` classes (see theme.rs), and a
+/// small fixed circular notch is added at seams where the width changes. It is not an
 /// exact geometric match, but it gives the same soft-join feel at much lower cost.
 const BUBBLE_GROUP_WINDOW_MS: u64 = 2 * 60 * 1000;
 /// A seam whose width difference is below this gets no notch. A difference that small is not worth an extra widget or render cost.
@@ -740,7 +741,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
 }
 
 /// Visual harness for bubble layout — see `TYPEON_UI_TEST=bubbles`. Exercises
-/// the same `bubble_text_label`/`bubble_row` the real conversation uses, so
+/// the same `bubble_text_label`/`bubble_content` the real conversation uses, so
 /// what it shows is what a chat shows.
 #[cfg(debug_assertions)] // dev harness only, not in release binaries
 pub fn demo_bubbles() -> gtk::Widget {
@@ -757,9 +758,8 @@ pub fn demo_bubbles() -> gtk::Widget {
 
         // Debugging helper. A user reported that none of five consecutive "mine" bubbles joined, on a screenshot. The first five
         // examples imitate that same short, consecutive "mine" layout. The point is to check in isolation that the
-        // `mark_group_seam` / `.continued-top` / `.continued-bottom` CSS really renders, without clicking through the real chat
-        // screen. The grouping logic itself (`insert_entry`) is NOT here. Only its RESULT (the corner classes and the notch) is
-        // applied by hand.
+        // seam notch really renders, without clicking through the real chat screen. The grouping logic itself
+        // (`insert_entry`) and the corner classes (`mark_group_seam`) are NOT here. Only the notch is applied by hand.
     let samples: [(bool, &str); 8] = [
         (true, "hey"),
         (true, "you there?"),
@@ -774,7 +774,7 @@ pub fn demo_bubbles() -> gtk::Widget {
         (false, "ok"),
     ];
 
-    let mut previous: Option<(bool, gtk::Box, i32)> = None;
+    let mut previous: Option<(bool, i32)> = None;
     for (mine, sample) in samples {
         let column = bubble_content();
         column.append(&bubble_text_label(&gtk::glib::markup_escape_text(sample)));
@@ -784,17 +784,12 @@ pub fn demo_bubbles() -> gtk::Widget {
         meta.add_css_class("dim-label");
         column.append(&meta);
 
-        let (overlay, skin) = place_bubble(&column, mine);
+        let (overlay, _) = place_bubble(&column, mine);
         let width = overlay.measure(gtk::Orientation::Horizontal, -1).1;
 
         let grouped = previous.as_ref().is_some_and(|(prev_mine, ..)| *prev_mine == mine);
-        if grouped {
-            skin.add_css_class("continued-top");
-            overlay.add_css_class("bubble-row-continued");
-        }
-        if let Some((_, prev_skin, prev_width)) = &previous {
+        if let Some((_, prev_width)) = &previous {
             if grouped {
-                prev_skin.add_css_class("continued-bottom");
                 let delta = (prev_width - width).abs();
                 if delta >= SEAM_NOTCH_MIN_DELTA {
                     let notch = gtk::Box::builder()
@@ -820,7 +815,7 @@ pub fn demo_bubbles() -> gtk::Widget {
         }
 
         messages.append(&overlay);
-        previous = Some((mine, skin, width));
+        previous = Some((mine, width));
     }
 
     let scroller = gtk::ScrolledWindow::builder()

@@ -141,8 +141,8 @@ class ChatActivity : AppCompatActivity() {
     /** Invalidates a voice message still being loaded (see `loadAndPlayVoiceMessage`). */
     internal var voiceLoadRequest = 0
 
-    /** In-chat search: indices into `localMessages` of the matching rows (see `runMessageSearch` / `goToSearchMatch`). */
-    /** Message ids, not list positions: prepending an older page or re-sorting moves every position. */
+    /** In-chat search: ids of the matching rows (see `runMessageSearch` / `goToSearchMatch`).
+     *  Message ids, not list positions: prepending an older page or re-sorting moves every position. */
     internal var searchMatches: List<String> = emptyList()
     internal var currentSearchMatchIndex = -1
     internal lateinit var layoutSearchMessages: View
@@ -687,8 +687,6 @@ class ChatActivity : AppCompatActivity() {
         if (!bindToIntent(intent)) finish() else consumeShare(intent)
     }
 
-    /** Top bar avatar: finds the contact with this device fingerprint in `listContacts()` and returns its profile photo (or `null`,
-     *  in which case `AvatarUtil` shows the initial-letter badge). */
     private fun isAccountDeleted(deviceFingerprint: String): Boolean = try {
         val array = JSONArray(P2PLib.listContacts())
         (0 until array.length()).any {
@@ -704,6 +702,8 @@ class ChatActivity : AppCompatActivity() {
     internal fun peerAvatar(): ByteArray? =
         if (toolbarAvatarLoaded) toolbarAvatarBytes else null // loaded off-main in the chat-open path; no JNI here
 
+    /** Top bar avatar: finds the contact with this device fingerprint in `listContacts()` and returns its profile photo (or `null`,
+     *  in which case `AvatarUtil` shows the initial-letter badge). */
     private fun resolveContactAvatar(deviceFingerprint: String): ByteArray? {
         return try {
             val array = JSONArray(P2PLib.listContacts())
@@ -723,8 +723,6 @@ class ChatActivity : AppCompatActivity() {
     /** The first quote in the input: the attachment or sticker being sent answers it. */
     internal fun takeQuote() = com.p2p.messenger.util.Quote.takeFirst(findViewById(R.id.edtMessage))
 
-    /** Swiping a bubble RIGHT starts a reply to that message. The swipe is limited to `REPLY_SWIPE_MAX_DP`, and the bubble settles back into place
-     *  (it is not a real swipe-to-dismiss). */
     /** See `setupSwipeToReply` / `onSelectedChanged`: the stable id of the target message, captured when the swipe STARTS. */
     internal var swipeStartMessageId: String? = null
 
@@ -820,7 +818,7 @@ class ChatActivity : AppCompatActivity() {
         peerStatusDot.cancelPulse()
         ownStatusDot.cancelPulse()
         typingHandler.removeCallbacksAndMessages(null)
-        // The 6 s cleaner was just cancelled and the peer's "stopped typing"
+        // The 8 s cleaner was just cancelled and the peer's "stopped typing"
         // event is missed while paused.
         layoutTypingIndicator.visibility = View.GONE
         sendTypingState(false)
@@ -830,8 +828,8 @@ class ChatActivity : AppCompatActivity() {
 
     /**
      * The pending callbacks of the handlers hold the adapter (and with it
-     * this activity) alive: the reply highlight (2 s), the typing cleaner
-     * (6 s), the voice tick, the recording timer, the two poll loops and the
+     * this activity) alive: the reply highlight (1.5 s), the typing cleaner
+     * (8 s), the voice tick, the recording timer, the two poll loops and the
      * read watermark. `onPause` only removes SOME of them — a pending
      * callback survived the pause and kept the whole screen alive.
      */

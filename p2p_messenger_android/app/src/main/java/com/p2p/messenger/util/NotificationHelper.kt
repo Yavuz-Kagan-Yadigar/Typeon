@@ -14,11 +14,10 @@ import org.json.JSONArray
 
 /**
  * Local notifications for incoming messages. No Google Play Services or FCM is used, and none is needed:
- * this is a privacy-focused P2P app. P2PService already polls the network every second as an always-running
- * foreground service (see P2PService.pollRunnable). So no push notification has to be imitated. When a message
- * really arrives, the service's own loop shows the notification from here. Reliability depends on how often
- * and how regularly that service runs, not on a third-party push system. The foreground service is START_STICKY
- * and runs every second.
+ * this is a privacy-focused P2P app. P2PService polls the network while it runs as a foreground service
+ * (see P2PService.pollRunnable). So no push notification has to be imitated. When a message really arrives,
+ * the service's own loop shows the notification from here. Reliability depends on how often and how regularly
+ * that service runs, not on a third-party push system. The foreground service is START_STICKY.
  */
 object NotificationHelper {
     const val MESSAGE_CHANNEL_ID = "P2PMessagesChannel"
@@ -106,12 +105,8 @@ object NotificationHelper {
     }
 
     /**
-     * "New device" alerts are no longer silent.
-     *
-     * Before, the alert was only written to the core's pending list. The UI asked for it once a second, and only while
-     * the main screen was in the foreground. So if the user was on another screen, or the app was in the background, the
-     * alert was never seen, and every message from that person was dropped quietly. Now the alert is also a notification.
-     * Tapping it opens the accept, reject or block dialog.
+     * "New device" alert as a notification, so it is seen when the app is not in front. Tapping it opens MainActivity,
+     * where the accept, reject or block dialog is shown.
      */
     fun showDeviceAlertNotification(context: Context, contactName: String, shortCode: String) {
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
@@ -199,8 +194,8 @@ object NotificationHelper {
     }
 
     /**
-     * Clears ALL message notifications when the app comes to the foreground or the main screen is entered. The user has
-     * opened the app, so they should not stay in the notification bar. Called from `MainActivity.onResume`.
+     * Clears ALL message notifications when the app comes to the foreground, unless the app lock is on. The user has
+     * opened the app, so they should not stay in the notification bar. Called from `MainActivity.resumeWork`.
      *
      * SECURITY ALERTS and the foreground service's permanent notification are NOT cleared. For "new device", "my account
      * was revoked" and "account deleted", the notification bar is the only trace. In the previous version they were cleared
@@ -228,7 +223,7 @@ object NotificationHelper {
     }
 
     /** When a 1:1 chat opens, ONLY that contact's notification is cleared. The ID is computed the same way as in
-     *  `showMessageNotification`. It is narrower than `clearAll`. ChatActivity calls it from onResume. */
+     *  `showMessageNotification`. It is narrower than `clearAll`. ChatActivity calls it from onResume, when unlocked. */
     fun clearForPeer(context: Context, peerDeviceFingerprint: String) {
         shownMessageId.remove(peerDeviceFingerprint.hashCode()) // no stale mapping
         context.getSystemService(NotificationManager::class.java).cancel(peerDeviceFingerprint.hashCode())
@@ -294,11 +289,9 @@ object NotificationHelper {
         // with no redaction on the lock screen. The system setting "hide sensitive notification content on the lock screen"
         // could fix that, but only if the user found and turned it on. Relying on a system setting that may be off by default
         // is not enough. So, as Signal does, this sets `VISIBILITY_PRIVATE` plus a `publicVersion` with no content. With the
-        // system "hide sensitive content" setting ON, the lock screen shows only "New message" and the sender name. The message
-        // TEXT is never shown there.
-        // On an unlocked phone, or when this setting is OFF, the behaviour is the same as before: the full preview is shown.
-        // No feature was removed. Only an extra protection layer was added for the locked, hidden-content case.
-        // The lock screen shows neither the sender nor the text.
+        // system "hide sensitive content" setting ON, the lock screen shows only "New message" (the public version below).
+        // The message text and the sender are not shown there.
+        // On an unlocked phone, or when that setting is OFF, the full preview is shown.
         val publicVersion = NotificationCompat.Builder(context, channel)
             .setContentTitle(context.getString(R.string.app_name))
             .setContentText(context.getString(R.string.notif_new_message))
@@ -322,8 +315,7 @@ object NotificationHelper {
         manager.notify(notificationId, notification)
     }
 
-    /** Each notification used to parse the whole contact list (every avatar as hex) on the poll thread, only to read one
-     *  name. After a reconnect, 50 queued messages meant 50 to 100 full serialisations. */
+    /** Names are cached for 30 s, so a burst of messages does not parse the whole contact list for each one. */
     private const val NAME_CACHE_TTL_MS = 30_000L
     private var namesLoadedAt = 0L
     private var namesByFingerprint = emptyMap<String, String>()

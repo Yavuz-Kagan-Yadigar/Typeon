@@ -21,9 +21,8 @@ import java.lang.reflect.Modifier
  * Android's hidden API restrictions) it can throw SecurityException or NoSuchFieldException. Each step is wrapped in its
  * own try/catch. If one field cannot be replaced, it is skipped and the others are still tried. A partial success (for
  * example, `DEFAULT` changes but `sDefaults` does not) is better than a full failure, and none of them crash the app.
- * Material components (button, toolbar, dropdown) have their own type scale, covered by the `appFontFamily` theme attribute,
- * which is guaranteed to work. So the target of this function is the plain TextViews in between. A failure here leaves the
- * app half-styled, not unstyled.
+ * Material components (button, toolbar, dropdown) have their own type scale, covered by the `appFontFamily` theme attribute.
+ * So the target of this function is the plain TextViews in between. A failure here leaves the app half-styled, not unstyled.
  */
 object FontOverride {
     /** The font every TextView must carry. null means the system font. */
@@ -58,9 +57,7 @@ object FontOverride {
 
     private var cachedFile: Pair<Pair<String, Long>, Typeface>? = null
 
-    /** `familyName` null or empty is a no-op. The REAL way back to the system font is a process restart. This function only
-     *  applies a change going forward, it does not revert. The caller (see P2PApplication and SettingsFragment) is noted. If an
-     *  earlier override exists, writing a new one over it is harmless. */
+    /** A null or empty `familyName` restores the system font (see `restoreOriginals`). Otherwise the new font replaces any earlier override. */
     fun apply(familyName: String?) {
         remapSansSerif(null)
         if (familyName.isNullOrBlank()) {

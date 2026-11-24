@@ -1,5 +1,5 @@
 //! In-app viewer for photos, video and voice messages.
-//! Images are drawn with gdk-pixbuf, which is part of GTK and always present.
+//! Images are checked with gdk-pixbuf (header only) and decoded by GTK; both are always present.
 //! Audio and video need a *media backend* — a separate GTK module
 //! (`libmedia-gstreamer.so`) that not every distribution installs, and which is
 //! genuinely absent on some. There is no build-time way to know, so the viewer
@@ -254,8 +254,8 @@ fn image_pane(path: &str) -> gtk::Widget {
 /// This deliberately does not use `GtkVideo` or `GtkMediaControls`: `GtkVideo`
 /// ships its *own* built-in transport bar with no property to turn it off
 /// ("Shows a GtkMediaStream with media controls", straight from its docs), so
-/// pairing it with a second `GtkMediaControls` — what this used to do — drew
-/// two seekbars stacked on top of each other. A bare `GtkPicture` painting the
+/// pairing it with a second `GtkMediaControls` draws two seekbars stacked on top
+/// of each other. A bare `GtkPicture` painting the
 /// stream (`GtkMediaStream` implements `GdkPaintable`) shows only the frames,
 /// and `transport_bar` below is the one and only set of controls, custom-built
 /// so it can also offer the ±5s skip Android has that `GtkMediaControls` does
@@ -379,10 +379,10 @@ fn transport_bar(media: &gtk::MediaFile) -> gtk::Widget {
     remaining.add_css_class("caption");
     remaining.add_css_class("dim-label");
 
-    // A concrete minimum width, not just `hexpand` — see the identical note
-    // on the voice player's seek scale in chat.rs, which is where this
-    // actually got noticed (a near-zero-width `GtkScale` both renders as a
-    // barely visible sliver and trips a GTK size-arithmetic warning).
+    // A concrete minimum width, not just `hexpand` — see the same note on the
+    // voice player's seek scale in chat/attachments.rs (a near-zero-width
+    // `GtkScale` both renders as a barely visible sliver and trips a GTK
+    // size-arithmetic warning).
     let seek = gtk::Scale::builder()
         .orientation(gtk::Orientation::Horizontal)
         .hexpand(true)
@@ -391,7 +391,7 @@ fn transport_bar(media: &gtk::MediaFile) -> gtk::Widget {
         .build();
     seek.set_range(0.0, 1.0);
 
-    // VolumeButton is deprecated since GTK 4.10; this is what it was.
+    // ScaleButton, not VolumeButton: VolumeButton is deprecated since GTK 4.10.
     let volume = gtk::ScaleButton::new(0.0, 1.0, 0.02, &[
         "audio-volume-muted-symbolic", "audio-volume-high-symbolic",
         "audio-volume-low-symbolic", "audio-volume-medium-symbolic",

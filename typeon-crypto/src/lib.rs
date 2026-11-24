@@ -1,6 +1,6 @@
 //! Shared crypto core: primitives, identity model and wire formats.
 //!
-//! Used by the native clients (Android, Linux) and by the `wasm32` target.
+//! Used by the native clients (Android, Linux). Meant to build for `wasm32` too (see Cargo.toml).
 //! Protocol logic only: no SQLite, libp2p, Tor or JNI.
 //!
 //! Modules:

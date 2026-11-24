@@ -30,16 +30,10 @@ impl P2PCore {
     /// Encrypts a file the user picked (Kotlin must already have copied it to a local path; content:// URIs are not handled here, see P2PLib.kt),
     /// writes it to disk, adds the sender's own record to the `files` table (the sender always keeps a copy, independent of node mode), and sends
     /// the peer a `FileOffer` metadata message.
-    /// KNOWN LIMIT: `encrypt_file_to_disk` is bounded-memory but SYNCHRONOUS: the `CORE` lock is held for the whole call. For a very large
-    /// (GB-scale) file, `pollNetwork` and other JNI calls can be delayed for that time. Messaging itself is not broken, only deferred by seconds
-    /// or tens of seconds. A fully asynchronous design (separate worker thread + channel) is out of scope for now.
-    /// Fix: file encryption now runs outside the lock. The old single-piece `prepare_and_send_file`/`prepare_and_send_group_file` ran the
-    /// ChaCha20 encryption of up to 4 GB while holding the GLOBAL core lock. `poll_events` could not run during that time (the swarm was not
-    /// polled, incoming keepalive requests went unanswered), and peers dropped the connection as half-open after ~20-30 s. Sending a large video
-    /// effectively took the node offline.
-    /// Now there are three phases: `begin_outgoing_file` (short, locked: validation, id and key generation), the encryption itself (unlocked, see
-    /// the free function `prepare_and_send_file_unlocked` at the end of this file), and `finish_outgoing_file`/`finish_outgoing_group_file` (short,
-    /// locked: DB record and FileOffer send).
+    /// Encrypting a large file takes a long time, so it must not hold the core lock: the swarm is not polled while the lock is held, and peers
+    /// drop the connection as half-open after 20-30 s. Sending is therefore done in three phases: `begin_outgoing_file` (locked: validation,
+    /// id and key generation), the encryption (unlocked, in `encrypt_then_finish` in `media_unlocked.rs`), and `finish_outgoing_file` or
+    /// `finish_outgoing_group_file` (locked: DB record and FileOffer send).
     ///
     /// The `skipped_key_encryption_key` check runs early (before encryption) on purpose: otherwise key wrapping would fail after GBs were
     /// processed, leaving an orphan `.enc` on disk with no DB row. The size check is here for the same reason.
@@ -102,7 +96,7 @@ impl P2PCore {
         let expire_secs = self.disappear_mode(&peer_device_fingerprint, "");
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
-            // The column list has 18 entries, matching VALUES. `caption`, `reply_to_message_id` and `reply_to_preview` were in VALUES but missing from the column list. SQLite rejects the mismatch and `let _ =` hid the error, so the sender never stored its own 1:1 attachment. `serve_chunk_request` then answered "no record" and the bubble vanished on reopen. Keep the two lists in step.
+            // The column list and the VALUES list must stay in step (22 entries each). A mismatch makes SQLite reject the INSERT.
             let res = conn.execute(
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
@@ -187,9 +181,7 @@ impl P2PCore {
         let group = self.groups.get(&group_id).cloned_group()?;
         let (encrypted_key, key_nonce) = self.wrap_file_key(&file_key)?;
         if let Some(conn) = &self.db {
-            // See `finish_outgoing_file` (1:1), same bug: the column list (17) was shorter than the VALUES list (21), so the sender could not write
-            // its `files` row for group attachments. The column list now has 21 entries: `caption`, `reply_to_message_id`, `reply_to_preview` and
-            // `reply_to_sender_identity_id` were added.
+            // The column list and the VALUES list must stay in step (25 entries each), as in `finish_outgoing_file`.
             let res = conn.execute(
                 "INSERT OR REPLACE INTO files
                  (file_id, peer_device_fingerprint, direction, file_name, mime_type, total_size,
@@ -242,18 +234,14 @@ impl P2PCore {
         Ok(file_id)
     }
 
-    /// Handles an incoming `FileOffer`: adds a recipient row to the `files` table. If node mode is on, the download starts at once. If it is off,
-    /// only the metadata stays visible and the user must tap "Download".
+    /// Handles an incoming `FileOffer`: adds a recipient row to the `files` table. If node mode is on and the limits allow it, the download
+    /// starts at once. Otherwise only the metadata stays visible and the user must tap "Download".
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn receive_file_offer(&mut self, peer_fp: &str, sender_identity_id: &str, group_id: Option<String>, file_id: &str, file_name: &str, mime_type: &str, total_size: u64, file_key: &[u8; 32], sha256_hex: &str, preview_jpeg: &Option<Vec<u8>>, duration_ms: Option<u32>, chunk_size: Option<u32>, chunk_hashes: &[u8], caption: &str, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sticker: bool, sticker_origin: Option<&str>, sent_at_ms: u64) -> serde_json::Value {
         // The sender's clock, not later than ours (as for texts); 0 = unknown, now.
         let sent_at_ms = match sent_at_ms { 0 => current_time_ms(), t => t.min(current_time_ms()) };
-        // `MAX_ATTACHMENT_SIZE`
-        // Before, this was enforced ONLY on the send side (`prepare_and_send_file`/`prepare_and_send_group_file`). The RECEIVER did not check the
-        // `total_size` the other side sent. A malicious or broken peer could send a `total_size` near `u64::MAX` and trigger the `total_size as i64`
-        // conversion below (which wraps negative and writes a bad column value), and the `total_size + FILE_CHUNK_SIZE - 1` sum in
-        // `attachments::total_chunks_with` (which can silently wrap in release builds). Both would write a corrupt row to `files`. The same upper
-        // limit now applies on the receive side too. An oversized offer is rejected without writing any DB row.
+        // The receiver checks the sizes too, not only the sender. A `total_size` near `u64::MAX` would wrap in the `as i64` cast below and in
+        // `attachments::total_chunks_with`, which would write a corrupt row. An oversized offer is rejected without writing a DB row.
         // The peer's chunk size becomes buffer sizes and file offsets here.
         if chunk_size.map_or(false, |c| !attachments::chunk_size_ok(c as usize)) {
             warn!("FileOffer REJECTED: invalid chunk size {:?} (sender: {})", chunk_size, crate::log_id(&peer_fp));
@@ -275,11 +263,7 @@ impl P2PCore {
                 "error": "Invalid file id"
             });
         }
-        // The `INSERT OR REPLACE` below has a problem: if the other side sends back the `file_id` of a file we sent to it (it knows the id because
-        // we offered it), our `direction='sent'` row was overwritten as 'received'. Result: our own outgoing row was lost, `serve_chunk_request`
-        // returned `NotFound` (the state is not 'complete'), so the OTHER recipients waiting on that file could not download it either. And if a
-        // download was started, `download_file`'s `remove_file` deleted our own encrypted `.enc`.
-        // The row is stored and passed to the UI as received.
+        // Field checks: the hash must be 64 hex chars and the caption and preview are size-capped.
         if sha256_hex.len() != 64 || !sha256_hex.bytes().all(|b| b.is_ascii_hexdigit())
             || mime_type.len() > 255 || caption.len() > 64 * 1024
             || preview_jpeg.as_ref().map_or(false, |p| p.len() > 512 * 1024)
@@ -384,8 +368,7 @@ impl P2PCore {
                 || self.node_mode_enabled && in_flight.saturating_add(total_size) <= self.history_storage_limit_bytes)
             && self.active_downloads.len() < 8
             && self.active_downloads.values().filter(|d| d.peer_device_fingerprint == peer_fp).count() < 4;
-        // If the row cannot be written (e.g. the encryption key is not loaded yet), we continue as "offered". Reporting "downloading" without a DB
-        // row would leave the Kotlin UI stuck forever on a file that `download_file` can never find (see the file-end note).
+        // If the row cannot be written (for example the encryption key is not loaded yet), the offer is dropped below as `noop`.
         let row_written = match self.wrap_file_key(file_key) {
             Ok((encrypted_key, key_nonce)) => {
                 let status = if auto_download_requested { "downloading" } else { "offered" };
@@ -418,11 +401,7 @@ impl P2PCore {
             }
         };
 
-        // Before, a failure of `download_file` here (e.g. because `device_to_peer_id` has no entry for this peer yet) was only logged. The caller
-        // (Kotlin) always saw "auto_downloading": true, and the UI stayed stuck on "Downloading" forever: the download never reached
-        // `active_downloads`, so it never produced an error or completion event. Now the real result is reported in the `auto_downloading` field.
-        // No row: no bubble either (it failed on tap and was gone on reload).
-        // The caller sends no Ack for this, so the offer comes again.
+        // No row, no bubble. The caller sends no Ack for a `noop`, so the offer comes again.
         if !row_written {
             return serde_json::json!({"type": "noop"});
         }
@@ -462,8 +441,8 @@ impl P2PCore {
             "group_id": group_id, "file_id": file_id, "sent_at_ms": sent_at_ms,
             "file_name": file_name, "mime_type": mime_type, "total_size": total_size,
             "auto_downloading": auto_downloading, "complete": reused, "sticker": sticker,
-            // Hex-encoded, since JSON cannot carry raw binary. For a small preview (typically a few tens of KB), hex is about 37% larger than base64,
-            // which does not matter. The existing `hex` crate is used to avoid adding a new dependency.
+            // Hex-encoded, since JSON cannot carry raw binary. Hex is 50% larger than base64, which is fine for a small preview. The `hex` crate
+            // is already a dependency.
             "preview_hex": preview_jpeg.as_ref().map(|p| hex::encode(p)),
             "duration_ms": duration_ms,
             // Include the caption that comes with the attachment, and the replied-to message context if there is one. The attachment bubble shows
@@ -533,8 +512,7 @@ impl P2PCore {
             info!("download_file: {} already downloading, no-op", file_id);
             return Ok(());
         }
-        // without a swarm no chunk is ever requested; the UI showed
-        // "downloading" for 10 min instead of an error.
+        // Without a swarm no chunk can be requested, so fail here instead of leaving the UI on "downloading".
         if self.swarm.is_none() {
             return Err("Network not started yet".to_string());
         }
@@ -556,8 +534,8 @@ impl P2PCore {
         }
         let file_key = self.unwrap_file_key(&encrypted_key, &key_nonce)?;
 
-        // If a server is configured (see `server_client`), the file may also be there. This closes a gap where, before, if the
-        // original sender was offline, the download silently timed out after 10 minutes and failed.
+        // If a server is configured (see `server_client`), the file may also be there, so the download still works when the
+        // original sender is offline.
         let server_peers = self.ready_server_peers();
         let peer_id = match self.device_to_peer_id.get(&peer_device_fingerprint) {
             Some(pid) => *pid,
@@ -576,7 +554,7 @@ impl P2PCore {
                 swarm.add_peer_address(peer_id, addr);
             }
         }
-        // Requests use `dial_with_relay_fallback`, like every messaging and handshake reconnect path. A bare `add_peer_address` only adds the address to the swarm's book. It starts no dial and tries no circuit through known relays, so a peer behind NAT would fail at once. Gossipsub can spread messages without a direct link, but this request-response protocol needs a real connection.
+        // Requests use `dial_with_relay_fallback`, like every messaging and handshake reconnect path. A bare `add_peer_address` only adds the address to the swarm's book. It starts no dial and tries no circuit through known relays, so a peer behind NAT would fail at once. This request-response protocol needs a real connection.
         if !already_connected {
             self.dial_with_relay_fallback(peer_id, cached_addr);
         }
@@ -685,10 +663,8 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Requests the next chunk. When the sequence is done (`next_chunk_index >= total_chunks`), counts the download as complete. Network robustness
-    /// fix: if this is a RETRY (see `retry_or_give_up_download`; a request for the same `next_chunk_index` may already have been sent), the OLD
-    /// request id is cleared from `download_request_ids` FIRST. Otherwise a late old response or error could be applied to the WRONG chunk (data
-    /// corruption), even after `next_chunk_index` has moved on.
+    /// Requests the next missing chunks, up to the window size. When every chunk is received, the download is finalized. Each request id is
+    /// stored in `download_request_ids`, so a reply is matched to its own chunk (see poll.rs).
     pub(crate) fn request_next_chunk(&mut self, file_id: &str) {
         // The completion condition now looks at the number of chunks RECEIVED. `next_chunk_index` is only the contiguous water level (see `received_chunks`).
         let done = match self.active_downloads.get(file_id) {
@@ -786,9 +762,8 @@ impl P2PCore {
     }
 
     /// Called when a chunk request stalled (`check_stalled_downloads`) or an explicit `OutboundFailure` arrives from libp2p. If
-    /// `DOWNLOAD_GIVE_UP_TIMEOUT_MS` has not passed since the LAST REAL progress (`last_progress_at`), the SAME chunk is requested again
-    /// (`request_next_chunk`). Everything should be retried until acknowledged, up to a long timeout of ~10 min. Once that has passed, the download
-    /// really gives up and is counted as failed.
+    /// `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min) has not passed since the LAST REAL progress (`last_progress_at`), the missing chunks are requested
+    /// again (`request_next_chunk`). Once that timeout has passed, the download gives up and is counted as failed.
     pub(crate) fn retry_or_give_up_download(&mut self, file_id: &str, reason: &str) {
         let now = current_time_ms();
         let elapsed_since_progress = match self.active_downloads.get(file_id) {
@@ -1137,8 +1112,8 @@ impl P2PCore {
         let mut all_done = false;
         if let Some(state) = self.active_downloads.get_mut(file_id) {
             state.inflight_chunks.remove(&chunk_index);
-            // Adaptive window: grow it when the round trip is below the target. If it is above the target the link is saturated, and growing it would
-            // only inflate the buffer (see `DOWNLOAD_RTT_TARGET_MS`).
+            // Adaptive window: grow it while the round trip stays within `DOWNLOAD_RTT_GROW_FACTOR` of the smallest seen and under
+            // `DOWNLOAD_RTT_CEILING_MS`. Otherwise the link is saturated, and growing it would only inflate the buffer.
             if let Some(sent_at) = state.chunk_sent_at.remove(&chunk_index) {
                 let rtt = current_time_ms().saturating_sub(sent_at);
                 state.rtt_min = state.rtt_min.min(rtt.max(DOWNLOAD_RTT_FLOOR_MS));
@@ -1147,12 +1122,8 @@ impl P2PCore {
                     state.window += 1;
                 }
             }
-            // The same chunk arrived twice (retry race): do not count the bytes twice.
-            //
-            // Bug: there was a `return` here that also SKIPPED the `request_next_chunk` at the end of the function. The chunk had just been removed
-            // from `inflight_chunks`, so each duplicate chunk narrowed the pipeline window by one, and no new request was opened. With enough duplicates
-            // in a row, the window emptied and the download stalled until the stall timer (`DOWNLOAD_STALL_TIMEOUT_MS`, 105 s) fired. The bookkeeping is
-            // now skipped but the flow continues.
+            // The same chunk arrived twice (retry race): do not count the bytes twice. This branch must not return early. The function still has to
+            // call `request_next_chunk` at the end, or the window empties and the download waits for the stall timer.
             // A chunk in a group that is still waiting for the rest is progress too, but only checked chunks are counted as received.
             let mut duplicate = true;
             for &(i, n) in &verified {
@@ -1381,7 +1352,7 @@ impl P2PCore {
             }
         };
         let params_dyn: Vec<&dyn rusqlite::ToSql> = device_fps.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        // Previews up to 512 KiB each, 500 rows, as hex. Older rows past the budget come without one.
+        // Previews are hex-encoded, within a budget of `PAGE_MAX_BYTES` per page. Rows past the budget come without a preview.
         let mut preview_budget = PAGE_MAX_BYTES;
         let rows = stmt.query_map(params_dyn.as_slice(), |r| {
             let preview: Option<Vec<u8>> = if with_preview { r.get(8)? } else { None };
@@ -1494,11 +1465,9 @@ impl P2PCore {
     }
 
     /// Returns the path to a decrypted (plaintext) copy of a completed attachment. If there is none yet (first open), it decrypts the file from disk
-    /// first. KNOWN LIMIT: `decrypt_file_from_disk` is synchronous and bounded-memory, but for a large file it can still take a while. The Kotlin
-    /// side must call it OFF the main thread (see P2PLib.kt docs).
-    /// Same lock-splitting reason as `begin_outgoing_file`: decrypting a whole large attachment can take minutes, and it used to run under the global
-    /// lock. This is the SHORT locked phase: it reads the metadata from the DB, unwraps the key, and returns the path pair. The actual
-    /// `decrypt_file_from_disk` runs unlocked in `attachment_plaintext_path_unlocked`.
+    /// first. The decryption of a large file can take minutes, so it runs without the core lock, like `begin_outgoing_file`. This is the SHORT
+    /// locked phase: it reads the metadata from the DB, unwraps the key, and returns the path pair. The decryption itself runs unlocked in
+    /// `attachment_plaintext_path_unlocked` (media_unlocked.rs). Kotlin must still call the export off the main thread.
     pub(crate) fn begin_attachment_decrypt(&self, file_id: &str) -> Result<([u8; 32], String, std::path::PathBuf, std::path::PathBuf), String> {
         info!("get_attachment_plaintext_path called: file_id={}", file_id);
         let conn = self.db.as_ref().ok_or("DB not open")?;

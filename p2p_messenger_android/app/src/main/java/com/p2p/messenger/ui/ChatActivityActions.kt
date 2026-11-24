@@ -301,6 +301,8 @@ internal fun ChatActivity.copyMessageText(item: SimpleChatAdapter.Item) {
     Toast.makeText(this, R.string.lbl_copied, Toast.LENGTH_SHORT).show()
 }
 
+/** Swiping a bubble RIGHT starts a reply to that message. The swipe is limited to `REPLY_SWIPE_MAX_DP`, and the bubble settles back into place
+ *  (it is not a real swipe-to-dismiss). */
 internal fun ChatActivity.setupSwipeToReply() {
     val replyIcon: Drawable? = ContextCompat.getDrawable(this, R.drawable.ic_reply)
     val maxSwipePx = REPLY_SWIPE_MAX_DP * resources.displayMetrics.density

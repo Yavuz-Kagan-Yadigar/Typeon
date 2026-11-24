@@ -8,8 +8,7 @@ side.
 ## What it is for
 
 Typeon has no store-and-forward without a server. A libp2p relay only builds a
-*live* circuit between two peers who are both online at the same instant; the
-gossipsub mailbox topic is a naming convention, not storage. Durability
+*live* circuit between two peers who are both online at the same instant. Durability
 otherwise lives entirely on the sender, which stops working once a phone has
 been off for longer than the sender's retry window.
 
@@ -42,14 +41,14 @@ address in it is useless.
 
 ## Letting people join
 
-The screen shows one **permanent** join code — a QR and a copyable line:
+The screen shows one join code — a QR and a copyable line:
 
     typeon-server:/dns/abc…onion/tcp/42612/p2p/12D3Koo…#a1b2c3…
 
-It appears by itself once the onion address is up. Publish it once: any number
-of people can scan it, paste it under **Settings → Servers → Add server**, or
-just tap it as a link on Android. Nobody has to ask you for a code, and you do
-not have to come back to this screen for each new person.
+It appears by itself once the onion address is up. It is valid for 3 days; after
+that the server makes a new one by itself. Any number of people can scan it, paste
+it under **Settings → Servers**, or just tap it as a link on Android. Nobody has to
+ask you for a code.
 
 **Rotate code** invalidates it and prints a new one — the answer if the code
 leaks or ends up somewhere you did not intend. Devices that already enrolled

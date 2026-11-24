@@ -758,9 +758,10 @@ impl Inner {
         let Some(Step { page, strokes, ids, live }) = copy else { return };
         let (peer, gid) = (self.peer.clone(), self.group_id.clone());
         let me = self.clone();
-        // a restored step that re-adds strokes cancels any erase-in-flight
-        // for the same shapes — otherwise the still-un-acked add's callback
-        // would "finish" the erase and wipe the stroke the user just restored.
+        // A restored step that re-adds strokes: its ack (below) cancels any
+        // erase still pending for the same shapes. Otherwise the un-acked
+        // add's callback would "finish" that erase and wipe the stroke the
+        // user just restored.
         let restored_points = if live {
             Vec::new()
         } else {

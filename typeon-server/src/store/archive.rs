@@ -26,14 +26,13 @@ impl Store {
     /// Stores or overwrites records.
     ///
     /// `WHERE excluded.rev > archive.rev`: an edit or delete carries the SAME `record_id` and overwrites the old row with a
-    /// higher `rev`. The existing `HistorySyncResponse` cannot do this (it cannot correct a late Edit in history). The same
-    /// rule also collapses N devices uploading the same record into one row.
+    /// higher `rev`. The same rule also collapses N devices uploading the same record into one row.
     ///
     /// The last writer becomes `owner` and pays for the row (see `archive_row_bytes`).
     pub fn archive_put(&self, bucket: &str, records: &[ArchiveRecord], owner: &[u8], now: i64) -> Result<u64, String> {
         let mut newest = 0u64;
         // One transaction: one WAL commit per batch, all or nothing. The charge moves by the delta of each row written, in
-        // the same transaction. A `SUM` over all of the writer's rows on every request was a full scan on the event loop.
+        // the same transaction. A `SUM` over all of the writer's rows per request would be a full scan on the event loop.
         // The sweep recounts.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         for rec in records {
@@ -83,7 +82,7 @@ impl Store {
     }
 
     /// Only the owners whose rows changed are recounted (an overwrite or purge changes what another enrollment is charged).
-    /// Recounting every enrollment scanned the whole archive on each request.
+    /// Recounting every enrollment would scan the whole archive on each request.
     pub(super) fn recount_archive_bytes(&self, owners: &[Vec<u8>]) {
         for owner in owners {
             let _ = self.conn.execute(
@@ -97,8 +96,8 @@ impl Store {
 
     pub fn archive_probe(&self, buckets: &[String]) -> Vec<BucketStat> {
         let mut out = Vec::new();
-        // A repeated id is one scan, and the count stops at a cap. 512 full scans of a bucket of millions of rows held the
-        // event loop for seconds. MIN and MAX come from `idx_archive_page`.
+        // A repeated id is one scan, and the count stops at a cap: full scans of a large bucket would hold the event
+        // loop. MIN and MAX come from `idx_archive_page`.
         let mut seen = std::collections::HashSet::new();
         for b in buckets {
             if !seen.insert(b.as_str()) {
@@ -127,7 +126,7 @@ impl Store {
 
     /// Pages backwards, newest first. `before: None` returns the newest page.
     ///
-    /// The cursor is the last record the client received, `(sent_at_ms, record_id)`. Clients send `sent_at_ms` rounded to
+    /// The cursor is the last record the client received, `(sent_at_ms, record_id)`. Clients send `sent_at_ms` floored to
     /// the hour, so many records share one value, and a page can end inside such a group.
     pub fn archive_fetch(&self, bucket: &str, before: Option<(u64, &str)>, max_items: u32, max_bytes: u32) -> (Vec<ArchiveRecord>, bool) {
         let (before_ms, before_id) = match before {

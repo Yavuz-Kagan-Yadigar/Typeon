@@ -116,17 +116,17 @@ pub(crate) fn dir_size(dir: &std::path::Path, ext_filter: Option<&str>) -> u64 {
     total
 }
 
-/// Makes the `file_name` sent by the peer harmless before it is DISPLAYED or USED as a file name.
-///
-/// This field is fully remote-controlled and flows to two places:
-///   * The Android "save to Downloads / P2P" path (the API 26-28 branch) does `File(p2pDir, fileName)`. A name such as
-///     `"../../DCIM/Camera/IMG_0001.jpg"` would write to an arbitrary path in shared storage.
-///   * The chat bubble on both clients. Unicode bidi override characters (U+202E RIGHT-TO-LEFT OVERRIDE and relatives) visually reverse the
-///     extension: `"fatura\u{202E}kpa.pdf"` is displayed as `"faturafdp.apk"`. This is the classic extension spoof.
-///
-/// Rule: path separators and drive/root markers are dropped. Control characters and bidi formatting characters are dropped. Leading dots are
-/// dropped (`".."` or a hidden file). The length is capped. If nothing is left, the result is `"file"`.
-/// The extension is KEPT, so `safe_extension` and the MIME mapping keep working.
+// `safe_file_name` makes the `file_name` sent by the peer harmless before it is DISPLAYED or USED as a file name.
+//
+// This field is fully remote-controlled and flows to two places:
+//   * The Android "save to Downloads / P2P" path (the API 26-28 branch) does `File(p2pDir, fileName)`. A name such as
+//     `"../../DCIM/Camera/IMG_0001.jpg"` would write to an arbitrary path in shared storage.
+//   * The chat bubble on both clients. Unicode bidi override characters (U+202E RIGHT-TO-LEFT OVERRIDE and relatives) visually reverse the
+//     extension: `"fatura\u{202E}kpa.pdf"` is displayed as `"faturafdp.apk"`. This is the classic extension spoof.
+//
+// Rule: path separators and drive/root markers are dropped. Control characters and bidi formatting characters are dropped. Leading dots are
+// dropped (`".."` or a hidden file). The length is capped. If nothing is left, the result is `"file"`.
+// The extension is KEPT, so `safe_extension` and the MIME mapping keep working.
 /// Characters that draw nothing or reorder the text around them: bidi controls, zero-width and blank fillers, line/paragraph
 /// separators, soft hyphen, tag characters. With one of them, a name can look empty or look like another contact's name.
 pub(crate) fn is_invisible_char(c: char) -> bool {
@@ -187,8 +187,8 @@ mod safe_file_name_tests {
 /// Maximum accepted size of a profile or group photo.
 ///
 /// Two reasons, both real:
-///   * Outgoing: the avatar travels inside a ratchet-encrypted `ProfileUpdate` / `GroupChange::AvatarUpdate` packet, subject to gossipsub's
-///     1 MB `max_transmit_size`. A group update also carries a ~4 KB `member_devices` proof per member. An avatar over the limit fails with
+///   * Outgoing: the avatar travels inside a ratchet-encrypted `ProfileUpdate` / `GroupChange::AvatarUpdate` packet, subject to the
+///     1 MiB envelope limit (`MAX_ENVELOPE_BYTES`). A group update also carries a ~4 KB `member_devices` proof per member. An avatar over the limit fails with
 ///     `MessageTooLarge` (a permanent error), which means the group photo can never be changed.
 ///   * Incoming: the peer could send a 900 KB JPEG, which was then written to the DB permanently for each contact or group. Nothing checked it.
 ///
@@ -237,7 +237,7 @@ pub(crate) fn filter_mentions(group: &Group, skip: Option<&str>, mut ids: Vec<St
     ids
 }
 
-/// `create_group` makes `group-<16 hex>`; 16..=48 hex accepted.
+/// `group_id_for_founder` makes `group-<nonce><16 bytes of hash>`, both as hex; 16..=48 hex accepted.
 pub(crate) fn is_group_id(id: &str) -> bool {
     id.strip_prefix("group-").map_or(false, |t| (16..=48).contains(&t.len()) && t.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
@@ -460,8 +460,7 @@ pub(crate) fn answered_pending_id(payload: &[u8]) -> Option<String> {
     }
 }
 
-/// the archive row id of a group text copy (`None` for anything else).
-/// every member device carries ~4 KB of keys (+ a proof); past the 1 MiB
+/// A group update with too many members or devices is refused here: every member device carries ~4 KB of keys (+ a proof); past the 1 MiB
 /// envelope cap the update fails `MessageTooLarge` per member. 64 KiB for
 /// the packet around it (header, hybrid signatures, encryption).
 pub(crate) fn check_group_update_size(update: &GroupUpdate) -> Result<(), String> {
@@ -471,6 +470,7 @@ pub(crate) fn check_group_update_size(update: &GroupUpdate) -> Result<(), String
     Ok(())
 }
 
+/// The archive row id of a group text copy (`None` for anything else).
 pub(crate) fn group_row_id(content: &MessageContent) -> Option<&str> {
     match content {
         MessageContent::Text { group_id: Some(_), group_message_local_id: Some(l), .. } => Some(l.as_str()),

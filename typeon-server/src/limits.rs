@@ -111,7 +111,7 @@ pub(super) fn verify_hybrid(pk: &[u8], pk_pq: &[u8], message: &[u8], sig: &[u8],
 
 /// Cost of a request against `ServerLimits.requests_per_minute`: one, plus one per 8 list elements (each is a query
 /// on the event loop). An `ArchivePut` also pays one per 64 KiB of record bytes, an `ArchiveProbe` one per bucket. A
-/// `MailboxProof` is a hybrid verify, and so is `Enroll` and `Rebind`.
+/// `Register` pays 64 per `MailboxProof` it carries (each is a hybrid verify). `Enroll` and `Rebind` are a flat 30.
 pub(super) fn request_cost(req: &ServerRequest) -> u32 {
     let n = match req {
         ServerRequest::Enroll { .. } | ServerRequest::Rebind { .. } => return 30,

@@ -115,7 +115,7 @@ internal fun ChatActivity.loadHistoryIfAvailable(targetPeer: String) {
             recycler.scrollToPosition(localMessages.size - 1)
         }
         // The 'seen' state is read from the archive too, not only from live events, so a message seen while the chat was closed still shows as seen after a reopen
-        // (the Rust `message_seen` table holds it). Replays run AFTER the messages are added: `applySeen` returns -1 from `indexOfMessageId` for a row not added yet.
+        // (the Rust `message_seen` table holds it). A replay for a row not added yet is held by `applySeen` and applied when the row arrives.
         if (seenMessageIds.isNotEmpty()) {
             val viewer = SimpleChatAdapter.SeenByViewer(
                 peerAvatar(), txtToolbarTitle.text.toString()
@@ -278,8 +278,8 @@ internal fun ChatActivity.attachmentItemFromJson(obj: JSONObject, skipPreview: S
     )
 }
 
-/** See `loadOlderHistory`: an 'older_history' network reply from the other side. If an empty array comes back (no older message left, locally or on the other side),
- *  `noMoreOlderHistory` is set and this chat is not asked again. */
+/** See `loadOlderHistory`: an 'older_history' network reply from the other side. Only the reply to the "Fetch older history" button is accepted,
+ *  and an empty reply is ignored. */
 internal fun ChatActivity.applyOlderHistory(obj: JSONObject) {
     // Only what the "Fetch older history" button asked for.
     if (!fetchHistoryButton.acceptsReply()) return

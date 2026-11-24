@@ -12,7 +12,7 @@ pub(crate) static CORE_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic:
 pub(crate) static CORE_PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Every JNI export takes `CORE.lock()`. Calling `.unwrap()` on it directly (the old form) was fragile. A `std::sync::Mutex` becomes
-/// permanently POISONED if it panics while HELD. `catch_panic` (see the JNI Bindings section at the end of the file) contains a panic in ONE
+/// permanently POISONED if it panics while HELD. `catch_panic` (in `jni_exports/mod.rs`) contains a panic in ONE
 /// JNI call, but once the lock itself is poisoned, EVERY later `core_lock()` call panics immediately, which means every JNI export including
 /// pollNetwork. So a single panic anywhere (for example in new code added to a wide surface) could silently stop ALL network and messaging work
 /// until the process restarts. The user sees no error: pollNetwork returns an empty result and "everything looks normal, but nothing ever
@@ -107,7 +107,7 @@ pub(crate) mod lock_watch {
                         next_log_ms = STALL_LOG_AFTER_MS;
                     }
                     let held = crate::current_time_ms().saturating_sub(since);
-                    // The idle wait holds the lock by design, but for at most 30 s.
+                    // The idle wait holds the lock by design; the watchdog reports it only after 60 s.
                     let idle_wait = PHASE.lock().map(|p| *p == "wait_network").unwrap_or(false);
                     let due = if idle_wait { next_log_ms.max(60_000) } else { next_log_ms };
                     if held >= due {

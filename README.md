@@ -1,4 +1,4 @@
-# Typoon
+# Typeon
 P2P post-quantum secure messaging app
 
 ## License

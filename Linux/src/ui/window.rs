@@ -215,7 +215,7 @@ const IDLE_TICK_SECONDS: u32 = 15;
 ///
 /// The content is not torn down: a `GtkStack` above the live UI swaps in the
 /// lock page. Detaching the conversation tree instead would make every
-/// per-chat timer break on its `root().is_none()` guard (see `ui/chat.rs`),
+/// per-chat timer break on its `root().is_none()` guard (see `ui/chat/mod.rs`),
 /// while a page that is merely not visible is simply skipped.
 ///
 /// The core keeps running the whole time: messages still arrive, and
@@ -280,7 +280,7 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
 
     // --- activity ---
     // Any input event that reaches the window counts, watched in the capture
-    // phase: the composer stops some key events of its own (see `ui/chat.rs`)
+    // phase: the composer stops some key events of its own (see `ui/chat/composer.rs`)
     // and a bubble-phase controller would never see those.
     let activity = Rc::new(Cell::new(util::now_ms()));
     {

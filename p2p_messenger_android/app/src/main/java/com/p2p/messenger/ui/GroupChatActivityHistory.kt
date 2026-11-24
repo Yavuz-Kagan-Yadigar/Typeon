@@ -90,15 +90,6 @@ import com.p2p.messenger.ui.GroupChatActivity.ContactLookup
 
 // GroupChatActivity: history loading, paging and read-state sync.
 
-/**
- * Loads group history in the background, through `getGroupMessageHistory` (same pattern as ChatActivity.loadHistoryIfAvailable).
- * Without it, the screen would show only live messages, so reopening the screen or restarting the app would hide all visible history
- * (the Rust side keeps it in `archive_group_message`).
- *
- * The JNI calls (`getGroupMessageHistory` and `listGroupAttachments`) and the per-row parsing (`itemFromGroupHistoryJson` / `itemFromGroupAttachmentJson`,
- * which can make another JNI call through `resolveContactByIdentity`) run on `Dispatchers.IO`. Only the list and adapter update runs on the main thread.
- * `targetGroupId` stops a result from being applied to the wrong chat if the user switches to another group before the load finishes.
- */
 /** IO thread: the newest page (texts + attachments, see `newestPage`), in send order, and the 'seen' viewers of its messages
  *  (see `seenViewersFromHistoryJson`). `knownIds`: rows already on screen keep their decoded preview. */
 internal fun GroupChatActivity.readNewestGroupPage(gid: String, knownIds: Set<String> = emptySet()): Pair<List<SimpleChatAdapter.Item>, List<Pair<String, List<Pair<String, SimpleChatAdapter.SeenByViewer>>>>> {
@@ -120,6 +111,15 @@ internal fun GroupChatActivity.readNewestGroupPage(gid: String, knownIds: Set<St
     return newestPage(texts, attachments).sortedBy { it.orderKey } to seenEntries
 }
 
+/**
+ * Loads group history in the background, through `getGroupMessageHistory` (same pattern as ChatActivity.loadHistoryIfAvailable).
+ * Without it, the screen would show only live messages, so reopening the screen or restarting the app would hide all visible history
+ * (the Rust side keeps it in `archive_group_message`).
+ *
+ * The JNI calls (`getGroupMessageHistory` and `listGroupAttachments`) and the per-row parsing (`itemFromGroupHistoryJson` / `itemFromGroupAttachmentJson`,
+ * which can make another JNI call through `resolveContactByIdentity`) run on `Dispatchers.IO`. Only the list and adapter update runs on the main thread.
+ * `targetGroupId` stops a result from being applied to the wrong chat if the user switches to another group before the load finishes.
+ */
 internal fun GroupChatActivity.loadGroupHistoryIfAvailable() {
     val targetGroupId = groupId
     lifecycleScope.launch {

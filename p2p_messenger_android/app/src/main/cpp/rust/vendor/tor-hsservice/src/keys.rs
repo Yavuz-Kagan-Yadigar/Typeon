@@ -147,7 +147,7 @@ pub struct DescSigningKeypairSpecifier {
 pub(crate) enum IptKeyRole {
     /// `k_hss_ntor`
     KHssNtor,
-    /// `k_hss_ntor`
+    /// `k_sid`
     KSid,
 }
 

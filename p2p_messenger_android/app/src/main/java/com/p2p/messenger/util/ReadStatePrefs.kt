@@ -10,8 +10,8 @@ import android.content.Context
  *
  * There's no real per-message unread count (no such signal exists locally
  * or in Rust); this only answers "is there any activity since I last left
- * this conversation" via `markRead`/`lastReadAt`, called from
- * ChatActivity/GroupChatActivity.onPause and ChatsFragment.refreshList.
+ * this conversation" via `markRead`/`lastReadAt`. `markRead` is called from
+ * ChatActivity and GroupChatActivity.onPause; the chat list reads `lastReadAt`.
  */
 object ReadStatePrefs {
     private const val PREFS_NAME = "chat_read_state"

@@ -7,8 +7,7 @@ impl P2PCore {
     /// Common body of `send_message`, `edit_message` and `delete_message`. All three go through the same ratchet-encrypted `MessagePacket` path.
     /// Only the `MessageContent` type after decryption differs. Edit and delete use this shared path (not a separate envelope), so they get the
     /// same end-to-end encryption and signing.
-    /// `archive_plaintext`: `Some` only for plain text messages. Edit and delete are not mirrored into the local (node-mode) archive yet (see the
-    /// note at the end of the file).
+    /// `archive_plaintext`: `Some` only for plain text messages. Edit and delete change their archive rows in their own functions.
     /// On success returns the `message_id`. The caller (Kotlin) can keep it as the target for a later edit or delete.
     /// Returns `(message_id, status)`. Status is "sent" (delivered at once) or "pending" (queued, retried in the background). See `MessageSendStatus`.
     pub(crate) fn send_message_content(&mut self, peer_device_fingerprint: String, content: &MessageContent, archive_plaintext: Option<&[u8]>) -> Result<(String, String), String> {
@@ -48,7 +47,7 @@ impl P2PCore {
             self.regen_skip_id = prev;
         }
 
-        // On the send path, if there is no live connection to the peer, reconnect right away. The gossipsub publish then succeeds as soon as the
+        // On the send path, if there is no live connection to the peer, reconnect right away. The publish then succeeds as soon as the
         // connection is up (via the `pending_envelopes` retry), without waiting for the next `reconnect_sweep` round.
         self.ensure_connected(&peer_device_fingerprint);
 
@@ -59,7 +58,7 @@ impl P2PCore {
             if let Err(e) = self.initiate_handshake_with(&peer_device_fingerprint) {
                 error!("Handshake send temporarily failed (will retry): {}", e);
             }
-            // KNOWN GAP (carried over from an earlier design): the handshake and the message are sent back to back, and gossipsub gives no ordering guarantee.
+            // KNOWN GAP (carried over from an earlier design): the handshake and the message are sent back to back, and nothing orders them on arrival.
         }
 
         // Note: these two flags used to be computed AFTER packet construction. They now come before the rotation decision (the rotation gating below
@@ -229,9 +228,9 @@ impl P2PCore {
             }
         }
 
-        // Retried indefinitely until the peer confirms (Ack or HistorySyncResponse): Text (outside groups), Edit, Delete and HistorySyncRequest. See the `awaiting_confirmation` docs. A successful local gossipsub `publish()` does not guarantee delivery.
+        // Retried indefinitely until the peer confirms (Ack or HistorySyncResponse): Text (outside groups), Edit, Delete and HistorySyncRequest. See the `awaiting_confirmation` docs. A successful local publish does not guarantee delivery.
         // Other content types get one-shot delivery with short retries. Ack is never acknowledged itself, which would loop endlessly.
-        // FileOffer is included: if it is lost, the recipient never learns of the file. Chunk transfer (request_response, attachments.rs) has its own chunk-level retries, but it does not cover this metadata message.
+        // FileOffer is included: if it is lost, the recipient never learns of the file. Chunk transfer (request_response, file_transfer.rs) has its own chunk-level retries, but it does not cover this metadata message.
         //
         // Group Text (`Text { group_id: Some(_), .. }`) is included too. The fan-out makes a separate `send_message_content` call per member, with its own message_id and target, so each copy behaves like a 1:1 send. The receiver acks it (see the receive_message Text/group_id arm).
         //
@@ -299,7 +298,7 @@ impl P2PCore {
             return Err("This contact deleted their account".to_string());
         }
         // See packet.rs `MessageContent::Text.sent_at_ms`: it is stamped HERE, once, on first write. `regen_content` refreshes (see
-        // `retry_unconfirmed_messages` in network.rs) clone the `content` that already contains this value and re-encrypt it unchanged.
+        // `retry_unconfirmed_messages` in network/publish.rs) clone the `content` that already contains this value and re-encrypt it unchanged.
         let sent_at_ms = current_time_ms();
         // Multi-device (1.7.1): like group messages, 1:1 messages also get a STABLE conversation-level id (`conv_id`). ALL fan-out copies carry the same
         // `group_message_local_id`. So an edit, delete or "seen" (whether the recipient has one device or many) applies to the SAME bubble on every
@@ -385,7 +384,7 @@ impl P2PCore {
     /// Writes the emoji a person left on a message to the local archive.
     ///
     /// ONE reaction per person: `INSERT OR REPLACE` puts the new emoji in place of the old one, and an empty `emoji` row deletes it. The `reacted_at_ms`
-    /// guard follows the same reasoning as `apply_edit_to_archive`: gossipsub gives no ordering guarantee, so two reactions from the same person changed
+    /// guard follows the same reasoning as `apply_edit_to_archive`: messages can arrive out of order, so two reactions from the same person changed
     /// quickly can arrive out of order. An OLDER one must not overwrite a newer one. Packets with no timestamp (older versions) are applied unconditionally.
     /// `false`: the row could not be written (a received reaction is then not acked).
     pub(crate) fn apply_reaction(&self, target_message_id: &str, reactor_identity_id: &str, emoji: &str, reacted_at_ms: u64) -> bool {

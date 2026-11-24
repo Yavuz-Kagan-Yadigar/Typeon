@@ -553,8 +553,8 @@ impl P2PCore {
         let old_id = self.my_identity_id().unwrap_or_default();
         // During pairing, the primary may have been temporarily saved as a CONTACT. Remove it, since it is now a sibling device.
         let primary_cid = self.identity_to_contact.get(identity_id).cloned();
-        // Disk FIRST, in one transaction: identities (yeni id) + own_devices
-        // (yeni identity_id) + the primary's contact row. On failure nothing
+        // Disk FIRST, in one transaction: identities (new id) + own_devices
+        // (new identity_id) + the primary's contact row. On failure nothing
         // changed, in memory or on disk, and the link window stays open: the
         // primary must not believe in a link this device forgets on restart.
         if let Some(conn) = self.db.as_ref() {
@@ -694,8 +694,8 @@ impl P2PCore {
         Ok(())
     }
 
-    /// Returns `true` if this was a revocation of THIS device (all local state was erased; the caller must emit the `self_revoked` event), or
-    /// `false` for an ordinary revocation of another identity's or device's entry.
+    /// Returns `true` if this was a revocation of THIS device. All local state is erased and a `self_revoked` event is queued in
+    /// `attachment_events`. Returns `false` for an ordinary revocation of another identity's or device's entry.
     pub(crate) fn apply_device_revoke_notice(&mut self, revoke: &DeviceRevoke, sender_fp: &str) -> Result<bool, String> {
         self.verify_device_auth(
             &revoke.identity_id, &revoke.revoked_device_fingerprint, &revoke.revoked_by,

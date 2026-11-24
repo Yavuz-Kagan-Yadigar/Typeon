@@ -8,8 +8,8 @@ import com.p2p.messenger.R
 import org.json.JSONObject
 
 /**
- * Shows this device's general network connection status (NOT the other side's) in the top bar of the chat screen (see ChatActivity
- * `txtToolbarSubtitle` and `hasActiveSession`). It combines two sources: Android's `ConnectivityManager` (is there real internet access?
+ * Shows this device's general network connection status (NOT the other side's) in the top bar of the chat screen (see ChatActivity;
+ * the peer's state comes from `P2PLib.hasActiveSession`). It combines two sources: Android's `ConnectivityManager` (is there real internet access?
  * Rust and libp2p have no access to the OS network interfaces), and the Rust `ownConnectionStatus()` (Tor, node and swarm connection counts).
  */
 object ConnectionStatus {
@@ -20,8 +20,7 @@ object ConnectionStatus {
 
     data class Status(val level: Level, val text: String)
 
-    /** Whether there is verified internet access over any active network: WiFi, mobile data or Ethernet, not only WiFi. This is the general form of
-     *  the `isValidatedWifi` pattern in P2PService. */
+    /** Whether the active network (WiFi, mobile data or Ethernet) has the INTERNET capability. */
     fun hasInternet(context: Context): Boolean {
         return try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false

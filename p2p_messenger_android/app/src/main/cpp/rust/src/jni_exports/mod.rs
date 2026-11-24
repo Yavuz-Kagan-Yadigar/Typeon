@@ -52,7 +52,7 @@ mod device_link_code_tests {
 
 /// Rust's default behaviour: if a panic tries to unwind across an FFI boundary such as an `extern "system"` (JNI) function, it cannot do that safely, so
 /// it silently `abort()`s the process, and the whole app crashes. (That is what happened in a processQrPacket crash: a "there is no reactor running" panic
-/// in the dial()/gossipsub publish() chain took the whole process down.) Each JNI export wraps the `P2PCore` method it calls with this function. If a
+/// in the dial()/publish() chain took the whole process down.) Each JNI export wraps the `P2PCore` method it calls with this function. If a
 /// panic happens, the process does not die: it returns `Err(...)`. (The full message was already written to logcat by the `set_hook` above.)
 ///
 /// IMPORTANT: the `f` closure must NEVER capture or use `env: JNIEnv`. In an early attempt this was broken: after a panic `env.new_string(...)` never ran,

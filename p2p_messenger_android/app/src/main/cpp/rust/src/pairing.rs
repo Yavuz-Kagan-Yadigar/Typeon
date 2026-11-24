@@ -306,7 +306,7 @@ impl P2PCore {
     // Sections 1.3/1.4: QR and manual pairing
     // ---------------------------------------------------------------
 
-    /// Produces our own QR packet. `rendezvous_node` is a known bootstrap node address. One known node is enough for v0.1.
+    /// Produces our own QR packet. `rendezvous_node` is the node address the caller passes in. The scanner dials it first.
     pub(crate) fn generate_qr_packet(&mut self, rendezvous_node: String) -> Result<Vec<u8>, String> {
         let own_fp = self.get_active_own_device_fingerprint()?;
         let identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
@@ -721,9 +721,9 @@ impl P2PCore {
         Some(v.parse().ok())
     }
 
-    /// Processes a scanned QR (or the same-format text typed in by hand, ). It records the contact as TOFU, adds the rendezvous node to the swarm as a
-    /// known address, and sends our own `IdentityExchange` packet so the other side's real public keys can be downloaded (: "fingerprint-only [...] the
-    /// keys are downloaded from the other side once connected and compared with this fingerprint").
+    /// Processes a scanned QR (or the same-format text typed in by hand). It records the contact as TOFU, adds the rendezvous node to the swarm as a
+    /// known address, and sends our own `IdentityExchange` packet. The other side's real public keys are downloaded once connected and compared with
+    /// this fingerprint.
     /// Returns on success: `(identity_id, device_fingerprint, device_name)`. Pairing usually takes LONG (the real dial, Noise and IdentityExchange handshake
     /// finish in the background AFTER this function returns; see the notes below). The caller (Kotlin) uses this triple to send the user straight to the new
     /// contact's chat screen. That screen already has a "Connecting..." indicator that checks `hasActiveSession`/`isPeerConnected` (see ChatActivity
@@ -823,7 +823,7 @@ impl P2PCore {
         // Siblings that removed the contact earlier take it back from the roster (`SyncedContact.added_at_ms`).
         self.note_contact_added(&identity_id, gen);
         self.dial_pairing_addr(&device_fingerprint, rendezvous_node, known_relays);
-        // See `pairing_mailbox_subs`: during pairing, also subscribe to the other side's mailbox topic (a real mesh gives fast IX/Handshake).
+        // Marks the pairing, so fast polls run until the ratchet exists (see `pairing_mailbox_subs`).
         self.subscribe_pairing_mailbox(&device_fingerprint);
         // Not fatal: the contact is registered, and `publish_envelope` queues
         // the packet and retries it from `poll_events`.
@@ -920,9 +920,8 @@ impl P2PCore {
             sign_pubkey_mldsa: own_record.sign_pubkey_mldsa,
             kem_pubkey_x25519: own_record.kem_pubkey_x25519,
             kem_pubkey_mlkem: own_record.kem_pubkey_mlkem,
-            // Bug seen with secondary devices, where messages sent from them were very unreliable: if this device is a secondary, carry the signed `DeviceAdd` the
-            // primary gave us inside this packet as well. The other side can then verify us from this one packet, without depending on a separate
-            // `DeviceAddNotice` having reached it (see `process_identity_exchange`).
+            // If this device is a secondary, the signed `DeviceAdd` the primary gave us goes inside this packet too. The other side can then verify
+            // us from this one packet, without a separate `DeviceAddNotice` (see `process_identity_exchange`).
             device_add: self.own_device_add.clone(),
             revokes,
             device_add_signer: self.own_device_add.as_ref().and_then(|da| self.synced_device_for(&da.added_by)),
@@ -1089,10 +1088,8 @@ impl P2PCore {
             // A device announced in advance with a signed `DeviceAddNotice` (NewDeviceViaSignedAdd) is accepted silently, with NO warning. Any other
             // unexpected new device of a known contact is BLOCKED.
             //
-            // Bug seen with secondary devices: `verified_device_adds` was filled ONLY by a separate `DeviceAddNotice` packet. That packet may never arrive,
-            // if the contact is offline or store-and-forward fails (see the mailbox quota lockout note in the ledger). Then EVERY message the secondary sends
-            // stayed blocked forever. Now every `IdentityExchange` sent by a secondary carries its own signed `DeviceAdd` (see `send_identity_exchange`), so
-            // we verify it directly here, without depending on a separate notice, and write it to `verified_device_adds`. The security model is identical to
+            // Every `IdentityExchange` from a secondary carries its own signed `DeviceAdd` (see `send_identity_exchange`). It is verified here and written
+            // to `verified_device_adds`, so the device does not depend on a separate `DeviceAddNotice` arriving. The checks are those of
             // `apply_device_add_notice` (signature, fingerprint consistency, active device cap). Only the carrier packet differs.
             // (The signed `DeviceAdd` this packet carries was checked above, before `as_sibling`.)
             let signed = self.verified_device_adds.get(&fp).map(|s| s.as_str()) == Some(exchange.identity_id.as_str());
@@ -1310,7 +1307,7 @@ impl P2PCore {
             .get(&exchange.device_fingerprint)
             .map(|t| now.saturating_sub(*t));
         let reply_due = since_last_reply.map_or(true, |d| d > IDENTITY_EXCHANGE_REPLY_MIN_INTERVAL_MS);
-        // `knew_device_before` ALSO gates the profile photo send here (see the block below and ledger item ).
+        // `knew_device_before` ALSO gates the profile photo send here (see the block below).
         let first_contact = !knew_device_before;
         // Peer re-added us (its IX arrives) while we still hold its OLD record — e.g. it deleted
         // us and scanned/typed our code again. It lost our keys and can only get them from our
@@ -1337,18 +1334,14 @@ impl P2PCore {
             // in between the reply still goes out, deduplicated.
             let fresh = !we_initiated
                 && (first_contact || since_last_reply.map_or(true, |d| d > HANDSHAKE_REDO_MIN_INTERVAL_MS));
-            // See `pairing_mailbox_subs`. Subscribe to the other side's mailbox topic too, so that our reply (IX, then Handshake) travels over a real mesh.
+            // See `pairing_mailbox_subs`: marks the pairing so the reply (IX, then Handshake) goes out on the fast poll.
             self.subscribe_pairing_mailbox(&exchange.device_fingerprint);
             let _ = self.send_identity_exchange_opts(&exchange.device_fingerprint, fresh);
         }
 
         // As soon as pairing completes, our own profile photo (IF one is set) is sent to this new contact ONCE. If the photo changes later, `set_own_profile_picture`
-        // already sends it to ALL contacts again. This block covers ONLY the moment of first pairing (not every reconnect, to prevent spam).
-        //
-        // The comment said "ONLY the first pairing moment", but the code had NO such gate. The block ran on EVERY incoming `IdentityExchange`. The `reply_due`
-        // condition above only protects the reply exchange, not this. Because `reconnect_sweep` can send an `IdentityExchange` to a pending pairing target every 15 s,
-        // the other side answered each one with a ~250 KB avatar. And since `ProfileUpdate` is on both the `needs_delivery_confirmation` and `regen_content` lists, every
-        // copy entered `awaiting_confirmation`, was written to disk, and was retried for up to two days. The `first_contact` gate now makes the comment true.
+        // already sends it to ALL contacts again. This block runs only on first pairing (`first_contact`), not on every IdentityExchange: `reconnect_sweep`
+        // resends the IdentityExchange to a pending pairing target every 15 s, and each one must not bring another avatar.
         if !as_sibling && first_contact {
             // The name already arrived with `IdentityExchange.device_name`. The reason for sending it again here: `ProfileUpdate` is a FULL snapshot, not a delta (see
             // the packet.rs note). Leaving the name empty would mean "no step".
@@ -1363,12 +1356,9 @@ impl P2PCore {
             }
         }
 
-        // Fix: IdentityExchange completes within seconds (see `pairing_mailbox_subs`), but the ONLY thing that started the handshake was the
-        // `ensure_handshake` call made when the chat screen opened or a message was sent. Message sending is LOCKED until the ratchet is ready. The
-        // result: IX finished and `known_remote_devices` was filled, but nothing triggered the handshake, so the user stayed on the "Setting up secure
-        // connection" screen forever. Now, as soon as IX is processed, if we are actively pairing with this device (`pairing_mailbox_subs`) and there
-        // is no ratchet yet, the handshake is started HERE. Both sides do this. The "smaller fingerprint = canonical initiator" rule in
-        // `process_handshake_init` resolves simultaneous starts deterministically.
+        // Once IdentityExchange is processed, a device we are pairing with (`pairing_mailbox_subs`) and that has no ratchet yet gets its handshake
+        // started here. Otherwise only `ensure_handshake` (chat open or send) would start it, and the chat would wait on "Setting up secure connection".
+        // Both sides do this. The "smaller fingerprint = canonical initiator" rule in `process_handshake_init` resolves simultaneous starts.
         // See `early_handshakes`: the other side may have sent its HandshakeInit before we knew its identity. It is now in `known_remote_devices`, so it
         // can be processed now. That creates a RESPONDER ratchet, so the `initiate_handshake_with` (both-initiate) step below is skipped, and two
         // mismatched initiators are never created.

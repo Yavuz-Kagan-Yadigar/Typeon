@@ -14,10 +14,8 @@ import com.p2p.messenger.P2PLib
  * hours. WorkManager (JobScheduler based: the OS runs this job together with other apps' jobs) gives a more battery-friendly fallback than a custom
  * AlarmManager or wakelock loop.
  *
- * `doWork` only TRIES to (re)start the service. If the service is already running, this is a harmless no-op (see the `isRunning` guard in
- * `P2PService.onStartCommand`, which only refreshes the notification). If it had died, the restart also triggers the durable retry queue to be
- * reloaded from disk (see persist.rs `load_pending_durable_retries_from_db`) through `setSkippedKeyEncryptionKey`. No separate "retry now" JNI call
- * is needed.
+ * `doWork` only TRIES to (re)start the service. If the service is already running, `doWork` returns at once (`P2PService.alive`). If it had died,
+ * the restart also reloads the durable retry queue from disk (see persist.rs). No separate "retry now" JNI call is needed.
  */
 class P2PRetryWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
     override fun doWork(): Result {
@@ -31,11 +29,9 @@ class P2PRetryWorker(context: Context, params: WorkerParameters) : Worker(contex
         if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) return Result.retry()
         if (P2PLib.hasStoredIdentity()) {
             val serviceIntent = Intent(applicationContext, P2PService::class.java)
-            // This call was not protected before. On Android 12+ (API 31), starting a foreground service FROM THE BACKGROUND is refused
-            // (`ForegroundServiceStartNotAllowedException`), and this Worker runs exactly in the background. The exception is allowed only for apps exempt from
-            // battery optimisation. Otherwise it is thrown. WorkManager caught it and marked the job "failed", so the fallback silently never ran. Now the
-            // exception is swallowed, but the job is NOT reported as successful. It is reported to WorkManager with `Result.retry()`, so it is retried under
-            // WorkManager's own backoff rule, and the periodic schedule is not broken. The main start path is now `BootReceiver`, which is exempt from the restriction.
+            // On Android 12+ (API 31) a foreground service cannot be started from the background (`ForegroundServiceStartNotAllowedException`),
+            // unless the app is exempt from battery optimisation. The failure is reported as `Result.retry()`, so WorkManager retries it later.
+            // The main start path is `BootReceiver`, which is exempt from the restriction.
             try {
                 ContextCompat.startForegroundService(applicationContext, serviceIntent)
             } catch (e: Exception) {

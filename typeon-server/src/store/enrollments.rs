@@ -9,12 +9,10 @@ impl Store {
 
     /// Creates an invite. `uses <= 0` means UNLIMITED (stored as `-1`).
     ///
-    /// Requirement: several people must be able to join from one QR code or link. Before, each new person needed the
-    /// operator to send the server a fresh code. Invites were single-use, and the Android server UI pinned them to
-    /// `uses=1`. An unlimited invite can be published once (poster, message, web page) and then anyone can join on
-    /// their own. The Sybil gate is not lost, it MOVES: the token itself no longer gates, the hourly enrollment cap in
-    /// `ServerCore::handle_enroll` (`MAX_PUBLIC_ENROLLMENTS_PER_HOUR`) does, and the operator can rotate the code at
-    /// any time (`rotate_join_code`).
+    /// Several people can join from one QR code or link: an unlimited invite (`uses <= 0`) can be published once (poster,
+    /// message, web page) and anyone can join with it. The Sybil gate is then the hourly enrollment cap in
+    /// `ServerCore::handle_enroll` (`MAX_PUBLIC_ENROLLMENTS_PER_HOUR`), and the operator can replace the public code at
+    /// any time (`public_join_token` with `rotate`).
     pub fn create_invite(&self, token_hash: &[u8], label: &str, uses: i64, expires_at: i64, now: i64) -> Result<(), String> {
         let uses = if uses <= 0 { -1 } else { uses };
         self.conn
@@ -26,7 +24,7 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Deletes an invite. `rotate_join_code` uses it to invalidate the old public code.
+    /// Deletes an invite. Rotating the public code (`public_join_token` with `rotate`) uses it to invalidate the old one.
     pub fn delete_invite(&self, token_hash: &[u8]) -> Result<(), String> {
         self.conn
             .execute("DELETE FROM invites WHERE token_hash = ?1", params![token_hash])
@@ -48,7 +46,7 @@ impl Store {
     }
 
     /// Enrollments opened in (`since`, `now`]: the public code's hourly cap. Rows dated after `now` (the clock was
-    /// stepped back) are not counted. They once froze the cap until the clock caught up.
+    /// stepped back) are not counted, so such rows cannot freeze the cap until the clock catches up.
     pub fn count_enrollments_since(&self, since: i64, now: i64) -> i64 {
         self.conn
             .query_row(
@@ -116,8 +114,7 @@ impl Store {
         };
         let rows = stmt.query_map([], |r| {
             let label: String = r.get(0)?;
-            // `uses_left` is now a signed value: `-1` means unlimited (see `create_invite`). Converting it to `u32`
-            // would turn it into about 4 billion.
+            // `uses_left` is signed: `-1` means unlimited (see `create_invite`), so it is read as `i64`, not `u32`.
             let uses: i64 = r.get(1)?;
             let exp: i64 = r.get(2)?;
             Ok((label, uses, exp, uses != 0 && (exp == 0 || exp > now)))
@@ -127,9 +124,9 @@ impl Store {
 
     /// Consumes one use of an invite. Returns `true` if it was valid.
     ///
-    /// Decrementing the use counter and creating the enrollment must happen in the SAME call chain. Otherwise two
-    /// concurrent `Enroll` requests could spend a single-use token twice. `UPDATE ... WHERE uses_left > 0` is one
-    /// atomic statement, so the race is closed at the SQLite level.
+    /// Decrementing the use counter and creating the enrollment must happen in one transaction (see `enroll_with_invite`).
+    /// Otherwise two concurrent `Enroll` requests could spend a single-use token twice. The `UPDATE ... WHERE
+    /// uses_left <> 0` is one atomic statement, so the race is closed at the SQLite level.
     pub fn consume_invite(&self, token_hash: &[u8], now: i64) -> Result<bool, String> {
         let changed = self
             .conn
@@ -218,8 +215,8 @@ impl Store {
     pub fn rebind_enrollment(&self, enrollment_id: &[u8], new_peer_id: &str, now: i64) -> Result<(), String> {
         // If ANOTHER enrollment is already bound to the same PeerId, release it first. `peer_id` is UNIQUE, and the
         // INSERT would otherwise collide (a reinstalled device can regenerate the same libp2p key). The placeholder is
-        // unique per row: a shared '' broke the index on the second collision. One transaction: a failed second UPDATE
-        // would leave the device unbound.
+        // unique per row, because a shared value would collide with the unique index. One transaction: a failed second
+        // UPDATE would leave the device unbound.
         let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
         self.conn
             .execute(

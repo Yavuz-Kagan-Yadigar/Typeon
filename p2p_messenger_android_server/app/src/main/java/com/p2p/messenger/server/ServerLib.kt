@@ -52,6 +52,9 @@ object ServerLib {
         blobDir: String
     ): String
 
+    /** SQLCipher raw key (32 bytes) for the server DB. Call before [startServer]. Returns "ok" or "Error: ...". */
+    external fun setDbKey(key: ByteArray): String
+
     /**
      * Really STOPS the server.
      *
@@ -59,9 +62,6 @@ object ServerLib {
      * It went on accepting mail, serving blobs and using battery. Also, because `startServer` is a no-op while a core is already running, changes to node mode,
      * blob directory or disk budget were not applied without killing the process. After a stop, `startServer` does a clean setup.
      */
-    /** SQLCipher raw key (32 bytes) for the server DB. Call before [startServer]. Returns "ok" or "Error: ...". */
-    external fun setDbKey(key: ByteArray): String
-
     external fun stopServer(): String
 
     /** `{running, peer_id, tor, addresses, devices, deposits, fetches, ...}` */
@@ -88,7 +88,7 @@ object ServerLib {
     /**
      * BLOCKS the enrolment.
      *
-     * `revokeDevice` also blocks the enrolment key (revoke = block). The difference: this call also rotates the public join code.
+     * `revokeDevice` also blocks the enrolment key and rotates the public join code, so both calls end in the same state. This one is the explicit form.
      */
     external fun blockDevice(enrollmentId: String): String
 
