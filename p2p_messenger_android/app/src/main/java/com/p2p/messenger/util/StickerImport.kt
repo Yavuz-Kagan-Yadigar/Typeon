@@ -23,6 +23,8 @@ object StickerImport {
     const val MAX_FRAMES = 300
     /** attachments::jxl_codec::MAX_IMAGE_PIXELS: the core refuses more (all frames). */
     private const val MAX_PIXELS = 24_000_000L
+    /** Animated WebP canvas cap (~16 MB a full-size copy). */
+    private const val MAX_WEBP_CANVAS_PIXELS = 4_000_000L
 
     /** [file] is a GIF, PNG, JPEG or WebP. Returns the sticker id or "Error: ...". */
     fun importFile(file: File, origin: String? = null): String {
@@ -33,7 +35,8 @@ object StickerImport {
         // A still GIF/WebP (or one over the caps) is imported as its first frame.
         val animation = when (magic) {
             "GIF8" -> GifFrames.decode(file, MAX_FRAMES, MAX_PIXELS)
-            "RIFF" -> try { animatedWebp(file.readBytes()) } catch (e: Exception) { null }
+            // Throwable: an OutOfMemoryError falls back to the still first frame.
+            "RIFF" -> try { animatedWebp(file.readBytes()) } catch (e: Throwable) { null }
             else -> null
         }
         return if (animation != null) importAnimated(animation, origin) else importStill(file, origin)
@@ -86,7 +89,9 @@ object StickerImport {
         if (d.size < 30 || fourcc(8) != "WEBP" || fourcc(12) != "VP8X" || d[20].toInt() and 0x02 == 0) return null
         val w = u24(24) + 1
         val h = u24(27) + 1
-        if (w.toLong() * h > MAX_PIXELS) return null
+        // The canvas, each frame and its RGBA copies are full size: a larger
+        // canvas goes as a still (stickers end at MAX_SIDE a side anyway).
+        if (w.toLong() * h > MAX_WEBP_CANVAS_PIXELS) return null
         val canvasBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(canvasBitmap)
         val replace = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC) }

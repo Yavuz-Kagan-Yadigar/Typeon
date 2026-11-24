@@ -335,7 +335,7 @@ pub struct GroupUpdate {
     /// missed updates heal on their own.
     /// `#[serde(default)]`: a packet without this field parses with an empty list.
     /// The signature covers this field.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "bounded::seq_4096")]
     pub members: Vec<String>,
     /// Members' public keys and last known addresses, vouched for by the founder.
     ///
@@ -355,13 +355,13 @@ pub struct GroupUpdate {
     /// Only the devices new or changed since the founder's previous update are sent
     /// (all of them for a newly added member, and in a reply to
     /// `MessageContent::GroupSyncRequest`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "bounded::seq_4096")]
     pub member_devices: Vec<GroupMemberDevice>,
     /// For each vouched device that is not its identity's first device: the proof
     /// that it belongs to that identity (see `DeviceAddProof`). Outside the founder's
     /// signature, like `founder_chain`: each proof is signed by itself, and a version
     /// that does not know the field still verifies the update.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
     pub member_device_proofs: Vec<DeviceAddProof>,
     /// Must be `founder_identity_id`. The receiver checks this.
     pub signed_by: String,
@@ -380,7 +380,7 @@ pub struct GroupUpdate {
     /// the update. `#[serde(default)]`, so it is compatible in both directions with
     /// versions that do not know the field. Not covered by the outer signature,
     /// because each entry carries its own signature.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "bounded::seq_4096")]
     pub founder_chain: Vec<FounderTransfer>,
 }
 
@@ -512,6 +512,7 @@ pub struct SyncedContact {
 /// idempotent.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SyncPayload {
+    #[serde(deserialize_with = "bounded::seq_4096")]
     pub contacts: Vec<SyncedContact>,
     /// Serialized `group::Group` records. The receiver adopts them as they are. The
     /// founder's authority is already signed inside the group.
@@ -522,11 +523,11 @@ pub struct SyncPayload {
         /// `identity_id` set to its own identity, skipping its own fingerprint.
         /// `#[serde(default)]`, for compatibility with sync payloads that do not have
         /// this field.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "bounded::seq_4096")]
     pub siblings: Vec<SyncedDevice>,
     /// See `DeviceAddProof`: one for each of `siblings` that is not the identity's
     /// first device. A sibling without one is not taken.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
     pub sibling_proofs: Vec<DeviceAddProof>,
     /// Root archive key (ARK). It decrypts the history stored on the server (see
     /// `server_client::set_archive_root_key` and `server_seal`).
@@ -548,7 +549,7 @@ pub struct SyncPayload {
     /// Signed revocations of this identity's own devices. A device linked after a
     /// revocation learns about it here and refuses the revoked device's still-valid
     /// `DeviceAdd`. Left out when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
     pub own_revokes: Vec<DeviceRevoke>,
     /// Identities the user blocked on one of this identity's devices. The
     /// receiver blocks them too (only adds: an unblock travels as
@@ -880,6 +881,7 @@ pub enum MessageContent {
     /// must reverse it (see `HistorySyncResponse` in receive.rs `receive_message`).
     HistorySyncResponse {
         request_id: String,
+        #[serde(deserialize_with = "bounded::seq_4096")]
         messages: Vec<SyncedMessage>,
         /// See `HistorySyncRequest.group_id`. It mirrors the request, so the response is
         /// merged into the correct local archive (1:1, or which group).
@@ -1122,6 +1124,7 @@ pub enum MessageContent {
     },
     /// See `SiblingHistoryRequest`. Recent messages from the sibling's archive.
     SiblingHistoryResponse {
+        #[serde(deserialize_with = "bounded::seq_4096")]
         entries: Vec<SiblingHistoryEntry>,
         /// The request's window `(before_timestamp, after_timestamp)`, echoed so the requester
         /// can match the response to its open request.
@@ -1449,7 +1452,7 @@ pub struct IdentityExchange {
     pub device_add: Option<DeviceAdd>,
     /// The signed `DeviceRevoke`s of this identity, so a contact who pairs later also
     /// learns that a device is revoked. Left out when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
     pub revokes: Vec<DeviceRevoke>,
     /// The public keys of the device that signed `device_add`. `identity_id`
     /// is the fingerprint of the identity's first device, so when that device

@@ -215,6 +215,9 @@ pub(crate) type KeepAliveCodec = Capped<CborCodec<KeepAliveRequest, KeepAliveRes
 pub(crate) type AckCodec = Capped<CborCodec<AckBatchRequest, AckBatchResponse>, { 64 * 1024 }>;
 /// A file id and a chunk index. The answer: one chunk (at most a server blob chunk) plus framing, not the codec's 10 MiB default,
 /// so a source cannot make 40 requests in flight buffer 400 MiB.
+/// Server RPC. A request keeps the library's 1 MiB. A response is at most a fetch batch (`MAX_FETCH_BATCH_BYTES`) plus
+/// one item over it (`MAX_DEPOSIT_BYTES`), or one blob chunk, not the codec's 10 MiB default.
+pub(crate) type ServerRpcCodec = Capped<CborCodec<server_proto::ServerRequest, server_proto::ServerResponse>, { 1024 * 1024 }, { 4 * 1024 * 1024 }>;
 pub(crate) type FileChunkCodec = Capped<CborCodec<FileChunkRequest, FileChunkResponse>, 4096, { crate::server_proto::MAX_BLOB_CHUNK_BYTES as u64 + 4096 }>;
 
 // --- libp2p combined behaviour ---
@@ -227,7 +230,7 @@ pub(crate) struct P2PBehaviour {
     /// Server (store-and-forward) RPC. See the `server_client` module.
     /// `ProtocolSupport::Full`: so the server can send `Notify` to us unprompted. Otherwise the client would have to poll constantly, which on
     /// a phone means direct battery drain.
-    pub(crate) server_rpc: request_response::cbor::Behaviour<server_proto::ServerRequest, server_proto::ServerResponse>,
+    pub(crate) server_rpc: request_response::Behaviour<ServerRpcCodec>,
     pub(crate) kad: kad::Behaviour<MemoryStore>,
     pub(crate) identify: identify::Behaviour,
     /// Active connection liveness check. See `KeepAliveRequest` / `KeepAliveState` and the Keepalive arm of `poll_events`. A half-open connection

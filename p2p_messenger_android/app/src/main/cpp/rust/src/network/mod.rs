@@ -240,7 +240,7 @@ impl P2PCore {
                 );
                 // See `P2PBehaviour.server_rpc`: `BLOB_REQUEST_TIMEOUT_MS` (90 s). Same reason as
                 // `file_chunks`: the library's 10 s default is too short for a large payload over Tor.
-                let server_rpc = request_response::cbor::Behaviour::new(
+                let server_rpc: request_response::Behaviour<ServerRpcCodec> = request_response::Behaviour::new(
                     [(StreamProtocol::new(server_proto::SERVER_PROTOCOL), request_response::ProtocolSupport::Full)],
                     request_response::Config::default()
                         .with_request_timeout(std::time::Duration::from_millis(server_client::BLOB_REQUEST_TIMEOUT_MS)),

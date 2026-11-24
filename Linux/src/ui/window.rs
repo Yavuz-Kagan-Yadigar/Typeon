@@ -484,7 +484,9 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
 /// Whether two windows are the same one (`gtk::Application::windows` hands
 /// out `gtk::Window`s, the main window is an `adw::ApplicationWindow`).
 fn is_same_window(one: &gtk::Window, other: &adw::ApplicationWindow) -> bool {
-    std::ptr::eq(one, other.upcast_ref::<gtk::Window>())
+    // GObject identity (gtk-rs `PartialEq` compares the object pointer), not
+    // the address of the two Rust wrappers, which never match.
+    one == other.upcast_ref::<gtk::Window>()
 }
 
 fn sidebar(main: &Rc<MainUi>) -> adw::NavigationPage {

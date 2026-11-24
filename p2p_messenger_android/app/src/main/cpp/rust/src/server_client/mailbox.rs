@@ -63,6 +63,7 @@ impl P2PCore {
         let memo = memo.get_or_insert_with(HashMap::new);
         // ponytail: dropped whole past 4096 entries, like `key_bound_mailbox_id`.
         if memo.len() >= 4096 {
+            wipe_memo_secrets(memo);
             memo.clear();
         }
         memo.insert(tag, (id.clone(), secret));
@@ -571,7 +572,17 @@ static SESSION_MAILBOX_MEMO: std::sync::Mutex<Option<HashMap<[u8; 32], (String, 
 
 pub(crate) fn clear_session_mailbox_memo() {
     if let Ok(mut memo) = SESSION_MAILBOX_MEMO.lock() {
+        if let Some(entries) = memo.as_mut() {
+            wipe_memo_secrets(entries);
+        }
         *memo = None;
+    }
+}
+
+/// Zeroes the proof secrets before the memo entries are dropped.
+fn wipe_memo_secrets(memo: &mut HashMap<[u8; 32], (String, [u8; 32])>) {
+    for (_, secret) in memo.values_mut() {
+        zeroize::Zeroize::zeroize(secret);
     }
 }
 
