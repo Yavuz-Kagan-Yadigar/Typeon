@@ -602,6 +602,40 @@ class StickerPicker(
 
         inner class FolderHolder(view: View) : RecyclerView.ViewHolder(view) {
             val label: android.widget.TextView = view.findViewById(R.id.txtStickerFolder)
+            val previews: List<ImageView> = listOf(
+                R.id.imgStickerFolderPreview0, R.id.imgStickerFolderPreview1,
+                R.id.imgStickerFolderPreview2, R.id.imgStickerFolderPreview3,
+            ).map { view.findViewById(it) }
+        }
+
+        /** Folder previews: quarter-cell stills (an animation's first frame), kept apart from the grid cache. */
+        private val previewCache = object : android.util.LruCache<String, android.graphics.Bitmap>(4 * 1024 * 1024) {
+            override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.allocationByteCount
+        }
+
+        /** Shows the first four of [folder]'s stickers (grid order) in [holder]'s 2x2 previews; false when it has none. */
+        private fun bindFolderPreviews(holder: FolderHolder, folder: Folder): Boolean {
+            val shown = allIds.asSequence().filter { it in folder.stickers }.take(holder.previews.size).toList()
+            holder.previews.forEachIndexed { i, view ->
+                val id = shown.getOrNull(i)
+                // The tag says which sticker the view waits for: a recycled view drops a late decode.
+                view.tag = id
+                val cached = id?.let { previewCache.get(it) }
+                view.setImageBitmap(cached)
+                if (id == null || cached != null) return@forEachIndexed
+                val animated = id in animatedIds
+                scope.launch(Dispatchers.IO) {
+                    val bitmap = decodeGate.withPermit {
+                        val path: () -> String = if (animated) ({ P2PLib.stickerFirstFrame(id) }) else ({ P2PLib.stickerPlainPath(id) })
+                        (drawableAt(maxPx / 2, path) as? BitmapDrawable)?.bitmap
+                    } ?: return@launch
+                    withContext(Dispatchers.Main) {
+                        previewCache.put(id, bitmap)
+                        if (view.tag == id) view.setImageBitmap(bitmap)
+                    }
+                }
+            }
+            return shown.isNotEmpty()
         }
 
         override fun getItemViewType(position: Int): Int = if (position < folderCount) FOLDER_CELL else STICKER_CELL
@@ -641,7 +675,8 @@ class StickerPicker(
         override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
             if (holder is FolderHolder) {
                 val folder = folders[position]
-                holder.label.text = "📁\n${folder.name}\n(${folder.stickers.size})"
+                val icon = if (bindFolderPreviews(holder, folder)) "" else "📁 "
+                holder.label.text = "$icon${folder.name} (${folder.stickers.size})"
                 holder.itemView.setOnClickListener { showFolder(folder) }
                 return
             }

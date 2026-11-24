@@ -793,15 +793,36 @@ impl ChatView {
                 shown.map(|id| folders.iter().find(|f| f.id == id).map(|f| f.stickers.iter().cloned().collect()).unwrap_or_default());
             let stickers: Vec<core::StickerEntry> =
                 core::list_stickers().into_iter().filter(|s| only.as_ref().map_or(true, |only| only.contains(&s.id))).collect();
-            if tx.send_blocking(StickerLoad::Folders(folders)).is_err() {
+            let load = |sticker: &core::StickerEntry| {
+                let path = if sticker.animated { core::sticker_first_frame(&sticker.id) } else { core::sticker_plain_path(&sticker.id) };
+                path.ok().and_then(|p| gtk::gdk::Texture::from_filename(p).ok())
+            };
+            // Folder previews: the first four stickers of each folder, in grid
+            // order. Decoded once; the grid below reuses them.
+            let mut decoded: HashMap<String, Option<gtk::gdk::Texture>> = HashMap::new();
+            let mut previews: Vec<Vec<gtk::gdk::Texture>> = Vec::new();
+            if shown.is_none() {
+                for folder in &folders {
+                    let mut textures = Vec::new();
+                    for sticker in stickers.iter().filter(|s| folder.stickers.contains(&s.id)) {
+                        if textures.len() == 4 {
+                            break;
+                        }
+                        if let Some(texture) = decoded.entry(sticker.id.clone()).or_insert_with(|| load(sticker)) {
+                            textures.push(texture.clone());
+                        }
+                    }
+                    previews.push(textures);
+                }
+            }
+            if tx.send_blocking(StickerLoad::Folders(folders, previews)).is_err() {
                 return;
             }
             if stickers.is_empty() {
                 let _ = tx.send_blocking(StickerLoad::Empty);
             }
             for sticker in stickers {
-                let path = if sticker.animated { core::sticker_first_frame(&sticker.id) } else { core::sticker_plain_path(&sticker.id) };
-                let texture = path.ok().and_then(|p| gtk::gdk::Texture::from_filename(p).ok());
+                let texture = decoded.remove(&sticker.id).unwrap_or_else(|| load(&sticker));
                 if tx.send_blocking(StickerLoad::Sticker(sticker.id, sticker.favorite, texture)).is_err() {
                     break; // popover closed or refilled
                 }
@@ -815,7 +836,7 @@ impl ChatView {
                     break;
                 }
                 match item {
-                    StickerLoad::Folders(folders) => {
+                    StickerLoad::Folders(folders, previews) => {
                         let open = picker.folder.borrow().as_ref().map(|f| f.id);
                         match open {
                             // The folder is gone (deleted meanwhile): back to the top.
@@ -826,8 +847,9 @@ impl ChatView {
                             }
                             Some(_) => {}
                             None => {
-                                for folder in &folders {
-                                    picker.grid.append(&view.sticker_folder_cell(&picker, folder));
+                                for (i, folder) in folders.iter().enumerate() {
+                                    let textures = previews.get(i).map(Vec::as_slice).unwrap_or_default();
+                                    picker.grid.append(&view.sticker_folder_cell(&picker, folder, textures));
                                 }
                             }
                         }
@@ -846,14 +868,40 @@ impl ChatView {
         });
     }
 
-    fn sticker_folder_cell(self: &Rc<Self>, picker: &Rc<StickerPopover>, folder: &core::StickerFolder) -> gtk::Button {
+    /// A folder: up to four of its stickers in a 2×2 grid under its name;
+    /// an empty folder shows the folder icon.
+    fn sticker_folder_cell(
+        self: &Rc<Self>,
+        picker: &Rc<StickerPopover>,
+        folder: &core::StickerFolder,
+        previews: &[gtk::gdk::Texture],
+    ) -> gtk::Button {
         let label = gtk::Label::builder()
-            .label(format!("📁\n{}\n({})", folder.name, folder.stickers.len()))
+            .label(format!("{} ({})", folder.name, folder.stickers.len()))
             .justify(gtk::Justification::Center)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .max_width_chars(8)
+            .valign(gtk::Align::End)
             .build();
-        let button = gtk::Button::builder().child(&label).tooltip_text(folder.name.as_str()).build();
+        let child = gtk::Overlay::new();
+        if previews.is_empty() {
+            let icon = gtk::Label::new(Some("📁"));
+            icon.set_size_request(64, 64);
+            child.set_child(Some(&icon));
+        } else {
+            let grid = gtk::Grid::builder().row_homogeneous(true).column_homogeneous(true).build();
+            grid.set_size_request(64, 64);
+            for (i, texture) in previews.iter().enumerate() {
+                let picture = gtk::Picture::for_paintable(texture);
+                picture.set_content_fit(gtk::ContentFit::Contain);
+                picture.set_size_request(32, 32);
+                grid.attach(&picture, (i % 2) as i32, (i / 2) as i32, 1, 1);
+            }
+            child.set_child(Some(&grid));
+            label.add_css_class("osd");
+        }
+        child.add_overlay(&label);
+        let button = gtk::Button::builder().child(&child).tooltip_text(folder.name.as_str()).build();
         button.set_size_request(64, 64);
         let (view, weak, folder) = (self.clone(), Rc::downgrade(picker), folder.clone());
         button.connect_clicked(move |_| {
@@ -1178,7 +1226,8 @@ pub(super) struct StickerPopover {
 
 /// What the sticker loader thread sends, in this order.
 enum StickerLoad {
-    Folders(Vec<core::StickerFolder>),
+    /// The folders and, at the top level, each folder's preview pictures.
+    Folders(Vec<core::StickerFolder>, Vec<Vec<gtk::gdk::Texture>>),
     Empty,
     Sticker(String, bool, Option<gtk::gdk::Texture>),
 }
