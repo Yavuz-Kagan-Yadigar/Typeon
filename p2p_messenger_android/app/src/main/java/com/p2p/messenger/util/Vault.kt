@@ -230,7 +230,7 @@ object Vault {
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(app.getString(R.string.app_name))
             .setContentText(app.getString(R.string.msg_unlock_to_receive))
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)  // ALARM made MIUI ring it like an alarm clock
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)
             .setContentIntent(pending)
