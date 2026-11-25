@@ -1291,6 +1291,8 @@ impl P2PCore {
         self.chunk_bytes_served.clear();
         self.recent_inbound_digests.clear();
         self.sibling_backfill_since.clear();
+        self.sibling_push_from = None;
+        self.sibling_refresh_at.clear();
         self.recently_acked.clear();
         self.outbound_acks.clear();
         self.ack_batches_inflight.clear();

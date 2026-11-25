@@ -787,6 +787,9 @@ class ChatActivity : AppCompatActivity() {
         sessionPollHandler.post(sessionPollRunnable)
         ownStatusPollHandler.post(ownStatusPollRunnable)
         syncMissedMessages()
+        // Rows this device missed (a sender could not reach it) come from my other devices.
+        val refreshPeer = peerDeviceFingerprint
+        lifecycleScope.launch(Dispatchers.IO) { P2PLib.refreshChatFromSiblings(refreshPeer, false) }
         // Tell the other side the 'read up to here' boundary as soon as the chat opens. Doing it only in onPause, and only to sibling devices,
         // meant messages delivered by store-and-forward and loaded as history never got a receipt.
         if (resumedUnlocked) scheduleReadWatermark()

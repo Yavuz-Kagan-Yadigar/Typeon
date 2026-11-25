@@ -296,7 +296,9 @@ Sources: direct envelope request (`/p2pmessenger/envelope/1.0.0`), server `Push`
 - Revocation: `DeviceRevoke` (signed); packets from a revoked device are rejected and `answer_revoked_sibling` is used.
 - Authority: only the identity's root (primary) device adds, removes, or deletes.
 
-**Sibling history (history backfill)** — two triggers, one response builder `sibling_sync.rs build_sibling_history_response`:
+**Sibling history (history backfill)** — two requested triggers, one response builder `sibling_sync.rs build_sibling_history_response`, plus a push and a chat-open refresh:
+- *Push* (`note_sibling_push` / `flush_sibling_push`): a received Text (1:1 or group) and a completed download mark their archive time; at the end of the poll turn every **connected** sibling gets `build_sibling_backfill(from)` as an unsolicited `SiblingHistoryResponse` with no `window` and no `ops_seq`. A sibling that the sender cannot reach (parked, no address, no common server) then has the row within one poll turn instead of the 30-minute backfill. The receiver treats an answer as the backfill (watermark move) only when it carries `ops_seq`, so a push never moves it.
+- *Chat open* (`refresh_chat_from_siblings`, Android `onResume` of both chat screens, desktop chat build): one chat, no window, `SIBLING_BACKFILL_PER_CONVERSATION` rows, at most once per `SIBLING_REFRESH_MIN_MS` (60 s) per chat, connected siblings only. No window, so the history floor still applies.
 - *Automatic* (`request_sibling_backfill`): debounced by `SIBLING_BACKFILL_INTERVAL_MS` (30 min); only to **connected** siblings (a request sent to an offline sibling was re-deposited on the server and kept the radio on overnight); `since_timestamp` = since the last answered request from that sibling (`sibling_backfill_since`, with `SIBLING_BACKFILL_SINCE_MARGIN_MS` = 10 min as clock-skew margin), `SIBLING_BACKFILL_PER_CONVERSATION` (30) per conversation. In an unscoped (all conversations) reply the row limit `SIBLING_BACKFILL_MAX_ENTRIES` (300) is divided among the conversations/groups.
 - *User press* "Fetch older history" (`request_older_sibling_history`): one conversation, window `[after_timestamp, before_timestamp)`, `HISTORY_SYNC_MAX_MESSAGES` (200) per page; sent to each connected sibling and recorded in `sibling_fetch_open[(sibling, before, after)]`. The response (`SiblingHistoryResponse{entries, window, more}`) **echoes** the window; only a response whose echo matches an open press counts as a user fetch (the match is consumed; a restart clears `sibling_fetch_open`, and in that case a lost press is reopened: `reopen_fetch_cursor`). `more` means the responder cut the page, and the older remainder of the window is requested again from the same sibling.
 - **Budget:** text rows are charged against the `HISTORY_SYNC_MAX_TEXT_BYTES` (512 KiB) budget (for the 1 MiB envelope limit). In an unscoped reply, a row that does not fit is **skipped** (one long message must not cut off the later conversations); in a scoped press, the reply ends there (`more = true`), because older rows below a skipped row would become a permanent hole.
@@ -587,7 +589,7 @@ Source: `reviews/archive/MERGED_REVIEWS.md`, reports `reviews/fixpass-2026-10-20
 - If the server history is **turned off, the server archive is deleted** (purge).
 - New rate limits: mail from the server 600/10 s (`source=None` budget), unknown peers total 300/10 s; server `CHUNKS_PER_MINUTE` 600.
 - Node mode is only the relay service; no DHT contribution (D-03/H-16; the application string was corrected).
-- Linux: after 60 s without activity, power save (`set_power_save`), metered network (`gio::NetworkMonitor`) notice.
+- Linux: the core's power save (radio saver) is never turned on: it put Tor to sleep between 4-minute windows and a background desktop got its messages minutes late. After 60 s of an inactive window only the 15 s cache refresh is skipped. Metered network (`gio::NetworkMonitor`) notice.
 - When the connection/contact limit is reached, a `pairing_failed` (`contact_limit`) event is raised; clients tell the user.
 - A server panic is reported as a `core_panic` event (no restart).
 - **Message text in notifications is OFF by default** (`NotificationPrefs.showMessageText` = false): when off, the notification only says "New message" — neither the sender nor the text is shown; the user can turn it on in Settings.
@@ -664,7 +666,7 @@ Source: `git log e916a13..HEAD`. Facts below were read from the code on 2026-11-
 
 **CLIENT**
 - Pending-link page (`awaiting_link`) on desktop: confirmed "delete and exit" returns to setup (1a180c3, carried from §20).
-- Desktop says goodbye on quit (7170907): a keepalive `bye` is sent, and peers park the device until it reconnects. Verified in code on 2026-11-22: `wire.rs` keepalive `bye` field, `session.rs BYE_WAIT`, `api.rs` waits up to 2.5 s for the goodbyes.
+- Desktop says goodbye on quit (7170907): a keepalive `bye` is sent, and peers park the device until it reconnects. Verified in code on 2026-11-22: `wire.rs` keepalive `bye` field, `session.rs BYE_WAIT`, `api.rs` waits up to 2.5 s for the goodbyes. The park expires: `parked:<fp>` holds the park time, and a parked device is still dialled once per `RECONNECT_BACKOFF_MAX_MS` (10 min), so a desktop that cannot dial a peer back is still reached.
 - App password minimum 8 characters (`AppLock.MIN_PASSWORD_LENGTH`); mandatory server PIN at 600,000 iterations (47bb856).
 - `targetSdk` 35 and `compileSdk` 35 for client and server app (47bb856). Edge-to-edge opt-out.
 - AppLock PBKDF2 600,000 (c798a6f). Legacy 120,000 still read.

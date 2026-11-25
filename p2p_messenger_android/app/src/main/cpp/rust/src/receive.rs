@@ -306,8 +306,10 @@ impl P2PCore {
                 // The Ack is sent only if the archive write was made PERMANENT. Otherwise (a transient failure such as a full disk or DB error)
                 // the sender would be told "received, no retry" while the message is stored nowhere. Without an Ack, the sender's
                 // `awaiting_confirmation` mechanism (see its docs) retries automatically.
+                let archived_at = current_time_ms() as i64;
                 match self.archive_message_exp(&chat_key, "received", text.as_bytes(), Some(&display_id), None, reply_to_message_id.as_deref(), reply_to_preview.as_deref(), sent_at_ms, expire_secs) {
                     Ok(()) => {
+                        self.note_sibling_push(archived_at);
                         self.ack_text_packet(&peer_fp, &message_id, Some(&display_id));
                         // See `pending_edits_deletes`. If an Edit/Delete for this message arrived BEFORE the Text (messages can arrive out of order),
                         // apply it now.
@@ -383,7 +385,11 @@ impl P2PCore {
                 let author_proof = author_proof.filter(|p| {
                     group_message_local_id.as_deref().map_or(false, |mid| self.group_author_proof_valid(&gid, mid, &sender_identity_id, &text, signed_sent_at_ms, Some(p.as_str())))
                 });
+                let archived_at = current_time_ms() as i64;
                 let archived_ok = self.archive_group_message_exp(&gid, &sender_identity_id, "received", text.as_bytes(), group_message_local_id.as_deref(), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, author_proof.as_deref(), expire_secs).is_ok();
+                if archived_ok {
+                    self.note_sibling_push(archived_at);
+                }
                 let mentions_me = self.group_mentions_me(&gid, mentions);
                 if archived_ok && mentions_me {
                     if let (Some(conn), Some(mid)) = (&self.db, group_message_local_id.as_deref()) {
@@ -1771,12 +1777,14 @@ impl P2PCore {
                     // NOTE: `SiblingHistoryEntry` does not carry a separate local receive time (unlike `ArchivedMessage.timestamp`). `sent_at_ms` is
                     // already the "effective" value that `load_message_history` produces with `COALESCE(NULLIF(sent_at_ms,0), timestamp)`, so it can
                     // safely be used for the `timestamp` field too.
+                    info!("Sibling history from {}: {} rows (window={})", crate::log_id(&peer_fp), entries.len(), window.is_some());
                     let (merged, press_chat) = self.apply_sibling_reply(&peer_fp, window, more, entries);
                     // Decided by the request, not by the shape of the answer
                     //no window and no press it answers, while
                     // a backfill request is open, is the unscoped backfill,
                     // also when all its rows belong to one chat.
-                    let backfill = window.is_none() && press_chat.is_none()
+                    // A sibling push (`flush_sibling_push`) carries no `ops_seq`: it must not move the watermark.
+                    let backfill = window.is_none() && press_chat.is_none() && ops_seq.is_some()
                         && self.sibling_backfill_since.get(&peer_fp).map_or(false, |s| s.0 > 0);
                     // A press answer is about its chat, empty or not.
                     let (single_group, single_conversation) = match press_chat {

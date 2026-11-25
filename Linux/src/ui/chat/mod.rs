@@ -611,6 +611,13 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
 
     // Load history, then wire everything that can change it.
     view.reload();
+    // Rows this desktop missed (a sender could not reach it) come from my
+    // other devices; the answer reloads the chat.
+    let (chat_key, is_group) = match conversation {
+        Conversation::Direct { fingerprint, .. } => (fingerprint.clone(), false),
+        Conversation::Group { group_id, .. } => (group_id.clone(), true),
+    };
+    crate::app::run_in_background(move || core::refresh_chat_from_siblings(&chat_key, is_group), |_| {});
     view.refresh_subtitle();
 
     // Mark read + tell sibling devices, both on open and on close.

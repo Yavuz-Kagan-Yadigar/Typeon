@@ -51,11 +51,17 @@ impl P2PCore {
         if self.is_blocked_device(fp) {
             return false;
         }
-        // It said it is going offline (keepalive `bye`); it dials us when back.
-        if self.meta_str(&format!("parked:{}", fp)).is_some() {
-            return false;
-        }
         let now = current_time_ms();
+        // It said it is going offline (keepalive `bye`); it dials us when back. Still tried once per
+        // `RECONNECT_BACKOFF_MAX_MS`: a device that cannot dial us back (no address for us) would
+        // otherwise never be reached again without a server.
+        let park_key = format!("parked:{}", fp);
+        if self.meta_str(&park_key).is_some() {
+            if now.saturating_sub(self.meta_u64(&park_key)) < RECONNECT_BACKOFF_MAX_MS {
+                return false;
+            }
+            self.meta_put(&park_key, &now.to_string());
+        }
         // A device's `.onion` address comes from `device_onion_addr`, which is kept separate and never overwritten by a LAN or relay address.
         // `device_last_addr` alone is not used, because it can hold a LAN address that a Tor-only peer cannot reach. If the two differ, both are tried at once,
         // and whichever is still valid after a network change succeeds.

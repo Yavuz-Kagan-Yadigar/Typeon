@@ -302,6 +302,8 @@ pub(crate) const STALE_PEER_RETRY_HORIZON_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// Multi-device: minimum interval between requests for history backfill from sibling devices. Repeatedly asking for the last N messages
 /// of every contact or group is wasteful. Duplicates are already removed by `message_id`.
 pub(crate) const SIBLING_BACKFILL_INTERVAL_MS: u64 = 30 * 60_000;
+/// Chat open asks the siblings for that chat's newest rows at most this often (see `refresh_chat_from_siblings`).
+pub(crate) const SIBLING_REFRESH_MIN_MS: u64 = 60_000;
 /// the backfill watermark is the requester's clock, the filter the
 /// responder's; this much skew between own devices still loses nothing.
 pub(crate) const SIBLING_BACKFILL_SINCE_MARGIN_MS: u64 = 10 * 60_000;

@@ -121,6 +121,17 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_requestHistorySync<'local>(
     });
 }
 
+/// Chat open: see `P2PCore::refresh_chat_from_siblings`. Returns at once; rows come as events.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_refreshChatFromSiblings<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, chat_key: JString<'local>, is_group: jni::sys::jboolean) {
+    let key: String = jstr(&mut env, &chat_key).unwrap_or_default();
+    let group = is_group != 0;
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().refresh_chat_from_siblings(&key, group);
+    });
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_p2p_messenger_P2PLib_pollNetwork<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jobjectArray {
     let result = catch_panic(|| {

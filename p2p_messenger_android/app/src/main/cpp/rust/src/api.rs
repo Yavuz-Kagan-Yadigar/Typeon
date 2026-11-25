@@ -656,6 +656,17 @@ pub fn request_history_sync(peer_device_fingerprint: &str, limit: u32) {
     });
 }
 
+/// Chat open: newest rows of this chat from my other devices (see `P2PCore::refresh_chat_from_siblings`).
+/// `chat_key`: the peer device fingerprint, or the group id. Rows arrive later as an `older_history` /
+/// `older_group_history` event.
+pub fn refresh_chat_from_siblings(chat_key: &str, is_group: bool) {
+    let key = chat_key.to_string();
+    let _ = catch_panic(move || {
+        let _guard = RUNTIME.enter();
+        core_lock().refresh_chat_from_siblings(&key, is_group);
+    });
+}
+
 // --- File attachments ---
 
 pub fn prepare_and_send_file(

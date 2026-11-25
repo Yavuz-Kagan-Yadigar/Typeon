@@ -517,6 +517,11 @@ struct P2PCore {
     /// Multi-device: last time we asked sibling devices for a history backfill.
     /// We do not ask more often than `SIBLING_BACKFILL_INTERVAL_MS`.
     last_sibling_backfill_at: u64,
+    /// Earliest archive time (this device's clock) of a row from a contact or group member
+    /// not yet pushed to the connected siblings (see `flush_sibling_push`).
+    sibling_push_from: Option<i64>,
+    /// Per chat (group id or contact identity): last `refresh_chat_from_siblings` request.
+    sibling_refresh_at: HashMap<String, u64>,
     /// Per sibling: (send time of the unanswered backfill request, send time of the last
     /// answered one). The second is the next watermark.
     sibling_backfill_since: HashMap<String, (u64, u64)>,

@@ -95,6 +95,8 @@ impl P2PCore {
             last_pending_flush_at: 0,
             auto_resumed_downloads: std::collections::HashSet::new(),
             last_sibling_backfill_at: 0,
+            sibling_push_from: None,
+            sibling_refresh_at: HashMap::new(),
             sibling_backfill_since: HashMap::new(),
             last_network_change_at: 0,
             network_change_pending: false,

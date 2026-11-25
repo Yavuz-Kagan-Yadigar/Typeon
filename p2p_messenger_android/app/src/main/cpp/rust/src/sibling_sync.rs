@@ -807,6 +807,71 @@ impl P2PCore {
         }
     }
 
+    /// A row from a contact or group member was archived at `archived_at` (this device's clock).
+    /// `flush_sibling_push` sends it to the connected siblings at the end of the poll turn.
+    pub(crate) fn note_sibling_push(&mut self, archived_at: i64) {
+        self.sibling_push_from = Some(self.sibling_push_from.map_or(archived_at, |f| f.min(archived_at)));
+    }
+
+    /// Pushes the rows noted by `note_sibling_push` to every connected sibling as an unsolicited
+    /// `SiblingHistoryResponse` (no window, no `ops_seq`, so it is no backfill answer). A sibling
+    /// that a sender cannot reach (parked, no address for it, no common server) otherwise got
+    /// the row only from the 30-minute backfill. One push per poll turn, so a server batch goes
+    /// as one packet. A sibling not connected now gets the rows from its next backfill.
+    pub(crate) fn flush_sibling_push(&mut self) {
+        let Some(from) = self.sibling_push_from.take() else { return };
+        let siblings: Vec<String> = self.sibling_active_devices().into_iter()
+            .filter(|fp| self.is_connected_to_device(fp)).collect();
+        if siblings.is_empty() { return; }
+        let (entries, _, _) = self.build_sibling_backfill(from);
+        if entries.is_empty() { return; }
+        info!("Sibling push: {} rows to {} sibling(s)", entries.len(), siblings.len());
+        let resp = MessageContent::SiblingHistoryResponse { entries, window: None, more: false, covered_to: None, ops_seq: None };
+        for fp in siblings {
+            if let Err(e) = self.send_message_content(fp.clone(), &resp, None) {
+                warn!("Sibling push could not be sent (sibling={}): {}", crate::log_id(&fp), e);
+            }
+        }
+    }
+
+    /// Chat open: asks every connected sibling for the newest `SIBLING_BACKFILL_PER_CONVERSATION` rows of one chat
+    /// (`chat_key`: the group id, or the contact's device fingerprint). No window, so the history floor still keeps out
+    /// what the user cleared. Covers rows neither the sender nor `flush_sibling_push` brought here.
+    pub(crate) fn refresh_chat_from_siblings(&mut self, chat_key: &str, is_group: bool) {
+        let conversation_identity_id = if is_group {
+            if !self.groups.contains_key(chat_key) { return; }
+            None
+        } else {
+            match self.identity_id_for_device(chat_key) {
+                Some(id) => Some(id),
+                None => return,
+            }
+        };
+        let chat = conversation_identity_id.clone().unwrap_or_else(|| chat_key.to_string());
+        let now = current_time_ms();
+        if self.sibling_refresh_at.get(&chat).map_or(false, |at| now.saturating_sub(*at) < SIBLING_REFRESH_MIN_MS) {
+            return;
+        }
+        let siblings: Vec<String> = self.sibling_active_devices().into_iter()
+            .filter(|fp| self.is_connected_to_device(fp)).collect();
+        if siblings.is_empty() { return; }
+        self.sibling_refresh_at.insert(chat, now);
+        let content = MessageContent::SiblingHistoryRequest {
+            per_conversation_limit: SIBLING_BACKFILL_PER_CONVERSATION,
+            conversation_identity_id,
+            group_id: is_group.then(|| chat_key.to_string()),
+            before_timestamp: None,
+            since_timestamp: None,
+            after_timestamp: None,
+            ops_since: None,
+        };
+        for fp in siblings {
+            if let Err(e) = self.send_message_content(fp.clone(), &content, None) {
+                warn!("Chat refresh request could not be sent (sibling={}): {}", crate::log_id(&fp), e);
+            }
+        }
+    }
+
     /// One unscoped backfill request to `fp`: only what it archived since its last answer (`sibling_backfill_since`,
     /// on disk as `sbw:<fp>`, so a restart does not start over with the newest rows), and its journal operations
     /// after the last position it reported (`sjw:<fp>`).

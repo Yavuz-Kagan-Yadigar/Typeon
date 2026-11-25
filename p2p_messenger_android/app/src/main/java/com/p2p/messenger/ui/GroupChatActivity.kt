@@ -774,6 +774,9 @@ class GroupChatActivity : AppCompatActivity() {
         // message that arrived meanwhile was archived but never appended
         // to the UI. Catch up now.
         syncMissedGroupMessages()
+        // Rows this device missed (a member could not reach it) come from my other devices.
+        val refreshGroup = groupId
+        lifecycleScope.launch(Dispatchers.IO) { P2PLib.refreshChatFromSiblings(refreshGroup, true) }
         // Members are told the read boundary as soon as the group opens (not only in onPause, and to members as well as sibling devices).
         if (resumedUnlocked) scheduleGroupReadWatermark()
         adapter.setOnScreen(resumedUnlocked)

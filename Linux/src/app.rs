@@ -72,7 +72,9 @@ type Listener = Rc<dyn Fn(&Event)>;
 /// safe continuation after an unlink is quitting the process.
 static POLL_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Set while the window has been in the background for a minute (see
-/// `start_poll_loop`): the poll loop then waits longer between turns.
+/// `start_poll_loop`): the 15 s cache refresh is skipped. The core is not
+/// told: its radio saver put Tor to sleep between 4-minute windows, and a
+/// linked desktop then got its messages minutes late.
 static POWER_SAVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Ask the poll thread to exit before its next round. The current round (if
@@ -695,8 +697,7 @@ pub fn start_poll_loop(app: &Rc<App>) {
         }
         // Returns early on swarm activity or when the UI touches the core
         // (e.g. a sent message), so traffic is not held back to the next tick.
-        let wait_ms = if POWER_SAVING.load(std::sync::atomic::Ordering::Relaxed) { 10_000 } else { 1000 };
-        core::wait_for_network_activity(wait_ms);
+        core::wait_for_network_activity(1000);
     });
 
     let dispatcher = app.clone();
@@ -721,14 +722,8 @@ pub fn start_poll_loop(app: &Rc<App>) {
         glib::ControlFlow::Continue
     });
 
-    // power-save for the core's keepalive ladder (20 s, or 60 s in power save) and its
-    // radio-window coalescing — the state Android feeds from the app lifecycle
-    // (`P2PLib.setPowerSave`), which the desktop client never reported. The
-    // window hookup lives in `main.rs` (`connect_is_active_notify`); this
-    // watcher is what carries the "gone for a minute" part, reading the very
-    // same `is_active` state the notification path already uses. Active again
-    // => off at once, inactive for `POWER_SAVE_AFTER_IDLE_MS` => on. Every
-    // core call goes to a worker thread — never the GTK thread.
+    // Window in the background for a minute: skip the cache refresh above.
+    // Active again: off at once.
     const POWER_SAVE_AFTER_IDLE_MS: u64 = 60_000;
     let power_saving = Cell::new(false);
     let inactive_since = Cell::new(0u64);
@@ -805,17 +800,13 @@ pub fn start_poll_loop(app: &Rc<App>) {
     std::mem::forget(monitor);
 }
 
-/// power-save on/off for the core (see `core::set_power_save`) —
-/// driven by the window watcher in `start_poll_loop`, and cheap enough for a
-/// signal handler (`main.rs` `connect_is_active_notify`) to call directly.
-/// Takes the core lock, so it never runs on the GTK thread itself.
-pub fn set_power_save(enabled: bool) {
+/// Window idle on/off, driven by the window watcher in `start_poll_loop`.
+fn set_power_save(enabled: bool) {
     POWER_SAVING.store(enabled, std::sync::atomic::Ordering::Relaxed);
-    std::thread::spawn(move || core::set_power_save(enabled));
 }
 
-/// metered link or not (see `core::set_metered`) — worker thread for
-/// the same reason as `set_power_save`.
+/// metered link or not (see `core::set_metered`) — worker thread: it
+/// takes the core lock.
 pub fn set_metered(metered: bool) {
     std::thread::spawn(move || core::set_metered(metered));
 }

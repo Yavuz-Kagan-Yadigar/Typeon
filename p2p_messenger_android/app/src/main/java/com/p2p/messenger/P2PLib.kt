@@ -240,6 +240,8 @@ object P2PLib {
     /** If the local history is empty on a device with node mode off, sends an encrypted history request to the other side (if node mode is on there).
      *  The reply arrives asynchronously; see the pollNetwork "history_sync" event. */
     external fun requestHistorySync(peerDeviceFingerprint: String, limit: Int)
+    /** Chat open: the newest rows of this chat from my other devices. `chatKey`: peer device fingerprint or group id. */
+    external fun refreshChatFromSiblings(chatKey: String, isGroup: Boolean)
     /** When the chat history is scrolled to the top, THIS must be called first. If the LOCAL archive has messages older than `beforeTimestamp`, it returns them
      *  (without needing the network), in the same JSON format as `getMessageHistory`. */
     external fun getMessageHistoryBefore(peerDeviceFingerprint: String, beforeTimestamp: Long, limit: Int): String

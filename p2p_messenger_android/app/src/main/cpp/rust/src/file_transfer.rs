@@ -884,6 +884,12 @@ impl P2PCore {
         if let Some(conn) = &self.db {
             let _ = conn.execute("UPDATE files SET status = 'complete' WHERE file_id = ?1", params![file_id]);
         }
+        // Siblings get the attachment row now (`sibling_file_entries` pages by `created_at`).
+        let created_at: Option<i64> = self.db.as_ref()
+            .and_then(|c| c.query_row("SELECT created_at FROM files WHERE file_id = ?1", params![file_id], |r| r.get(0)).ok());
+        if let Some(t) = created_at {
+            self.note_sibling_push(t);
+        }
         self.attachment_events.push(serde_json::json!({"type": "file_complete", "peer": peer_fp, "file_id": file_id}).to_string());
         // Node mode may have downloaded this file AUTOMATICALLY (see receive_file_offer). See the `enforce_history_storage_limit` note.
         self.enforce_history_storage_limit();

@@ -188,11 +188,6 @@ pub fn notify_network_changed() {
     api::notify_network_changed();
 }
 
-/// Drops the core's keepalive ladder and radio-window throttling when the platform says this app is idle (see `P2PCore::set_power_save`).
-/// Android feeds this from the app lifecycle. The desktop client had nothing, so it burned radio time like a phone with power save off.
-pub fn set_power_save(enabled: bool) {
-    api::set_power_save(enabled);
-}
 
 /// Whether the link is metered (cellular) or not. The core coalesces its radio windows differently there (see `P2PCore::set_metered`).
 pub fn set_metered(metered: bool) {
@@ -449,6 +444,11 @@ pub fn message_history_before(
         before_timestamp,
         limit,
     ))
+}
+
+/// Chat open: newest rows of this chat from my other devices (see the core's `refresh_chat_from_siblings`).
+pub fn refresh_chat_from_siblings(chat_key: &str, is_group: bool) {
+    api::refresh_chat_from_siblings(chat_key, is_group);
 }
 
 pub fn request_history_sync(fingerprint: &str, limit: u32) {

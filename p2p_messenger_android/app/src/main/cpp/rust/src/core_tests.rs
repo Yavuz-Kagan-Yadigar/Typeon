@@ -1133,8 +1133,9 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A device that said it is going offline (keepalive `bye`) is never
-    /// dialed, even forced, until the park mark is cleared by its connection.
+    /// A device that said it is going offline (keepalive `bye`) is not
+    /// dialed, even forced, for `RECONNECT_BACKOFF_MAX_MS`; then once per
+    /// that interval until its connection clears the park mark.
     #[test]
     fn parked_device_is_not_dialed() {
         let dir = std::env::temp_dir().join(format!("typeon-parked-{}", std::process::id()));
@@ -1144,9 +1145,14 @@ mod recovery_tests {
         let fp = "ab".repeat(32);
         let pid = libp2p::PeerId::random();
         core.device_last_addr.insert(fp.clone(), format!("/ip4/127.0.0.1/tcp/1/p2p/{pid}"));
-        core.meta_put(&format!("parked:{fp}"), "1");
+        core.meta_put(&format!("parked:{fp}"), &current_time_ms().to_string());
         assert!(!core.try_reconnect_device(&fp, false));
         assert!(!core.try_reconnect_device(&fp, true));
+        // Parked long ago: one dial, then parked again from now.
+        let old = current_time_ms() - RECONNECT_BACKOFF_MAX_MS;
+        core.meta_put(&format!("parked:{fp}"), &old.to_string());
+        assert!(core.try_reconnect_device(&fp, true), "expired park: dialed once");
+        assert!(!core.try_reconnect_device(&fp, true), "re-parked after the dial");
         core.meta_del(&format!("parked:{fp}"));
         assert!(core.try_reconnect_device(&fp, true), "unparked: dialed again");
         let _ = std::fs::remove_dir_all(&dir);

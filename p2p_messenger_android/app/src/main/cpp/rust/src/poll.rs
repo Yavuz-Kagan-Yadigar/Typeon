@@ -511,7 +511,7 @@ impl P2PCore {
         self.deferred_swarm_events = deferred;
         // See `keepalive_state`. The local copy worked on during the loop is put back here.
         self.keepalive_state = keepalive_state;
-        // The peer said it is going offline: no dials to it until it connects
+        // The peer said it is going offline: dialed only once per 10 min until it connects
         // again (cleared in the `connections_established` block below). The
         // source PeerId is noise-authenticated, so a device parks only itself.
         for peer in bye_peers {
@@ -520,8 +520,8 @@ impl P2PCore {
                 .map(|(fp, _)| fp.clone())
                 .collect();
             for fp in fps {
-                info!("Device {} is going offline: not dialed until it connects", crate::log_id(&peer));
-                self.meta_put(&format!("parked:{}", fp), "1");
+                info!("Device {} is going offline: dialed once per 10 min until it connects", crate::log_id(&peer));
+                self.meta_put(&format!("parked:{}", fp), &current_time_ms().to_string());
                 self.reconnect_backoff.remove(&fp);
             }
         }
@@ -1298,6 +1298,8 @@ impl P2PCore {
         // the suspect probe) that is due in the same turn.
         lock_watch::phase("retry_unconfirmed");
         self.retry_unconfirmed_messages();
+        lock_watch::phase("sibling_push");
+        self.flush_sibling_push();
 
         // See `deferred_swarm_events`. Requests queued in this turn (file chunk requests, server RPCs, acks) do not leave until the swarm is
         // polled once more. Waiting for the next turn added about 1 s to every round trip. The main loop above drains the swarm up to Pending, so this turn almost
