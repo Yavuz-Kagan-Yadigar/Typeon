@@ -825,6 +825,28 @@ impl P2PCore {
             for fp in &reconnected {
                 self.maybe_redo_handshake(fp);
             }
+            // Only a verified packet binds a device's PeerId. A device that dials us but has nothing to send (a linked desktop, a group
+            // member we never paired with) was closed by the unknown-peer sweep after 2 min, and our queue for it had no path: both
+            // ends waited for the other's first packet. One signed AddressAnnounce over the live connection lets the other end bind
+            // us. Contact devices only, at most once per `ADDRESS_REANNOUNCE_MS` each, and only with a session (else the handshake binds).
+            let hinted: Vec<String> = self.known_remote_devices.keys()
+                .filter(|fp| self.vouched_hint_peer(fp).is_some_and(|p| connections_established.contains(&p)))
+                .cloned()
+                .collect();
+            if let Some(addr) = self.get_node_address() {
+                for fp in reconnected.iter().cloned().chain(hinted) {
+                    let key = format!("annc:{}", fp);
+                    if !self.known_remote_devices.contains_key(&fp) || !self.ratchets.contains_key(&fp)
+                        || now.saturating_sub(self.meta_u64(&key)) < ADDRESS_REANNOUNCE_MS
+                    {
+                        continue;
+                    }
+                    self.meta_put(&key, &now.to_string());
+                    if let Err(e) = self.send_message_content(fp.clone(), &MessageContent::AddressAnnounce { multiaddr: addr.clone() }, None) {
+                        warn!("AddressAnnounce on connect could not be sent ({}): {}", crate::log_id(&fp), e);
+                    }
+                }
+            }
             // Like the unconfirmed messages, half-finished or failed file downloads from a source that came back are resumed at once. See
             // `resume_incomplete_downloads_for`.
             self.resume_incomplete_downloads_for(&reconnected, false);

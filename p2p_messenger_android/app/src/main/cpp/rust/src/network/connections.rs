@@ -326,7 +326,9 @@ impl P2PCore {
         let mut done: Vec<libp2p::swarm::ConnectionId> = Vec::new();
         for (cid, (peer, at)) in &self.unknown_inbound {
             let open = self.peer_conns.get(peer).map_or(false, |v| v.contains(cid));
-            if !open || self.node_mode_enabled || self.is_known_peer(peer) {
+            // A vouched group member's hint peer: the first packet that binds it goes over this connection (`vouched_hint_peer`).
+            let hinted = self.known_remote_devices.keys().any(|fp| self.vouched_hint_peer(fp) == Some(*peer));
+            if !open || self.node_mode_enabled || self.is_known_peer(peer) || hinted {
                 done.push(*cid);
             } else {
                 held.push((*cid, *at));

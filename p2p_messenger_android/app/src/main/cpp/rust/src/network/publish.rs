@@ -32,7 +32,24 @@ impl P2PCore {
         self.device_to_peer_id.get(fp).copied().or_else(|| match envelope {
             NetworkEnvelope::IdentityExchange(_) | NetworkEnvelope::Handshake(_) => self.pairing_reply_peer.get(fp).copied(),
             _ => None,
-        })
+        }).or_else(|| self.vouched_hint_peer(fp))
+    }
+
+    /// A group member we never paired with has only the founder's dial hint (`vah:`). Its PeerId is never bound from the hint (the
+    /// founder could name any peer), so without this neither side ever sent the first packet: both waited for a verified packet to
+    /// bind the other, and the unknown-peer sweep closed the connection. While the device is unbound and that hint peer is connected,
+    /// send to it. The envelope is sealed and signed for the device, so a wrong peer can only drop it. The binding still comes only
+    /// from a verified packet of the device (`record_peer_id_if_known`).
+    pub(crate) fn vouched_hint_peer(&self, fp: &str) -> Option<PeerId> {
+        if self.device_to_peer_id.contains_key(fp) {
+            return None;
+        }
+        let addr = self.meta_str(&format!("vah:{}", fp))?.parse::<Multiaddr>().ok()?;
+        let pid = extract_peer_id(&addr)?;
+        if self.is_server_peer(&pid) || self.device_to_peer_id.values().any(|p| *p == pid) {
+            return None;
+        }
+        self.swarm.as_ref()?.is_connected(&pid).then_some(pid)
     }
 
     pub(crate) fn send_envelope_direct(&mut self, fp: &str, envelope: &NetworkEnvelope, bytes: Vec<u8>, first_attempt_at: u64, retried: bool) -> bool {
