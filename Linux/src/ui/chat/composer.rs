@@ -608,6 +608,9 @@ impl ChatView {
             .max_children_per_line(5)
             .min_children_per_line(5)
             .homogeneous(true)
+            // Rows keep their own height. Filling the scroller's minimum height stretched a single row (and the folder button
+            // in it) into a tall pill.
+            .valign(gtk::Align::Start)
             .build();
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
