@@ -109,6 +109,7 @@ Linux/target-sdk/
 
 # Private notes, review trail and test logs: never pushed to GitHub.
 reviews/
+.review-run/
 trafficvis/
 Mesaj-Akisi-Senaryosu.md
 Pil-LTE-Ozeti-*.md
