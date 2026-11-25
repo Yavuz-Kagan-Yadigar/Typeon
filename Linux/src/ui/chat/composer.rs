@@ -1038,13 +1038,17 @@ impl ChatView {
         menu.connect_closed(|menu| menu.unparent());
         let app = self.app().clone();
         let add = {
-            let (id, app) = (id.to_string(), app.clone());
+            let (id, app, view, weak) = (id.to_string(), app.clone(), self.clone(), Rc::downgrade(picker));
             move |folder_id: i64, name: String| {
-                let (ids, app) = (vec![id.clone()], app.clone());
+                let (ids, app, view, weak) = (vec![id.clone()], app.clone(), view.clone(), weak.clone());
                 app::run_in_background(
                     move || core::add_stickers_to_folder(folder_id, &ids),
                     move |result| match result {
-                        Ok(()) => app.toast(&format!("Added to {}", name)),
+                        Ok(()) => {
+                            app.toast(&format!("Added to {}", name));
+                            // The folder cell's count and preview are read at fill time.
+                            view.refill_sticker_picker(&weak);
+                        }
                         Err(error) => app.toast(&format!("Could not add the sticker to the folder: {}", error)),
                     },
                 );
