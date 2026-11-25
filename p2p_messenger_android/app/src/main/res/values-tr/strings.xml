@@ -514,6 +514,8 @@
     <string name="confirm_send_shared">%1$d dosya %2$s sohbetine gönderilsin mi?</string>
     <string name="error_app_lock_short">Şifre en az %1$d karakter olmalı.</string>
     <string name="channel_unlock">Kilit açma</string>
+    <string name="title_overlay_permission">Şifreyi hemen sor</string>
+    <string name="msg_overlay_permission">Yeniden başlatmadan sonra Typeon, şifresi girilene kadar mesaj alamaz. Şifre ekranının bildirimde beklemek yerine kendiliğinden açılması için \"Diğer uygulamaların üzerinde göster\" iznini verin.</string>
     <string name="msg_unlock_to_receive">Mesaj almak için şifrenizi girin.</string>
     <string name="msg_tamper_closed">Typeon kapandı ve anahtarlarını bellekten sildi: uygulamanın içinde bir hata ayıklayıcı veya kanca aracı bulundu. Aracı kaldırıp Typeon\'u yeniden açın.</string>
     <string name="error_recovery_password_short">Kurtarma parolası en az %1$d karakter olmalı.</string>

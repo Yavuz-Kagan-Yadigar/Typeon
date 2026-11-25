@@ -524,6 +524,26 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
+        // Without "Display over other apps" a locked vault on an unlocked phone (after a reboot with a PIN, or a process
+        // kill) is only a notification: background activity starts are blocked. See Vault.showUnlockPrompt.
+        if (!android.provider.Settings.canDrawOverlays(this) &&
+            System.currentTimeMillis() - prefs0.getLong("overlay_prompt_ms", 0L) > 24L * 60 * 60 * 1000) {
+            prefs0.edit().putLong("overlay_prompt_ms", System.currentTimeMillis()).apply()
+            AlertDialog.Builder(this)
+                .setTitle(R.string.title_overlay_permission)
+                .setMessage(R.string.msg_overlay_permission)
+                .setPositiveButton(R.string.action_open_settings) { _, _ ->
+                    try {
+                        AppLock.beginTrustedExcursion()
+                        startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                        })
+                    } catch (e: Exception) { }
+                }
+                .setNegativeButton(R.string.action_not_now, null)
+                .show()
+            return
+        }
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
         // Asking on every start would be annoying, so after a prompt the question is not asked again for
         // one day. (If the exemption is already granted, it was left above.)

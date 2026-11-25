@@ -237,6 +237,11 @@ object Vault {
             .setFullScreenIntent(pending, true)
             .build()
         try { nm.notify(UNLOCK_NOTIFICATION_ID, n) } catch (e: SecurityException) { Log.w("Vault", "No notification permission") }
+        // The full-screen intent opens the screen only on a locked or idle phone. With "Display over other apps" the
+        // password screen opens at once on an unlocked phone too (a PIN phone learns of the boot only after its unlock).
+        if (android.provider.Settings.canDrawOverlays(app)) {
+            try { app.startActivity(intent) } catch (e: Exception) { Log.w("Vault", "Password screen not opened: ${e.message}") }
+        }
     }
 
     private fun cancelUnlockPrompt(app: Context) {

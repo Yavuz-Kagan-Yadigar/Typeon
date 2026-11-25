@@ -549,6 +549,8 @@
     <string name="confirm_send_shared">Send %1$d file(s) to %2$s?</string>
     <string name="error_app_lock_short">The password needs at least %1$d characters.</string>
     <string name="channel_unlock">Unlock</string>
+    <string name="title_overlay_permission">Ask for the password at once</string>
+    <string name="msg_overlay_permission">After a restart Typeon cannot receive messages until you enter its password. Allow \"Display over other apps\" so the password screen opens by itself instead of waiting as a notification.</string>
     <string name="msg_unlock_to_receive">Enter your password to receive messages.</string>
     <string name="msg_tamper_closed">Typeon closed and cleared its keys from memory: a debugger or hooking tool was found inside the app. Remove it, then open Typeon again.</string>
     <string name="error_recovery_password_short">The recovery password needs at least %1$d characters.</string>

@@ -30,6 +30,9 @@
     <!-- Calls: speakerphone/communication mode, and the ringing screen over the lock screen. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- "Display over other apps": the one allowed way to open the password screen from the background, so a
+         locked vault (after a reboot or a process kill) asks at once on an unlocked phone too. See Vault.showUnlockPrompt. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
         <!-- Battery optimization exemption request on first launch (see
          MainActivity.ensureBatteryOptimizationExemption). This is a normal protected
          permission: it is not requested at run time, and declaring it here is enough. The
