@@ -263,6 +263,8 @@ class P2PService : Service() {
     @Volatile private var pendingWaitMs = 0L
     private val pollRunnable = object : Runnable {
         override fun run() {
+            // A debugger or hooking tool in the process: keys are wiped and the process exits (see Vault.checkTamper).
+            if (com.p2p.messenger.util.Vault.checkTamper(applicationContext)) return
             if (isRunning) {
                                 // See `pendingWaitMs` below: wait for a network event instead of a fixed delay.
                 val waitMs = pendingWaitMs

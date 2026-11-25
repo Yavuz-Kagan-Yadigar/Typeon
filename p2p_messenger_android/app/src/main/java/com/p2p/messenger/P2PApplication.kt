@@ -46,6 +46,7 @@ class P2PApplication : Application() {
         super.onCreate()
         // A logout / account delete / revoke left the marker: wipe again before anything opens a file.
         com.p2p.messenger.util.LocalWipe.finishPending(this)
+        if (!BuildConfig.DEBUG) try { P2PLib.hardenProcess() } catch (e: Throwable) {}
         // Plaintext left behind by a killed process: a recording or an outgoing copy that was never sent.
         // It runs on this thread before any activity starts. A background delete could otherwise remove a file
         // that a cold-start share or a recording has just written there.

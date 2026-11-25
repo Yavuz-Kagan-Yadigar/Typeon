@@ -98,6 +98,7 @@ object Vault {
     @Synchronized
     fun open(context: Context, password: String): Boolean {
         val app = context.applicationContext
+        if (checkTamper(app)) return false
         val candidate = read(app, password) ?: return false
         val current = key
         if (current != null) {
@@ -174,6 +175,39 @@ object Vault {
         } finally {
             kek.fill(0)
         }
+    }
+
+    /**
+     * A root attacker on a running phone reads keys out of memory or hooks the crypto calls with a debugger or a hooking
+     * framework injected into this process. When one is seen ([P2PLib.tamperSigns]), the vault key is zeroed and the
+     * process exits, so the core's keys leave memory too. The next start needs the password, and [open] refuses while the
+     * tool is still there. Rooted phones as such are not refused. Release builds only: debug builds run under a debugger.
+     * Best effort: a tool that hides from the checks is not seen.
+     *
+     * Returns true when tampering was found (the process is then exiting).
+     */
+    fun checkTamper(context: Context): Boolean {
+        if (com.p2p.messenger.BuildConfig.DEBUG) return false
+        val signs = try { P2PLib.tamperSigns() } catch (e: Throwable) { "" }
+        if (signs.isEmpty()) return false
+        val app = context.applicationContext
+        synchronized(waiters) {
+            key?.fill(0)
+            key = null
+        }
+        try {
+            val nm = app.getSystemService(NotificationManager::class.java)
+            nm?.createNotificationChannel(NotificationChannel(
+                UNLOCK_CHANNEL_ID, app.getString(R.string.channel_unlock), NotificationManager.IMPORTANCE_HIGH))
+            nm?.notify(UNLOCK_NOTIFICATION_ID, NotificationCompat.Builder(app, UNLOCK_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(app.getString(R.string.app_name))
+                .setContentText(app.getString(R.string.msg_tamper_closed))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(app.getString(R.string.msg_tamper_closed)))
+                .build())
+        } catch (e: Exception) {}
+        android.os.Process.killProcess(android.os.Process.myPid())
+        return true
     }
 
     /**

@@ -344,3 +344,65 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_checkUpdate<'local>(
     };
     safe_new_jstring(&mut env, out)
 }
+
+/// Release builds, at process start: the process is not dumpable. Another process of the same uid (an exploit that reached the app's
+/// uid) cannot ptrace it or read `/proc/<pid>/mem`, and no core dump holds its keys. Root is not stopped by this; see `tamper_signs`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_hardenProcess(_env: JNIEnv, _class: JClass) {
+    // SAFETY: plain prctl with integer arguments, no pointers.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+}
+
+/// Signs of a debugger or an instrumentation framework (Frida, Xposed/LSPosed, Substrate) attached to THIS process, comma
+/// separated; empty when none. This is how a root attacker on a running phone reads keys out of memory or hooks the crypto calls.
+/// Rooted phones as such are not reported: only tools inside our process. Best effort: a tool that hides from these checks is
+/// not seen. At most one scan per 10 s; in between the last answer is returned (it runs on every poll turn).
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_tamperSigns<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>) -> jni::sys::jstring {
+    static LAST: std::sync::Mutex<(u64, String)> = std::sync::Mutex::new((0, String::new()));
+    let now = mono_ms();
+    let out = {
+        let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+        if last.0 == 0 || now.saturating_sub(last.0) >= 10_000 || !last.1.is_empty() {
+            *last = (now.max(1), tamper_signs());
+        }
+        last.1.clone()
+    };
+    safe_new_jstring(&mut env, out)
+}
+
+pub(crate) fn tamper_signs() -> String {
+    let mut found: Vec<&str> = Vec::new();
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        if status.lines().any(|l| l.strip_prefix("TracerPid:").is_some_and(|v| v.trim() != "0")) {
+            found.push("tracer");
+        }
+    }
+    if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+        found.extend(maps_tamper_signs(&maps));
+    }
+    if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
+        let frida_thread = tasks.flatten().any(|t| {
+            std::fs::read_to_string(t.path().join("comm"))
+                .is_ok_and(|c| matches!(c.trim(), "gum-js-loop" | "pool-frida"))
+        });
+        if frida_thread {
+            found.push("frida-thread");
+        }
+    }
+    found.dedup();
+    found.join(",")
+}
+
+/// Library names of hooking frameworks in a `/proc/self/maps` text. Typeon itself loads none of them.
+pub(crate) fn maps_tamper_signs(maps: &str) -> Vec<&'static str> {
+    const SIGNS: [(&str, &str); 7] = [
+        ("frida", "frida"), ("gum-js", "frida"), ("linjector", "frida"),
+        ("xposed", "xposed"), ("lspd", "xposed"), ("edxp", "xposed"), ("substrate", "substrate"),
+    ];
+    let lower = maps.to_ascii_lowercase();
+    let mut out: Vec<&'static str> = SIGNS.iter().filter(|(needle, _)| lower.contains(needle)).map(|(_, name)| *name).collect();
+    out.dedup();
+    out
+}

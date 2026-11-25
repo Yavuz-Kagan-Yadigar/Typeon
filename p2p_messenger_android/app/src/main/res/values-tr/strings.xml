@@ -515,6 +515,7 @@
     <string name="error_app_lock_short">Şifre en az %1$d karakter olmalı.</string>
     <string name="channel_unlock">Kilit açma</string>
     <string name="msg_unlock_to_receive">Mesaj almak için şifrenizi girin.</string>
+    <string name="msg_tamper_closed">Typeon kapandı ve anahtarlarını bellekten sildi: uygulamanın içinde bir hata ayıklayıcı veya kanca aracı bulundu. Aracı kaldırıp Typeon\'u yeniden açın.</string>
     <string name="error_recovery_password_short">Kurtarma parolası en az %1$d karakter olmalı.</string>
     <string name="action_fetch_older_history">Eski geçmişi getir</string>
     <string name="msg_fetch_history_requested">İstendi…</string>

@@ -182,6 +182,10 @@ object P2PLib {
     external fun wakePoll()
     /** Argon2id key (32 bytes) of the app password, see [com.p2p.messenger.util.Vault]. Empty on bad input. Does not take the core lock. */
     external fun argon2idKey(password: String, salt: ByteArray, mKib: Int, t: Int): ByteArray
+    /** Release builds, at start: the process is not dumpable (no same-uid ptrace, no core dump). */
+    external fun hardenProcess()
+    /** Debugger or hooking tools (Frida, Xposed, Substrate) inside this process, comma separated; empty when none. See [com.p2p.messenger.util.Vault.checkTamper]. */
+    external fun tamperSigns(): String
     /** Reports a network interface change (Wi-Fi and cellular switch, or the network disappearing and coming back). See P2PService
      *  `observeNetworkChangesForReconnect` and session.rs `reconnect_all_known_now`. For ALL known active devices, it tries to reconnect at once,
      *  ignoring the back-off history. */

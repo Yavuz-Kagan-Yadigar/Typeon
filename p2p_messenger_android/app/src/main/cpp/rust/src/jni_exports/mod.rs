@@ -347,5 +347,14 @@ mod app_password_key_tests {
         assert!(app_password_key(b"x", &[1; 8], 8 * 1024, 1).is_none());
         assert!(app_password_key(b"x", &[1; 16], 1024 * 1024, 1).is_none(), "a damaged header must not ask for 1 GiB");
     }
+
+    #[test]
+    fn hooking_libraries_in_maps_are_reported() {
+        use super::account::maps_tamper_signs;
+        let clean = "7f00-7f10 r-xp 0 fd:01 1 /data/app/x/lib/arm64/libp2p_messenger.so\n7f20-7f30 r--p 0 fd:01 2 /system/lib64/libc.so\n";
+        assert!(maps_tamper_signs(clean).is_empty());
+        assert_eq!(maps_tamper_signs("7f00 r-xp 0 0 0 /data/local/tmp/re.frida.server/frida-agent-64.so"), vec!["frida"]);
+        assert_eq!(maps_tamper_signs("7f00 r-xp 0 0 0 /data/adb/lspd/lib.so\n7f01 /system/framework/XposedBridge.jar"), vec!["xposed"]);
+    }
 }
 

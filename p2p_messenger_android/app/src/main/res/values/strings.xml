@@ -550,6 +550,7 @@
     <string name="error_app_lock_short">The password needs at least %1$d characters.</string>
     <string name="channel_unlock">Unlock</string>
     <string name="msg_unlock_to_receive">Enter your password to receive messages.</string>
+    <string name="msg_tamper_closed">Typeon closed and cleared its keys from memory: a debugger or hooking tool was found inside the app. Remove it, then open Typeon again.</string>
     <string name="error_recovery_password_short">The recovery password needs at least %1$d characters.</string>
     <string name="action_fetch_older_history">Fetch older history</string>
     <string name="msg_fetch_history_requested">Requested…</string>
