@@ -14,6 +14,8 @@ object P2PLib {
      *  If an identity is stored, its public keys are also loaded into memory. */
     fun initDatabase(filesDir: String): Boolean {
         if (databaseOpen) return true
+        // Its key is sealed with the vault key: closed until the app password is entered.
+        if (!com.p2p.messenger.util.Vault.isOpen()) return false
         return com.p2p.messenger.util.SkippedKeyManager.openDatabase(java.io.File(filesDir)).also { databaseOpen = it }
     }
     @Volatile private var databaseOpen = false
@@ -178,8 +180,8 @@ object P2PLib {
 
     /** Ends a running [waitForNetworkActivity] at once. Takes no core lock. */
     external fun wakePoll()
-    /** PBKDF2-HMAC-SHA256 (Rust, ring). See `AppLock.derive`. Does not take the core lock. */
-    external fun pbkdf2Sha256(password: String, salt: ByteArray, iterations: Int, outLen: Int): ByteArray
+    /** Argon2id key (32 bytes) of the app password, see [com.p2p.messenger.util.Vault]. Empty on bad input. Does not take the core lock. */
+    external fun argon2idKey(password: String, salt: ByteArray, mKib: Int, t: Int): ByteArray
     /** Reports a network interface change (Wi-Fi and cellular switch, or the network disappearing and coming back). See P2PService
      *  `observeNetworkChangesForReconnect` and session.rs `reconnect_all_known_now`. For ALL known active devices, it tries to reconnect at once,
      *  ignoring the back-off history. */

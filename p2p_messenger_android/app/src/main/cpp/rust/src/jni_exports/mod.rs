@@ -333,13 +333,19 @@ pub(crate) fn strings_to_jobjectarray<'local>(env: &mut JNIEnv<'local>, texts: &
 // =====================================================================
 
 #[cfg(test)]
-mod pbkdf2_tests {
-    /// RFC 7914 §11 PBKDF2-HMAC-SHA256 test vector, the one `pbkdf2Sha256` JNI uses.
+mod app_password_key_tests {
+    use super::account::app_password_key;
+
     #[test]
-    fn pbkdf2_sha256_matches_rfc7914() {
-        let mut out = [0u8; 64];
-        ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, std::num::NonZeroU32::new(1).unwrap(), b"salt", b"passwd", &mut out);
-        assert_eq!(hex::encode(&out[..8]), "55ac046e56e3089f");
+    fn app_password_key_is_bound_to_password_and_salt_and_checks_inputs() {
+        let k = app_password_key(b"hunter22", &[1; 16], 8 * 1024, 1).unwrap();
+        assert_eq!(k.len(), 32);
+        assert_eq!(*k, *app_password_key(b"hunter22", &[1; 16], 8 * 1024, 1).unwrap());
+        assert_ne!(*k, *app_password_key(b"hunter23", &[1; 16], 8 * 1024, 1).unwrap());
+        assert_ne!(*k, *app_password_key(b"hunter22", &[2; 16], 8 * 1024, 1).unwrap());
+        assert!(app_password_key(b"", &[1; 16], 8 * 1024, 1).is_none());
+        assert!(app_password_key(b"x", &[1; 8], 8 * 1024, 1).is_none());
+        assert!(app_password_key(b"x", &[1; 16], 1024 * 1024, 1).is_none(), "a damaged header must not ask for 1 GiB");
     }
 }
 

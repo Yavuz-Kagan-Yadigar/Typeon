@@ -194,6 +194,14 @@ class P2PApplication : Application() {
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
                 // MainActivity opens the core itself, off the main thread.
                 if (activity is MainActivity || identityKnown) return
+                // A screen restored after a process kill with the vault closed would run on an empty core. MainActivity waits
+                // for the password and opens the core; the user starts from there.
+                if (!com.p2p.messenger.util.Vault.isOpen() && activity !is com.p2p.messenger.ui.AppLockActivity) {
+                    activity.startActivity(Intent(activity, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+                    activity.finish()
+                    return
+                }
                 if (P2PLib.hasStoredIdentity()) {
                     identityKnown = true
                     return

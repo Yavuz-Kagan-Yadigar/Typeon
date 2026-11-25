@@ -25,6 +25,11 @@ class P2PRetryWorker(context: Context, params: WorkerParameters) : Worker(contex
         // is a harmless repeat call.
         // If the service is polling, there is nothing to restart. Calling `initDatabase` and a service start every hour only wakes the core.
         if (P2PService.alive) return Result.success()
+        // Account with a closed vault (process killed or rebooted): only the password opens it.
+        if (com.p2p.messenger.util.Vault.exists(applicationContext) && !com.p2p.messenger.util.Vault.isOpen()) {
+            com.p2p.messenger.util.Vault.showUnlockPrompt(applicationContext)
+            return Result.success()
+        }
         // Database not open is not "no account": try again later.
         if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) return Result.retry()
         if (P2PLib.hasStoredIdentity()) {

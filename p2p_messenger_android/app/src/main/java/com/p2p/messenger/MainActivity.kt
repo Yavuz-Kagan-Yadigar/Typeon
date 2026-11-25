@@ -98,6 +98,8 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             // 0 = no database, 1 = identity stored (secrets loaded), 2 = first start, 3 = identity stored but its secrets could not be loaded
             val state = withContext(Dispatchers.IO) {
+                // Every key is sealed with the vault key: wait for the password (create or unlock screen, see AppLock.guard).
+                com.p2p.messenger.util.Vault.awaitOpen()
                 if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) 0
                 else if (P2PLib.hasStoredIdentity()) (if (IdentityManager.loadIfPresent(applicationContext)) 1 else 3)
                 else 2

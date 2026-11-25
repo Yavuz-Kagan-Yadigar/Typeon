@@ -75,29 +75,30 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_getPendingSecretBundle<'loc
     bytes_to_jbytearray(&mut env, &bundle)
 }
 
-/// PBKDF2-HMAC-SHA256 for the app lock password (see Kotlin `AppLock.derive`). Same output as Java `PBKDF2WithHmacSHA256` (password as UTF-8),
-/// but uses ring's assembly SHA-256: on a Tab A8, 300k iterations took 4-8 s in Java. Does NOT take the core lock: the lock screen must not
-/// wait for network work.
+/// Argon2id key of the app password (see Kotlin `Vault`): the key that wraps the vault key, so it decides how
+/// fast a rooted attacker who copied the vault file can guess the password offline. Memory-hard, so GPUs gain
+/// little. `m_kib` and `t` come from the vault file header; they are bounded so a damaged header cannot ask for
+/// gigabytes. Empty array on bad input. Does NOT take the core lock: the lock screen must not wait for network work.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_pbkdf2Sha256<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, password: JString<'local>, salt: JByteArray<'local>, iterations: jni::sys::jint, out_len: jni::sys::jint) -> jni::sys::jbyteArray {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_argon2idKey<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, password: JString<'local>, salt: JByteArray<'local>, m_kib: jni::sys::jint, t: jni::sys::jint) -> jni::sys::jbyteArray {
     let pw = zeroize::Zeroizing::new(jstr(&mut env, &password).unwrap_or_default());
     let salt = jbytearray_to_vec(&mut env, &salt);
-    let out = catch_panic(move || {
-        let mut out = zeroize::Zeroizing::new(vec![0u8; out_len.clamp(1, 64) as usize]);
-        // An argument that failed to copy arrives empty: no key from that (a
-        // hash of the empty password was stored as the app lock).
-        if pw.is_empty() || salt.is_empty() {
-            Default::default()
-        } else if let Some(it) = std::num::NonZeroU32::new(iterations.clamp(0, 5_000_000) as u32) {
-            // bounded like `out_len` (the Kotlin `AppLock.ITERATIONS` is 600 000; the cap is 5 000 000).
-            ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA256, it, &salt, pw.as_bytes(), &mut out[..]);
-            out
-        } else {
-            Default::default()
-        }
-    })
-    .unwrap_or_default();
-    bytes_to_jbytearray(&mut env, &out)
+    let out = catch_panic(move || app_password_key(pw.as_bytes(), &salt, m_kib, t).unwrap_or_default())
+        .unwrap_or_default();
+    bytes_to_jbytearray(&mut env, &out[..])
+}
+
+/// See `Java_com_p2p_messenger_P2PLib_argon2idKey`. `None` for an empty password or salt (an argument that failed to
+/// copy arrives empty) or out-of-range costs.
+pub(crate) fn app_password_key(password: &[u8], salt: &[u8], m_kib: i32, t: i32) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+    if password.is_empty() || salt.len() < 16 || !(8 * 1024..=256 * 1024).contains(&m_kib) || !(1..=10).contains(&t) {
+        return None;
+    }
+    let params = argon2::Params::new(m_kib as u32, t as u32, 1, Some(32)).ok()?;
+    let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut out = zeroize::Zeroizing::new(vec![0u8; 32]);
+    argon.hash_password_into(password, salt, &mut out[..]).ok()?;
+    Some(out)
 }
 
 #[no_mangle]

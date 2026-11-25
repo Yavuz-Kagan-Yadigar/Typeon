@@ -10,7 +10,9 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Envelope encryption layer. It keeps the local identity and device secret keys, and the message history archive, encrypted on disk.
+ * Envelope encryption layer. Since the vault, every blob is also sealed with the password-bound [Vault] key (inner layer), so the
+ * Keystore key alone does not open it.
+ * It keeps the local identity and device secret keys, and the message history archive, encrypted on disk.
  *
  * An AES-256 key is created and stored in the Android Keystore (in StrongBox hardware when available). That key NEVER leaves the Keystore.
  * The Cipher object runs inside the Keystore. The Keystore key itself is never passed to the Rust/JNI side. Only DATA encrypted or decrypted
@@ -38,6 +40,8 @@ object KeystoreCrypto {
      *  `DeviceSync`, and it is included in the recovery file. If they shared one alias, "reset local history" would also make the server
      *  archive unreadable. */
     const val ALIAS_ARCHIVE_ROOT = "p2p_messenger_archive_root_wrap_key"
+    /** Alias of the key that wraps `vault.enc` (see [Vault]). */
+    const val ALIAS_VAULT = "p2p_messenger_vault_wrap_key"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val GCM_TAG_LENGTH_BITS = 128
 
@@ -88,16 +92,40 @@ object KeystoreCrypto {
     /** Account wipe, see [LocalWipe]. */
     @Synchronized
     fun deleteAllKeys() {
-        for (alias in listOf(ALIAS_IDENTITY, ALIAS_HISTORY, ALIAS_SKIPPED_KEYS, ALIAS_ARCHIVE_ROOT)) {
+        for (alias in listOf(ALIAS_IDENTITY, ALIAS_HISTORY, ALIAS_SKIPPED_KEYS, ALIAS_ARCHIVE_ROOT, ALIAS_VAULT)) {
             try { keyStore.deleteEntry(alias) } catch (e: Exception) { }
         }
     }
 
     /**
-     * Encrypts data with the given Keystore key. The returned byte array has the form `[12-byte IV][ciphertext+tag]`. It can be written
-     * to a file or a BLOB as is.
+     * Seals data with the [Vault] key, then with the given Keystore key. Both layers are `[12-byte IV][ciphertext+tag]`. The result can
+     * be written to a file or a BLOB as is. Throws [VaultLockedException] while the vault is closed: without the app password nothing
+     * new is written either.
      */
     fun encrypt(plaintext: ByteArray, alias: String = ALIAS_IDENTITY): ByteArray {
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(Vault.keyOrThrow(), "AES"))
+        cipher.updateAAD(alias.toByteArray())
+        return keystoreEncrypt(cipher.iv + cipher.doFinal(plaintext), alias)
+    }
+
+    /** Opens what [encrypt] wrote. Throws [VaultLockedException] while the vault is closed. */
+    fun decrypt(ivAndCiphertext: ByteArray, alias: String = ALIAS_IDENTITY): ByteArray {
+        val vaultKey = Vault.keyOrThrow()
+        val inner = keystoreDecrypt(ivAndCiphertext, alias)
+        try {
+            require(inner.size > 12) { "Encrypted blob too short" }
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.DECRYPT_MODE, javax.crypto.spec.SecretKeySpec(vaultKey, "AES"), GCMParameterSpec(GCM_TAG_LENGTH_BITS, inner, 0, 12))
+            cipher.updateAAD(alias.toByteArray())
+            return cipher.doFinal(inner, 12, inner.size - 12)
+        } finally {
+            inner.fill(0)
+        }
+    }
+
+    /** The Keystore layer alone: `[12-byte IV][ciphertext+tag]`. Only [Vault] uses it directly, for `vault.enc`. */
+    internal fun keystoreEncrypt(plaintext: ByteArray, alias: String): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(alias))
         val iv = cipher.iv
@@ -105,8 +133,8 @@ object KeystoreCrypto {
         return iv + ciphertext
     }
 
-    /** Decodes the `[iv][ciphertext+tag]` format produced by `encrypt`. */
-    fun decrypt(ivAndCiphertext: ByteArray, alias: String = ALIAS_IDENTITY): ByteArray {
+    /** Decodes the `[iv][ciphertext+tag]` format produced by [keystoreEncrypt]. */
+    internal fun keystoreDecrypt(ivAndCiphertext: ByteArray, alias: String): ByteArray {
         require(ivAndCiphertext.size > 12) { "Encrypted blob too short" }
         val iv = ivAndCiphertext.copyOfRange(0, 12)
         val ciphertext = ivAndCiphertext.copyOfRange(12, ivAndCiphertext.size)

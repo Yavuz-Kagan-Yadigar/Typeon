@@ -77,7 +77,7 @@ internal fun SettingsFragment.setupNotificationControls(view: View) {
  * App-open password. From here it can only be CHANGED. There is no removal option (a password must never be empty), and an empty new password is refused too.
  *
  * The current password is checked with `AppLock.verify`. In a session that is not locked (the user is already inside), this stops someone who briefly
- * gets the phone from changing the password silently. `AppLock.verify` and `setPassword` deliberately run a slow KDF (see AppLock.ITERATIONS), so they
+ * gets the phone from changing the password silently. `AppLock.verify` and `setPassword` deliberately run a slow KDF (Argon2id, see Vault), so they
  * are called OFF the main thread.
  */
 internal fun SettingsFragment.setupAppLockControls(view: View) {

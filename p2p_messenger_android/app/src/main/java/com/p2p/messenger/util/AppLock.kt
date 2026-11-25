@@ -4,46 +4,22 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
-import android.util.Base64
 import com.p2p.messenger.ui.AppLockActivity
-import java.security.MessageDigest
-import java.security.SecureRandom
-import javax.crypto.SecretKeyFactory
-import javax.crypto.spec.PBEKeySpec
 
 /**
  * A password that opens the app.
  *
- * The password itself is stored nowhere. A PBKDF2-HMAC-SHA256 derivation with a random salt is stored instead.
- * That stops someone with access to device memory from reading the password directly, and a high iteration count
- * makes guessing expensive. This lock is a layer SEPARATE from the end-to-end encryption of the app: identity and
- * ratchet keys are already protected by the Android Keystore (see `KeystoreCrypto`). This screen is an interface-level
- * barrier against someone who picks up the phone.
+ * The password itself is stored nowhere. It opens the [Vault]: an Argon2id key of the password unwraps the vault
+ * key, and every stored secret (identity keys, database key, history and archive keys) is sealed with that vault key
+ * on top of the Keystore. So the password is not only a screen: without it nothing on disk opens, even for root.
+ * Checking the password is opening the vault (a wrong password fails the AES-GCM tag); there is no separate hash.
  *
  * The password must never be empty. So neither the first setup (`AppLockActivity` CREATE mode) nor a change
  * (SettingsFragment) accepts an empty value, and there is no way to remove the password entirely.
  */
 object AppLock {
     private const val PREFS_NAME = "p2p_settings"
-    private const val KEY_SALT = "app_lock_salt"
-    private const val KEY_HASH = "app_lock_hash"
-    private const val KEY_ITERATIONS = "app_lock_iterations"
-
-    /** The old fixed value was 120,000. That was the OWASP recommendation around 2018, and modern GPU and ASIC guessing
-     *  makes it weak. 600,000 is the current OWASP guidance for PBKDF2-HMAC-SHA256. The native (ring) path in `derive`
-     *  keeps the unlock delay acceptable even on slow tablets.
-     *
-     *  Raising the constant must NOT lock out existing installs. The iteration count a hash was derived with is stored
-     *  separately in `KEY_ITERATIONS` (see `setPassword` / `verify`). If an old record has no such field, the old constant
-     *  (120,000) is assumed. Every new `setPassword` call writes the current constant. So the password gets stronger
-     *  silently the next time the user changes it, and the existing password does not break. */
-    private const val ITERATIONS = 600_000
-    /** See the `ITERATIONS` docs. This is the iteration count the records already written to disk were derived with,
-     *  before that constant is raised. */
-    private const val LEGACY_ITERATIONS = 120_000
-    private const val KEY_LENGTH_BITS = 256
-    /** The hash sits in SharedPreferences; on a rooted phone it can be guessed offline, so short passwords fall fast.
-     *  Only new passwords are checked; an existing shorter one keeps working until it is changed. */
+    /** A copy of the vault file is guessed offline at Argon2id cost per try, so the length is the rest of the defence. */
     const val MIN_PASSWORD_LENGTH = 8
 
     /** Lock state for the life of the process. NOT written to disk. When the process dies, or the app goes to the
@@ -76,62 +52,16 @@ object AppLock {
     private const val BACKGROUND_LOCK_MS = 60_000L
     @Volatile private var backgroundedAt = 0L
 
-    fun hasPassword(context: Context): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.contains(KEY_HASH) && prefs.contains(KEY_SALT)
-    }
+    fun hasPassword(context: Context): Boolean = Vault.exists(context)
 
-    /** Returns `false` and writes NOTHING if the password is empty. See the class note. */
+    /** First password, or a new one for the open vault. Returns `false` and writes NOTHING if the password is empty or short. */
     fun setPassword(context: Context, password: String): Boolean {
         if (password.isBlank() || password.length < MIN_PASSWORD_LENGTH) return false
-        val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
-        val hash = derive(password, salt, ITERATIONS)
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-            .putString(KEY_SALT, Base64.encodeToString(salt, Base64.NO_WRAP))
-            .putString(KEY_HASH, Base64.encodeToString(hash, Base64.NO_WRAP))
-            .putInt(KEY_ITERATIONS, ITERATIONS)
-            .apply()
-        return true
+        return if (Vault.exists(context)) Vault.changePassword(context, password) else Vault.create(context, password)
     }
 
-    /**
-     * `MessageDigest.isEqual` is a constant-time comparison. A plain `==` (or `contentEquals`) returns at the first
-     * differing byte, and in theory that leaks timing information.
-     */
-    fun verify(context: Context, password: String): Boolean {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val saltB64 = prefs.getString(KEY_SALT, null) ?: return false
-        val hashB64 = prefs.getString(KEY_HASH, null) ?: return false
-        // See the `ITERATIONS` docs. This field is absent in a record written BEFORE the current constant was raised, so
-        // that record must have been derived with the old constant (120,000). Otherwise every old install's password would
-        // break with this update.
-        val iterations = if (prefs.contains(KEY_ITERATIONS)) prefs.getInt(KEY_ITERATIONS, ITERATIONS) else LEGACY_ITERATIONS
-        return try {
-            val expected = Base64.decode(hashB64, Base64.NO_WRAP)
-            val actual = derive(password, Base64.decode(saltB64, Base64.NO_WRAP), iterations)
-            try { MessageDigest.isEqual(expected, actual) } finally { actual.fill(0) }
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun derive(password: String, salt: ByteArray, iterations: Int): ByteArray {
-        // Native (ring) path: same output, much faster than Java. On a Samsung Tab A8 the Java unlock took 4-8 seconds.
-        // Java is the fallback if the library cannot be loaded.
-        try {
-            val out = com.p2p.messenger.P2PLib.pbkdf2Sha256(password, salt, iterations, KEY_LENGTH_BITS / 8)
-            if (out.size == KEY_LENGTH_BITS / 8) return out
-        } catch (e: Throwable) {
-        }
-        val chars = password.toCharArray()
-        val spec = PBEKeySpec(chars, salt, iterations, KEY_LENGTH_BITS)
-        try {
-            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
-        } finally {
-            spec.clearPassword()
-            chars.fill('\u0000')
-        }
-    }
+    /** Opens the vault with [password] (or, when it is open, checks that [password] opens it). Slow on purpose (Argon2id). */
+    fun verify(context: Context, password: String): Boolean = Vault.open(context, password)
 
     fun isUnlocked(): Boolean = unlocked
 

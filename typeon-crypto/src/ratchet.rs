@@ -227,6 +227,11 @@ pub struct DeviceRatchetState {
     pub skipped_keys: HashMap<u32, [u8; 32]>,
     /// See `OldRecvChain`.
     pub old_recv: Option<OldRecvChain>,
+    /// Fixed for the life of the session: derived from the first (hybrid X25519 + ML-KEM) root key at
+    /// `initiate`/`respond`, never changed by a rotation. The server mailbox secret is made from it
+    /// (`server_seal::session_mailbox_secret`), so the mailbox stays put across rotations and is
+    /// still post-quantum: a quantum attacker who knows both devices' public keys cannot derive it.
+    pub mailbox_seed: Vec<u8>,
 }
 
 /// Symmetric secrets (`root_key`, `ck_send`, `ck_recv`) and skipped message keys (`skipped_keys`) are
@@ -240,6 +245,7 @@ impl Drop for DeviceRatchetState {
         self.prev_root_key.zeroize();
         self.ck_send.zeroize();
         self.ck_recv.zeroize();
+        self.mailbox_seed.zeroize();
         for key in self.skipped_keys.values_mut() {
             key.zeroize();
         }
@@ -281,6 +287,10 @@ pub struct SerializableRatchetState {
     pub pending_rotation_ct: Option<Vec<u8>>,
     #[serde(default)]
     pub old_recv: Option<OldRecvChain>,
+    /// See `DeviceRatchetState.mailbox_seed`. No default: a state without it cannot find its mailbox,
+    /// so it is dropped at load and the session is made again (protocol break).
+    #[serde(with = "serde_bytes")]
+    pub mailbox_seed: Vec<u8>,
 }
 
 impl Drop for SerializableRatchetState {
@@ -289,6 +299,7 @@ impl Drop for SerializableRatchetState {
         self.prev_root_key.zeroize();
         self.ck_send.zeroize();
         self.ck_recv.zeroize();
+        self.mailbox_seed.zeroize();
         self.own_x25519_secret.zeroize();
         self.own_kyber_secret.zeroize();
     }
@@ -314,6 +325,7 @@ impl DeviceRatchetState {
             has_responded_to_peer_key: self.has_responded_to_peer_key,
             pending_rotation_ct: self.pending_rotation_ct.clone(),
             old_recv: self.old_recv.clone(),
+            mailbox_seed: self.mailbox_seed.clone(),
         }
     }
 
@@ -339,6 +351,7 @@ impl DeviceRatchetState {
             pending_rotation_ct: s.pending_rotation_ct.take(),
             skipped_keys,
             old_recv: s.old_recv.take(),
+            mailbox_seed: std::mem::take(&mut s.mailbox_seed),
         })
     }
 }
@@ -575,6 +588,7 @@ impl DeviceRatchetState {
             &peer_x25519_bytes, &peer_kyber_pk.to_bytes(),
         );
         let (root_key, ck_send, ck_recv) = derive_keys(ikm, &bound_to, true)?;
+        let mailbox_seed = mailbox_seed(&root_key);
 
         let state = DeviceRatchetState {
             root_key,
@@ -595,6 +609,7 @@ impl DeviceRatchetState {
             pending_rotation_ct: None,
             skipped_keys: HashMap::new(),
             old_recv: None,
+            mailbox_seed,
         };
         Ok((state, kyber_ct, own_kyber_public_bytes))
     }
@@ -631,6 +646,7 @@ impl DeviceRatchetState {
             X25519PublicKey::from(&own_x25519_secret).as_bytes(), &own_kyber_secret.encapsulation_key().to_bytes(),
         );
         let (root_key, ck_send, ck_recv) = derive_keys(ikm, &bound_to, false)?;
+        let mailbox_seed = mailbox_seed(&root_key);
 
         Ok(DeviceRatchetState {
             root_key,
@@ -652,6 +668,7 @@ impl DeviceRatchetState {
             pending_rotation_ct: None,
             skipped_keys: HashMap::new(),
             old_recv: None,
+            mailbox_seed,
         })
     }
 
@@ -1162,6 +1179,15 @@ pub fn root_handle(root_key: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `DeviceRatchetState.mailbox_seed` of a session whose first root key is `root_key`. One-way, so the
+/// stored seed does not give back the root.
+fn mailbox_seed(root_key: &[u8]) -> Vec<u8> {
+    let hk = Hkdf::<Sha256>::new(None, root_key);
+    let mut out = vec![0u8; 32];
+    hk.expand(b"typeon-session-mailbox-seed-v1", &mut out).expect("32 bytes is a valid HKDF length");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1393,19 +1419,25 @@ mod tests {
         assert_eq!((&a.0, &a.1, &a.2), (&b.0, &b.2, &b.1));
     }
 
-    /// A state stored by a version from before `serde_bytes` and `old_recv` (byte fields as CBOR integer arrays)
-    /// must still load. Otherwise the update would drop every session.
+    /// Both ends get the same mailbox seed, a rotation keeps it, and it survives a restart. A state stored
+    /// without it (older version) is refused, so the session is made again.
     #[test]
-    fn stored_state_of_an_older_version_still_loads() {
+    fn mailbox_seed_is_shared_stable_and_required() {
         #[derive(Serialize)]
         struct OldFormat {
+            #[serde(with = "serde_bytes")]
             root_key: Vec<u8>,
+            #[serde(with = "serde_bytes")]
             prev_root_key: Option<Vec<u8>>,
+            #[serde(with = "serde_bytes")]
             ck_send: Vec<u8>,
+            #[serde(with = "serde_bytes")]
             ck_recv: Vec<u8>,
             own_x25519_secret: [u8; 32],
+            #[serde(with = "serde_bytes")]
             own_kyber_secret: Vec<u8>,
             peer_x25519_pubkey: [u8; 32],
+            #[serde(with = "serde_bytes")]
             peer_kyber_pubkey: Vec<u8>,
             send_message_number: u32,
             recv_message_number: u32,
@@ -1414,9 +1446,22 @@ mod tests {
             has_responded_to_peer_key: bool,
         }
         let (mut a, mut b) = session();
+        assert_eq!(a.mailbox_seed.len(), 32);
+        assert_eq!(a.mailbox_seed, b.mailbox_seed, "both ends must find the same mailbox");
+        assert_ne!(a.mailbox_seed, a.root_key);
+        let seed = a.mailbox_seed.clone();
         let (keys, kyber_ct, ciphertext, number) = rotate_and_send(&mut b, b"x");
         a.decrypt(&ciphertext, number, Some((&keys, &kyber_ct)), T0, b"").unwrap();
+        assert_eq!((&a.mailbox_seed, &b.mailbox_seed), (&seed, &seed), "a rotation must not move the mailbox");
+
         let p = a.to_persistable();
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&p, &mut bytes).unwrap();
+        let loaded: SerializableRatchetState = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let mut restored = DeviceRatchetState::from_persistable(loaded, HashMap::new()).unwrap();
+        assert_eq!(restored.mailbox_seed, seed);
+        assert!(restored.old_recv.is_some());
+
         let old = OldFormat {
             root_key: p.root_key.clone(),
             prev_root_key: p.prev_root_key.clone(),
@@ -1434,18 +1479,7 @@ mod tests {
         };
         let mut old_bytes = Vec::new();
         ciborium::into_writer(&old, &mut old_bytes).unwrap();
-        let loaded: SerializableRatchetState = ciborium::from_reader(old_bytes.as_slice()).unwrap();
-        let mut restored = DeviceRatchetState::from_persistable(loaded, HashMap::new()).unwrap();
-        assert_eq!(restored.root_key, a.root_key);
-        assert_eq!(restored.prev_root_key, a.prev_root_key);
-        assert!(restored.old_recv.is_none());
-
-        // The current format round-trips with the old chain, and is smaller.
-        let mut new_bytes = Vec::new();
-        ciborium::into_writer(&p, &mut new_bytes).unwrap();
-        assert!(new_bytes.len() < old_bytes.len());
-        let loaded: SerializableRatchetState = ciborium::from_reader(new_bytes.as_slice()).unwrap();
-        assert!(DeviceRatchetState::from_persistable(loaded, HashMap::new()).unwrap().old_recv.is_some());
+        assert!(ciborium::from_reader::<SerializableRatchetState, _>(old_bytes.as_slice()).is_err());
 
         let (ciphertext, number, _) = b.encrypt_next(b"after restart", b"").unwrap();
         assert_eq!(restored.decrypt(&ciphertext, number, None, T0, b"").unwrap().0, b"after restart");

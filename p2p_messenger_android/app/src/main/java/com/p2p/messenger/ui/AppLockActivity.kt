@@ -22,9 +22,8 @@ import kotlinx.coroutines.withContext
  * It has two modes, and the screen chooses the mode itself (the caller does not need to know; see `AppLock.guard`). If no password has ever
  * been set, it is "create" mode (two fields, validated). If one is set, it is "enter" mode.
  *
- * Extra hardening such as `showWhenLocked` or `excludeFromRecents` is deliberately out of scope. This screen is an interface-level barrier
- * against someone who picks up the phone. The real privacy guarantee lies in the identity and message keys being protected by the Android
- * Keystore (see util.KeystoreCrypto).
+ * The password opens the vault (see util.Vault): until it is entered after a start, no stored key can be decrypted and the core stays
+ * closed. In the app it is also the screen barrier against someone who picks up the phone.
  */
 class AppLockActivity : AppCompatActivity() {
 
@@ -75,7 +74,7 @@ class AppLockActivity : AppCompatActivity() {
                 showError(error, getString(R.string.error_app_lock_mismatch))
                 return@setOnClickListener
             }
-            // PBKDF2 is deliberately slow (see AppLock.ITERATIONS). Run on the main thread, it would freeze the UI visibly.
+            // Argon2id is deliberately slow (see Vault). Run on the main thread, it would freeze the UI visibly.
             submit.isEnabled = false
             lifecycleScope.launch(Dispatchers.IO) {
                 val ok = if (createMode) {

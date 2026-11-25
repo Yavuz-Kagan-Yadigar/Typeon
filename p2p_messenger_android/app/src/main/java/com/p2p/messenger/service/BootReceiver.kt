@@ -31,6 +31,9 @@ class BootReceiver : BroadcastReceiver() {
         val app = context.applicationContext
         Thread {
             try {
+                // No vault: no account yet. A vault is closed after every boot: ask for the password at once, the service waits for it.
+                if (!com.p2p.messenger.util.Vault.exists(app)) return@Thread
+                com.p2p.messenger.util.Vault.showUnlockPrompt(app)
                 // See the same note in P2PRetryWorker: the process may have just been born, and `hasStoredIdentity` returns a wrong (false) result before the
                 // DB is opened. `initDatabase` is idempotent.
                 // A database that did not open (Keystore not ready) is not "no account": the service retries the open itself.

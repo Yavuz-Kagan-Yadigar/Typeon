@@ -145,29 +145,22 @@ fn unpad(mut padded: Vec<u8>) -> Result<Vec<u8>, String> {
 /// mailbox id is made from that key (`server_proto::key_bound_mailbox_id`), so
 /// the server needs no other key.
 ///
-/// It comes from the static X25519 agreement of the two devices' long-term KEM
-/// keys, so it does not change with the ratchet. A mailbox derived from the
-/// rotating root key would strand mail sealed two rotations earlier. Both ends
-/// get the same secret because the fingerprints are sorted before use. The seal
-/// key still comes from the root key (`seal_envelope`).
-// ponytail: X25519 only, no static ML-KEM agreement. A quantum attacker with
-// both devices' public KEM keys could compute the secret and register as a
-// reader. The seal key is still derived from the hybrid root key, so the
-// attacker still cannot read the envelopes.
-pub fn session_mailbox_secret(
-    own_x25519_secret: &x25519_dalek::StaticSecret,
-    peer_x25519_pubkey: &[u8],
-    own_fp: &str,
-    peer_fp: &str,
-) -> Result<[u8; 32], String> {
-    let pk: [u8; 32] = peer_x25519_pubkey.try_into().map_err(|_| "Bad X25519 public key".to_string())?;
-    let shared = own_x25519_secret.diffie_hellman(&x25519_dalek::PublicKey::from(pk));
-    if !shared.was_contributory() {
-        return Err("Non-contributory X25519 key".to_string());
+/// It comes from the session's `mailbox_seed` (`ratchet::DeviceRatchetState`),
+/// which is fixed at the hybrid X25519 + ML-KEM handshake. It does not change
+/// with the ratchet: a mailbox derived from the rotating root key would strand
+/// mail sealed two rotations earlier. A quantum attacker who knows both
+/// devices' public keys cannot derive it, so cannot register as a reader and
+/// fetch or ack the mail away. Both ends get the same secret because the
+/// fingerprints are sorted before use. The seal key still comes from the root
+/// key (`seal_envelope`). A new handshake moves the mailbox; mail sealed under
+/// the old session could not be opened by the new one anyway.
+pub fn session_mailbox_secret(mailbox_seed: &[u8], own_fp: &str, peer_fp: &str) -> Result<[u8; 32], String> {
+    if mailbox_seed.len() != 32 {
+        return Err("Bad session mailbox seed".to_string());
     }
     let (a, b) = if own_fp <= peer_fp { (own_fp, peer_fp) } else { (peer_fp, own_fp) };
-    let info = [&b"p2pmsg-v0.6-session-mailbox:"[..], a.as_bytes(), b"\0", b.as_bytes()].concat();
-    derive(shared.as_bytes(), &info)
+    let info = [&b"p2pmsg-v8-session-mailbox:"[..], a.as_bytes(), b"\0", b.as_bytes()].concat();
+    derive(mailbox_seed, &info)
 }
 
 /// First-contact mailbox of `device_fingerprint` for the holders of `secret`
@@ -436,19 +429,15 @@ mod tests {
 
     #[test]
     fn session_mailbox_is_the_same_at_both_ends_and_per_pair() {
-        let a = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
-        let b = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
-        let c = x25519_dalek::StaticSecret::random_from_rng(&mut OsRng);
-        let pk = |s: &x25519_dalek::StaticSecret| x25519_dalek::PublicKey::from(s).as_bytes().to_vec();
         let (fa, fb) = ("a".repeat(64), "b".repeat(64));
-        let ab = session_mailbox_secret(&a, &pk(&b), &fa, &fb).unwrap();
-        assert_eq!(ab, session_mailbox_secret(&b, &pk(&a), &fb, &fa).unwrap(), "both sides must find the same box");
-        assert_ne!(ab, session_mailbox_secret(&a, &pk(&c), &fa, &fb).unwrap());
+        let ab = session_mailbox_secret(&[1u8; 32], &fa, &fb).unwrap();
+        assert_eq!(ab, session_mailbox_secret(&[1u8; 32], &fb, &fa).unwrap(), "both sides must find the same box");
+        assert_ne!(ab, session_mailbox_secret(&[2u8; 32], &fa, &fb).unwrap(), "another session, another box");
+        assert_ne!(ab, session_mailbox_secret(&[1u8; 32], &fa, &"c".repeat(64)).unwrap());
         // Seeds of a key-bound id do not depend on the id itself.
         assert_eq!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mk_0123").unwrap());
         assert_ne!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mb_0123").unwrap());
-        assert!(session_mailbox_secret(&a, &[0u8; 32], &fa, &fb).is_err(), "zero point must be rejected");
-        assert!(session_mailbox_secret(&a, &[1u8; 31], &fa, &fb).is_err());
+        assert!(session_mailbox_secret(&[1u8; 31], &fa, &fb).is_err());
     }
 
     #[test]

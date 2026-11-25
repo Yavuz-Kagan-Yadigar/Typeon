@@ -403,7 +403,7 @@
     <string name="lbl_app_lock_section_desc">Uygulamayı her açtığınızda sorulur. Parola değiştirilebilir ama kaldırılamaz.</string>
     <string name="action_change_app_password">Şifreyi değiştir</string>
     <string name="title_app_lock_create">Bir şifre belirleyin</string>
-    <string name="msg_app_lock_create">Bu şifre uygulamanın kilidini açar. Unutulursa geri getirilemez ve boş bırakılamaz.</string>
+    <string name="msg_app_lock_create">Bu şifre bu cihazdaki anahtarlarınızı ve mesajlarınızı şifreler. Unutursanız bu cihazdaki hiçbir şey bir daha açılamaz. Bir kurtarma dosyası saklayın.</string>
     <string name="title_app_lock_unlock">Şifrenizi girin</string>
     <string name="msg_app_lock_unlock">Devam etmek için uygulama şifrenizi girin.</string>
     <string name="hint_app_lock_password">Şifre</string>
@@ -513,6 +513,8 @@
     <string name="msg_open_link_warning">%1$s\n\nBu bağlantı tarayıcınızda, Tor dışında açılır. Site gerçek IP adresinizi görür.</string>
     <string name="confirm_send_shared">%1$d dosya %2$s sohbetine gönderilsin mi?</string>
     <string name="error_app_lock_short">Şifre en az %1$d karakter olmalı.</string>
+    <string name="channel_unlock">Kilit açma</string>
+    <string name="msg_unlock_to_receive">Mesaj almak için şifrenizi girin.</string>
     <string name="error_recovery_password_short">Kurtarma parolası en az %1$d karakter olmalı.</string>
     <string name="action_fetch_older_history">Eski geçmişi getir</string>
     <string name="msg_fetch_history_requested">İstendi…</string>

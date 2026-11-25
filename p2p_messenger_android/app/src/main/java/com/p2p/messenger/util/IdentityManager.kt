@@ -9,8 +9,8 @@ import java.io.File
  * decrypts it and loads it back into the Rust core.
  *
  * Only KeystoreCrypto.encrypt output (AES-256-GCM ciphertext, under a key held in the Android Keystore / StrongBox) is on disk. A plaintext secret key
- * is never written to disk. Another app cannot read this file without root. Even with root, without the Keystore key (held in the hardware security module,
- * and not exportable) the content is meaningless ciphertext.
+ * is never written to disk. The blob is also sealed with the password-bound [Vault] key, so root with access to the app's Keystore keys still
+ * needs the app password.
  */
 object IdentityManager {
     private const val SECRET_BUNDLE_FILENAME = "identity_secret.enc"

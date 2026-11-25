@@ -36,19 +36,18 @@ impl P2PCore {
         idx
     }
 
-    /// The server mailbox of the session with `peer_fp`, and its proof secret. It is stable, derived from the two
-    /// devices' long-term KEM keys (`server_seal::session_mailbox_secret`), not from the rotating root key. The id
-    /// is made from the proof key (`key_bound_mailbox_id`).
+    /// The server mailbox of the session with `peer_fp`, and its proof secret. It is stable for the session,
+    /// derived from the ratchet's `mailbox_seed` (fixed at the hybrid handshake, see
+    /// `server_seal::session_mailbox_secret`), not from the rotating root key. The id is made from the proof key
+    /// (`key_bound_mailbox_id`). No session, no mailbox.
     /// PROTOCOL BREAK: older clients use a different id.
     pub(super) fn session_mailbox(&self, peer_fp: &str) -> Option<(String, [u8; 32])> {
         let own_fp = self.own_mailbox_topic_fp.as_ref()?;
-        let own = self.own_device_keys.get(own_fp)?;
-        let peer = self.known_remote_devices.get(peer_fp).or_else(|| self.own_devices.get(peer_fp))?;
-        // Memoized: one X25519 and one HKDF per session on every sweep, fetch answer and push. Keyed by both keys and both
-        // fingerprints, so a changed key misses.
+        let seed = &self.ratchets.get(peer_fp)?.mailbox_seed;
+        // Memoized: one HKDF and one id derivation per session on every sweep, fetch answer and push. Keyed by the
+        // seed and both fingerprints, so a new session misses.
         let tag: [u8; 32] = Sha256::new()
-            .chain_update(own.kem_sk_x25519.as_bytes())
-            .chain_update(&peer.kem_pubkey_x25519)
+            .chain_update(seed)
             .chain_update(own_fp.as_bytes())
             .chain_update([0u8])
             .chain_update(peer_fp.as_bytes())
@@ -57,7 +56,7 @@ impl P2PCore {
         if let Some(hit) = SESSION_MAILBOX_MEMO.lock().ok()?.get_or_insert_with(HashMap::new).get(&tag) {
             return Some(hit.clone());
         }
-        let secret = server_seal::session_mailbox_secret(&own.kem_sk_x25519, &peer.kem_pubkey_x25519, own_fp, peer_fp).ok()?;
+        let secret = server_seal::session_mailbox_secret(seed, own_fp, peer_fp).ok()?;
         let id = key_bound_mailbox_id(&secret)?;
         let mut memo = SESSION_MAILBOX_MEMO.lock().ok()?;
         let memo = memo.get_or_insert_with(HashMap::new);

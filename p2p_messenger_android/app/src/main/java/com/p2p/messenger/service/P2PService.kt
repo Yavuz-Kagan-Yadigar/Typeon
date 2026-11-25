@@ -819,6 +819,14 @@ class P2PService : Service() {
     private fun initAndStart() {
         // init must never throw out of the HandlerThread (START_STICKY crash loop).
         try {
+            if (!com.p2p.messenger.util.Vault.isOpen()) {
+                // After a reboot or a process kill: the keys open only with the app password. The prompt brings up the
+                // password screen; the start goes on from here once it is entered.
+                if (!com.p2p.messenger.util.Vault.exists(applicationContext)) { stopSelf(); return }
+                com.p2p.messenger.util.Vault.showUnlockPrompt(applicationContext)
+                com.p2p.messenger.util.Vault.whenOpen { handler.post { if (isRunning) initAndStart() } }
+                return
+            }
             if (!P2PLib.initDatabase(applicationContext.filesDir.absolutePath)) {
                 // Database not open (Keystore failure): not the same as
                 // "no account", the service stays and tries again.
