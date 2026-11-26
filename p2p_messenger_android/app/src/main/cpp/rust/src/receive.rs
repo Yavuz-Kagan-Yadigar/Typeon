@@ -540,7 +540,7 @@ impl P2PCore {
                     }),
                 }
             }
-            MessageContent::HistorySyncRequest { limit, before_timestamp, group_id, after_timestamp } => {
+            MessageContent::HistorySyncRequest { limit, before_timestamp, group_id, after_timestamp, have } => {
                 // `load_message_history`/`load_group_message_history` return an empty list when `history_key` was never loaded or the archive is empty, so no separate `node_mode_enabled` check is needed. This is a control packet, not a user message, so it is not written to our archive (archive_plaintext: None, see send_message_content).
                 // The `limit` in the request comes from the other side. Row count and total text bytes are capped, so the reply stays under the 1 MB envelope cap (`MAX_ENVELOPE_BYTES`). The cut-off part is fetched later with a paging request (before_timestamp).
                 // Group history goes only to someone who is a member now. Otherwise anyone who knew the `group_id`, such as a removed member, could page through the history, including messages sent after their removal.
@@ -562,10 +562,13 @@ impl P2PCore {
                 if self.history_answered_at.len() > 1000 {
                     self.history_answered_at.retain(|_, t| now.saturating_sub(*t) < 2_000);
                 }
-                if self.history_answered_at.get(&peer_fp).map_or(false, |t| now.saturating_sub(*t) < 2_000) {
+                // Two slots: one press may send two windows at once (`press_windows`).
+                let slot = [peer_fp.clone(), format!("{}#2", peer_fp)].into_iter()
+                    .find(|k| self.history_answered_at.get(k).map_or(true, |t| now.saturating_sub(*t) >= 2_000));
+                let Some(slot) = slot else {
                     self.ask_resend(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
-                }
+                };
                 // and at most HISTORY_SYNC_BYTES_PER_WINDOW of rows per
                 // device per minute, shed the same way.
                 const HISTORY_SYNC_WINDOW_MS: u64 = 60_000;
@@ -577,11 +580,11 @@ impl P2PCore {
                     self.ask_resend(&peer_fp, &message_id);
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
-                self.history_answered_at.insert(peer_fp.clone(), now);
+                self.history_answered_at.insert(slot.clone(), now);
                 let limit = limit.min(HISTORY_SYNC_MAX_MESSAGES);
                 // Multi-device fix: our 1:1 archive is under the CANONICAL device key (see `canonical_peer_key` and the Text arm). A request from a
                 // non-canonical device of the requester must also find the same chat history.
-                // A "Fetch older history" press gets only rows sent in its window `[after, before)`, at most one window long. The chat-open sync
+                // A "Fetch older history" press gets only rows sent in its window `[after, before)` that the requester does not hold (`have`). The chat-open sync
                 // (no `before_timestamp`) is unchanged. A group member gets history from at most one day before it was added (its latest add,
                 // `GroupMember.added_at`, our local time of that update), never older. Our own other devices get everything. A missing or zero
                 // `added_at` counts as now.
@@ -597,20 +600,23 @@ impl P2PCore {
                         .unwrap_or(now);
                     Some(added.saturating_sub(GROUP_HISTORY_BEFORE_JOIN_MS))
                 });
+                // A press window may run up to now (`press_windows`): any length, since the rows the requester holds
+                // (`have`) are skipped by id before anything is decrypted, so one answer scans at most
+                // `have.len() + limit + 1` ids. Without a start it is one window long.
                 let window = before_timestamp.map(|b| {
-                    let min_after = b.saturating_sub(HISTORY_FETCH_WINDOW_MS as i64);
-                    let after = after_timestamp.map_or(min_after, |a| a.max(min_after));
+                    let after = after_timestamp.unwrap_or(b.saturating_sub(HISTORY_FETCH_WINDOW_MS as i64));
                     (b, history_floor.map_or(after, |f| after.max(f as i64)))
                 });
-                let mut history = match (&group_id, window) {
-                    (_, Some((before, after))) if before <= after => Vec::new(),
-                    (gid, Some((before, after))) => self.load_history_fetch_page(&chat_key, gid.as_deref(), limit, before, after),
-                    (Some(gid), None) => self.load_group_message_history_opt(gid, limit, None, false),
-                    (None, None) => self.load_message_history_opt(&chat_key, limit, None, false),
+                let mut have = have;
+                have.truncate(HISTORY_FETCH_HELD_MAX);
+                have.sort_unstable();
+                let (mut history, cut) = match (&group_id, window) {
+                    (gid, Some((before, after))) => self.load_history_gap_page(&chat_key, gid.as_deref(), limit, before, after, &have),
+                    (Some(gid), None) => (self.load_group_message_history_opt(gid, limit, None, false), false),
+                    (None, None) => (self.load_message_history_opt(&chat_key, limit, None, false), false),
                 };
                 // Rows count as pre-join if we got them before the floor OR
                 // their author sent them before it (a row we fetched late).
-                let raw_loaded = history.len();
                 if let Some(f) = history_floor {
                     history.retain(|m| m.timestamp >= f && (m.sent_at_ms == 0 || m.sent_at_ms >= f));
                 }
@@ -642,8 +648,8 @@ impl P2PCore {
                     .collect();
                 kept.reverse();
                 // Rows of the window were cut: the requester asks for the rest.
-                // `raw_loaded`: a full page before the filter may still have more; a page the filter emptied has no row to page from.
-                let more = window.is_some() && !kept.is_empty() && (raw_loaded as u32 >= limit || kept.len() < loaded);
+                // `cut`: the page stopped before the window's end; a page the filter emptied has no row to page from.
+                let more = window.is_some() && !kept.is_empty() && (cut || kept.len() < loaded);
                 let messages: Vec<SyncedMessage> = kept.into_iter()
                     .map(|(m, reactions)| SyncedMessage {
                         reactions,
@@ -660,7 +666,7 @@ impl P2PCore {
                 if let Err(e) = self.send_message_content(peer_fp.clone(), &response, None) {
                     error!("HistorySyncResponse could not be sent: {}", e);
                     // nothing went out, the window is not used up.
-                    self.history_answered_at.remove(&peer_fp);
+                    self.history_answered_at.remove(&slot);
                 } else {
                     let used = HISTORY_SYNC_MAX_TEXT_BYTES - text_budget;
                     let entry = self.history_sent_bytes.entry(peer_fp.clone()).or_insert((now, 0));
@@ -888,8 +894,11 @@ impl P2PCore {
                     if let (true, Some(o), false) = (more, oldest, write_failed) {
                         if o > after {
                             let sent = self.take_fetch_page(&floor_key) && {
+                                // The rows held now, the ones just written too.
+                                let have = self.held_tags(&chat_key, group_id.as_deref(), o + 1, after, HISTORY_FETCH_HELD_MAX)
+                                    .into_iter().map(|(t, _)| t).collect();
                                 let content = MessageContent::HistorySyncRequest {
-                                    limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(o + 1), group_id: group_id.clone(), after_timestamp: Some(after),
+                                    limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(o + 1), group_id: group_id.clone(), after_timestamp: Some(after), have,
                                 };
                                 self.send_message_content(peer_fp.clone(), &content, None).is_ok()
                             };

@@ -346,6 +346,8 @@ pub(crate) const HISTORY_FETCH_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// The rest of the window arrives within the same press, and a peer cannot make us ask forever.
 // ponytail: shared by all sources. A busy group month with many capped members could run out. Use per-source budgets if that shows up.
 pub(crate) const HISTORY_FETCH_MAX_PAGES: u32 = 20;
+/// Most held-row tags one press request carries (`HistorySyncRequest.have`, `press_windows`): 4096 x 8 bytes, about 36 KB in CBOR.
+pub(crate) const HISTORY_FETCH_HELD_MAX: usize = 4096;
 /// Earliest accepted message time: 1 January 2025 UTC. The first cursor of a chat ignores rows stamped before it, such as rows from a device clock stuck at 1970 or a backdated row.
 pub(crate) const HISTORY_FETCH_EPOCH_MS: i64 = 1_735_689_600_000;
 

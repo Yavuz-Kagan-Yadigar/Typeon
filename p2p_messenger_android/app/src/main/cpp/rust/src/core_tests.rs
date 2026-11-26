@@ -1133,6 +1133,97 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A press asks for its month AND up to now, with the ids held here: the
+    /// peer returns a gap newer than the oldest local row, never a held row.
+    #[test]
+    fn history_press_fills_gaps_and_skips_held_rows() {
+        let base = std::env::temp_dir().join(format!("typeon-gapfill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (dm, dr) = (base.join("me"), base.join("peer"));
+        for d in [&dm, &dr] { std::fs::create_dir_all(d).unwrap(); }
+        let (mut me, mut peer) = (core_on_disk(&dm), core_on_disk(&dr));
+        let gid = "group-0123456789abcdef".to_string();
+        for c in [&mut me, &mut peer] {
+            c.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "x".into(), 1));
+        }
+        let day: u64 = 24 * 60 * 60 * 1000;
+        for (id, d) in [("old", 300u64), ("new", 950)] {
+            me.archive_group_message(&gid, "x", "received", b"t", Some(id), None, None, None, d * day, None).unwrap();
+        }
+        me.archive_message("p", "received", b"t", Some("pa"), None, None, None, 300 * day).unwrap();
+        for (id, d) in [("pre", 100u64), ("month", 280), ("old", 300), ("g1", 600), ("g2", 700), ("new", 950)] {
+            peer.archive_group_message(&gid, "x", "received", b"t", Some(id), None, None, None, d * day, None).unwrap();
+        }
+        for (id, d) in [("pa", 300u64), ("pb", 600)] {
+            peer.archive_message("p", "sent", b"t", Some(id), None, None, None, d * day).unwrap();
+        }
+        let (cursor, after) = ((300 * day) as i64, (270 * day) as i64);
+        let windows = me.press_windows("", Some(&gid), cursor, after);
+        assert_eq!(windows.len(), 1, "few held rows: one window");
+        let (before, w_after, mut have) = windows.into_iter().next().unwrap();
+        assert_eq!((before, w_after), (i64::MAX, after), "the month and on up to now");
+        have.sort_unstable();
+        assert_eq!(have.len(), 2);
+        let ids = |rows: Vec<ArchivedMessage>| rows.into_iter().map(|m| m.message_id.unwrap()).collect::<Vec<_>>();
+        let (page, cut) = peer.load_history_gap_page("", Some(&gid), 200, before, w_after, &have);
+        assert_eq!(ids(page), ["month", "g1", "g2"], "the month and the gap, no held row");
+        assert!(!cut);
+        let (page, cut) = peer.load_history_gap_page("", Some(&gid), 2, before, w_after, &have);
+        assert_eq!(ids(page), ["g1", "g2"], "the newest missing rows first");
+        assert!(cut, "the rest is asked for next");
+        // The follow-up below the oldest row sent, g1 now held too.
+        let mut have2 = have.clone();
+        have2.push(crate::archive::held_tag("g1"));
+        have2.sort_unstable();
+        let (page, cut) = peer.load_history_gap_page("", Some(&gid), 2, (600 * day) as i64 + 1, w_after, &have2);
+        assert_eq!(ids(page), ["month"]);
+        assert!(!cut);
+        // 1:1 the same way.
+        let (b, a, mut have) = me.press_windows("p", None, cursor, after).remove(0);
+        have.sort_unstable();
+        assert_eq!(ids(peer.load_history_gap_page("p", None, 200, b, a, &have).0), ["pb"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The answer to a press (window up to now) brings cleared rows back, and a
+    /// row relayed by a member that did not write it is marked as relayed.
+    #[test]
+    fn history_press_answer_restores_cleared_and_marks_relayed() {
+        let dir = std::env::temp_dir().join(format!("typeon-gaprelay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut me = core_on_disk(&dir);
+        let gid = "group-0123456789abcdef".to_string();
+        let mut g = Group::new(gid.clone(), "g".into(), "R".into(), 1);
+        g.members.push(crate::group::GroupMember { identity_id: "A".into(), added_at: 1, added_by: "R".into() });
+        me.groups.insert(gid.clone(), g);
+        let day: u64 = 24 * 60 * 60 * 1000;
+        me.raise_history_floor(&gid, 500 * day);
+        let bound = |author: &str, rest: &str| format!("{}{}", hex::encode(crate::util::group_msg_tag(&gid, author, rest)), rest);
+        let (by_r, by_a) = (bound("R", "-r1"), bound("A", "-a1"));
+        let row = |direction: &str, id: &str, sender: Option<&str>, at: u64| SyncedMessage {
+            direction: direction.into(), text: "t".into(), timestamp: at, sender_identity_id: sender.map(Into::into),
+            message_id: Some(id.into()), sent_at_ms: at, is_deleted: false, is_edited: false, reactions: Vec::new(),
+        };
+        let answer = || MessageContent::HistorySyncResponse {
+            request_id: "req".into(), group_id: Some(gid.clone()), more: false,
+            messages: vec![row("sent", &by_r, None, 280 * day), row("received", &by_a, Some("A"), 600 * day)],
+        };
+        // Not a press (chat-open sync): the cleared row stays out.
+        me.outstanding_history_requests.insert("req".into(), (None, Some(gid.clone()), current_time_ms(), None));
+        me.dispatch_received_content(None, "d".repeat(64), "R".into(), "resp0".into(), answer(), 0).unwrap();
+        assert!(!me.message_exists_in_chat(&by_r, Some(gid.as_str()), ""), "below the floor without a press");
+        me.history_answered_by.clear();
+        me.outstanding_history_requests.insert("req".into(), (None, Some(gid.clone()), current_time_ms(), Some((i64::MAX, (270 * day) as i64))));
+        me.dispatch_received_content(None, "d".repeat(64), "R".into(), "resp1".into(), answer(), 0).unwrap();
+        assert!(me.message_exists_in_chat(&by_r, Some(gid.as_str()), ""), "a cleared row comes back on a press");
+        assert!(me.message_exists_in_chat(&by_a, Some(gid.as_str()), ""), "the gap row");
+        assert_eq!(me.group_row_relayed_by(&gid, &by_r), None, "the author's own copy is verified");
+        assert_eq!(me.group_row_relayed_by(&gid, &by_a).as_deref(), Some("R"), "relayed by a non-author");
+        assert!(me.history_floor(&gid) <= 280 * day, "the floor goes down to the row written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A device that said it is going offline (keepalive `bye`) is not
     /// dialed, even forced, for `RECONNECT_BACKOFF_MAX_MS`; then once per
     /// that interval until its connection clears the park mark.
@@ -1764,7 +1855,7 @@ mod authz_coverage_tests {
     fn sensitive_arms_keep_their_guards() {
         let src = crate::CORE_SRC;
         let cases: &[(&[&str], usize, &str)] = &[
-            (&["MessageContent::HistorySyncRequest { limit,", " before_timestamp, group_id, after_timestamp } =>"], 5000, "is_member(&sender_identity_id)"),
+            (&["MessageContent::HistorySyncRequest { limit,", " before_timestamp, group_id, after_timestamp, have } =>"], 5000, "is_member(&sender_identity_id)"),
             (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, more } =>"], 4000, "outstanding_history_requests.get("),
             (&["MessageContent::HistorySyncResponse { request_id,", " messages, group_id, more } =>"], 4000, "history_answered_by.get("),
             (&["fn adopt_device_link", "(&mut self"], 5000, "link_request_open_until"),

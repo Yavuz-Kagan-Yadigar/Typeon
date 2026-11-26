@@ -852,6 +852,12 @@ pub enum MessageContent {
         /// rows inside it.
         #[serde(default)]
         after_timestamp: Option<i64>,
+        /// With a window: tags (`held_tag`, first 8 bytes of SHA-256 of the message id) of
+        /// the rows the requester already holds in it. The responder sends only the other
+        /// rows, so one window can run up to now and fill gaps the requester missed while
+        /// offline. At most 4096; the responder sorts them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "bounded::seq_4096")]
+        have: Vec<u64>,
     },
     /// `request_id` is the `MessagePacketHeader.message_id` of the matching
     /// `HistorySyncRequest`. The requester uses it to match this response to its request

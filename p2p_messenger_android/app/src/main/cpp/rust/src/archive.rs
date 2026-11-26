@@ -32,7 +32,7 @@ impl P2PCore {
     pub(crate) fn request_history_sync(&mut self, peer_device_fingerprint: String, limit: u32) -> Result<(), String> {
         // A chat open sends a `HistorySyncRequest`, which is on the `regen_content` list. Without cancellation, every open adds a pending row that is re-sent for up to 7 days until a `HistorySyncResponse` arrives, even if the peer is offline. Before sending a new request, cancel the pending full-sync request (`before_timestamp: None`) to this peer. The newest one does the same job.
         self.cancel_pending_history_requests(&peer_device_fingerprint, None);
-        let content = MessageContent::HistorySyncRequest { limit, before_timestamp: None, group_id: None, after_timestamp: None };
+        let content = MessageContent::HistorySyncRequest { limit, before_timestamp: None, group_id: None, after_timestamp: None, have: Vec::new() };
         self.send_message_content(peer_device_fingerprint, &content, None).map(|_| ())
     }
 
@@ -40,9 +40,10 @@ impl P2PCore {
     /// older than `before_timestamp`. The reply arrives asynchronously (see the `HistorySyncResponse` arm: if `before_timestamp` is set, it produces an "older_history" event).
     ///
     /// The window `[after, before)` of a "Fetch older history" press. Older presses are not cancelled: each asks for its own window.
-    pub(crate) fn request_older_history(&mut self, peer_device_fingerprint: &str, before: i64, after: i64) -> Result<(), String> {
+    /// `have`: `held_tag`s of the rows already here in the window (see `press_windows`).
+    pub(crate) fn request_older_history(&mut self, peer_device_fingerprint: &str, before: i64, after: i64, have: Vec<u64>) -> Result<(), String> {
         let content = MessageContent::HistorySyncRequest {
-            limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: None, after_timestamp: Some(after),
+            limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: None, after_timestamp: Some(after), have,
         };
         self.send_message_content(peer_device_fingerprint.to_string(), &content, None).map(|_| ())
     }
@@ -50,11 +51,11 @@ impl P2PCore {
     /// Group counterpart of `request_older_history`. Group messages are pairwise fan-out, so there is no single authority. The request goes to up to
     /// `ASKED_PER_PRESS` reachable other members, the founder and the longest-standing first. The first reply fills the gap. Later replies are silently ignored by the `message_exists_with_id`
     /// check (see there).
-    pub(crate) fn request_older_group_history(&mut self, group_id: &str, before: i64, after: i64) -> Result<(), String> {
+    pub(crate) fn request_older_group_history(&mut self, group_id: &str, before: i64, after: i64, have: Vec<u64>) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(group_id).cloned_group()?;
         let content = MessageContent::HistorySyncRequest {
-            limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: Some(group_id.to_string()), after_timestamp: Some(after),
+            limit: HISTORY_SYNC_MAX_MESSAGES, before_timestamp: Some(before), group_id: Some(group_id.to_string()), after_timestamp: Some(after), have,
         };
         // Not every member: each answers up to 512 KiB and pages on its own, and all but the first answer bring almost nothing new.
         // The founder and the longest-standing members hold the oldest rows; unreachable ones are passed over.
@@ -1403,6 +1404,96 @@ impl P2PCore {
         window.map(|w| (w, oldest))
     }
 
+    /// `held_tag`s and send times of the rows of a chat (`group_id`, else the
+    /// 1:1 chat under `chat_key`) sent in `[after, before)`, newest first, at
+    /// most `cap`. Index range on `idx_messages_*_sent`, no decryption.
+    pub(crate) fn held_tags(&self, chat_key: &str, group_id: Option<&str>, before: i64, after: i64, cap: usize) -> Vec<(u64, i64)> {
+        let Some(conn) = &self.db else { return Vec::new() };
+        let (cond, key) = match group_id {
+            Some(g) => ("group_id = ?1", g),
+            None => ("peer_device_fingerprint = ?1 AND group_id IS NULL", chat_key),
+        };
+        let t = "COALESCE(NULLIF(sent_at_ms,0), timestamp)";
+        conn.prepare(&format!(
+            "SELECT message_id, {t} FROM messages WHERE {cond} AND message_id IS NOT NULL AND {t} < ?2 AND {t} >= ?3
+             ORDER BY {t} DESC, id DESC LIMIT ?4"
+        ))
+        .and_then(|mut st| st.query_map(params![key, before, after, cap.min(i64::MAX as usize) as i64], |r| {
+            Ok((held_tag(&r.get::<_, String>(0)?), r.get::<_, i64>(1)?))
+        }).map(|it| it.flatten().collect()))
+        .unwrap_or_default()
+    }
+
+    /// The peer windows of one "Fetch older history" press whose month is
+    /// `[after, cursor)`: that month AND everything after it up to now, so a
+    /// gap newer than the oldest local row (missed while offline) is filled
+    /// too. Each window carries the tags of the rows already here, and the
+    /// peer sends only the others. Over `HISTORY_FETCH_HELD_MAX` held rows the
+    /// span is split: the newest held rows with the span from the oldest of
+    /// them to now, and the month on its own (its tags capped, a few held
+    /// rows may come again and dedup by id).
+    /// ponytail: with more held rows than the cap, the span between the month
+    /// and the newest held rows is not checked for gaps. Send several capped
+    /// spans if that matters.
+    pub(crate) fn press_windows(&self, chat_key: &str, group_id: Option<&str>, cursor: i64, after: i64) -> Vec<(i64, i64, Vec<u64>)> {
+        let cap = HISTORY_FETCH_HELD_MAX;
+        let held = self.held_tags(chat_key, group_id, i64::MAX, after, cap + 1);
+        let tags = |v: &[(u64, i64)]| v.iter().map(|(t, _)| *t).collect::<Vec<u64>>();
+        if held.len() <= cap {
+            return vec![(i64::MAX, after, tags(&held[..]))];
+        }
+        let from = held[cap - 1].1;
+        let month = self.held_tags(chat_key, group_id, cursor, after, cap);
+        vec![(i64::MAX, from, tags(&held[..cap])), (cursor, after, tags(&month[..]))]
+    }
+
+    /// One page of a press answer (the `HistorySyncRequest` arm): the newest
+    /// `limit` rows sent in `[after, before)` whose `held_tag` is not in
+    /// `have` (sorted), oldest first, without marks. The ids are scanned first
+    /// (no decryption, at most `have.len() + limit + 1` rows), then only the
+    /// span down to the last row kept is loaded. `cut`: rows of the window
+    /// may remain below the page.
+    /// ponytail: the loaded span also decrypts the held rows inside it (at
+    /// most the scan length). Load by row id if that ever shows up.
+    pub(crate) fn load_history_gap_page(&self, chat_key: &str, group_id: Option<&str>, limit: u32, before: i64, after: i64, have: &[u64]) -> (Vec<ArchivedMessage>, bool) {
+        let Some(conn) = &self.db else { return (Vec::new(), false) };
+        if limit == 0 || before <= after { return (Vec::new(), false) }
+        let (cond, key) = match group_id {
+            Some(g) => ("group_id = ?1", g),
+            None => ("peer_device_fingerprint = ?1 AND group_id IS NULL", chat_key),
+        };
+        let t = "COALESCE(NULLIF(sent_at_ms,0), timestamp)";
+        // Same rows as the loader below (`expiry_filter(false)`): no disappearing rows.
+        let scan_cap = have.len() + limit as usize + 1;
+        let rows: Vec<(Option<String>, i64)> = conn.prepare(&format!(
+            "SELECT message_id, {t} FROM messages WHERE {cond} AND expire_secs IS NULL AND {t} < ?2 AND {t} >= ?3
+             ORDER BY {t} DESC, id DESC LIMIT ?4"
+        ))
+        .and_then(|mut st| st.query_map(params![key, before, after, scan_cap as i64], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)))
+            .map(|it| it.flatten().collect()))
+        .unwrap_or_default();
+        let missing = |id: Option<&str>| id.is_some_and(|id| have.binary_search(&held_tag(id)).is_err());
+        let mut misses = 0u32;
+        let mut scanned = rows.len();
+        let mut lo = after;
+        let mut cut = rows.len() >= scan_cap;
+        if cut {
+            lo = rows.last().map_or(after, |r| r.1);
+        }
+        for (i, (mid, at)) in rows.iter().enumerate() {
+            if !missing(mid.as_deref()) { continue; }
+            misses += 1;
+            if misses >= limit {
+                (lo, scanned, cut) = (*at, i + 1, true);
+                break;
+            }
+        }
+        if misses == 0 { return (Vec::new(), cut) }
+        let mut page = self.load_history_fetch_page(chat_key, group_id, scanned as u32, before, lo);
+        page.retain(|m| missing(m.message_id.as_deref()));
+        (page, cut)
+    }
+
     /// One "Fetch older history" page of a chat (`group_id`, else the 1:1
     /// chat under `peer_device_fingerprint`): the newest `limit` rows sent in
     /// `[after, before)`, oldest first, without marks.
@@ -1705,4 +1796,12 @@ fn expiry_filter(with_marks: bool) -> String {
     } else {
         "AND expire_secs IS NULL".to_string()
     }
+}
+
+/// The tag of a message id in `HistorySyncRequest.have`: the first 8 bytes of
+/// its SHA-256. A collision only means one row is not sent again.
+pub(crate) fn held_tag(message_id: &str) -> u64 {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(message_id.as_bytes());
+    u64::from_be_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
 }

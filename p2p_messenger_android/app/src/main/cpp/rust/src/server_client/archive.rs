@@ -609,11 +609,20 @@ impl P2PCore {
         self.history_fetch_pages.insert(conv_key.clone(), crate::HISTORY_FETCH_MAX_PAGES);
         let (b, a) = (before as i64, after as i64);
         // One unreachable source is not an error: the others remain.
+        // Peers get the month AND the span up to now with the ids held here (`press_windows`): a gap newer than the oldest row
+        // is filled too. Own devices keep the month: the sibling backfill (`request_sibling_backfill`) already fills gaps.
         let sent = if is_group {
-            let peers = self.request_older_group_history(chat_key, b, a).is_ok();
+            let mut peers = false;
+            for (wb, wa, have) in self.press_windows("", Some(chat_key), b, a) {
+                peers |= self.request_older_group_history(chat_key, wb, wa, have).is_ok();
+            }
             self.request_older_sibling_history(None, Some(chat_key), b, a, None).is_ok() | peers
         } else {
-            let peer = self.request_older_history(chat_key, b, a).is_ok();
+            let canonical = self.canonical_peer_key(chat_key);
+            let mut peer = false;
+            for (wb, wa, have) in self.press_windows(&canonical, None, b, a) {
+                peer |= self.request_older_history(chat_key, wb, wa, have).is_ok();
+            }
             self.request_older_sibling_history(Some(&conv_key), None, b, a, None).is_ok() | peer
         };
         // Returns false at once without the archive key or a history server.
