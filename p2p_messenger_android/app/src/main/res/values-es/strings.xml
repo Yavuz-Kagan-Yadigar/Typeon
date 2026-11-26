@@ -124,6 +124,8 @@
     <string name="tor_state_direct">Ahora: Directa</string>
     <string name="tor_state_bridge">Ahora: usando un puente, porque Tor estaba bloqueado</string>
     <string name="msg_tor_bridges_help">Consigue tus propios puentes en https://bridges.torproject.org/options y pégalos abajo. Si lo dejas vacío, se usan los puentes públicos integrados de Tor.</string>
+    <string name="lbl_tor_always_bridge">Usar siempre el puente</string>
+    <string name="msg_tor_always_bridge">Nunca intenta primero la conexión directa. Actívalo donde usar Tor ya sea un riesgo: la red nunca verá una conexión directa a Tor desde este dispositivo. Gasta más batería y datos.</string>
     <string name="hint_tor_bridges">Pega las líneas de puentes obfs4, una por línea</string>
     <string name="msg_tor_mode_restart">Snowflake y los puentes solo se usan cuando Tor está bloqueado: la app intenta primero Directa y cambia tras un minuto sin Tor. Consumen más batería que Directa. La app se reinicia para aplicar un cambio.</string>
     <string name="msg_tor_bridges_invalid">Puente no válido: %1$s</string>

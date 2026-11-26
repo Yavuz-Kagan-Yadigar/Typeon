@@ -24,6 +24,8 @@ impl ServerCore {
 
             // Anonymous: no enrollment, the deposit secret or cancel secret is the authorisation.
             req @ (ServerRequest::Deposit { .. } | ServerRequest::Cancel { .. }) => self.handle_anonymous(peer, req),
+            // Anonymous too: the file id is the authorisation. Its own limits (`serve_blob_get`).
+            ServerRequest::BlobGet { file_id, chunk_index } => self.serve_blob_get(peer, file_id, chunk_index),
 
             // --- Enrollment is REQUIRED from here on ---
             other => {
@@ -484,9 +486,11 @@ impl ServerCore {
                 ServerResponse::Ok
             }
 
-            // Types a client may never send to the server here (`Deposit` and `Cancel` went to `handle_anonymous`).
+            // Types a client may never send to the server here (`Deposit`, `Cancel` and `BlobGet` were handled
+            // without enrollment).
             ServerRequest::Deposit { .. }
             | ServerRequest::Cancel { .. }
+            | ServerRequest::BlobGet { .. }
             | ServerRequest::Hello { .. }
             | ServerRequest::Enroll { .. }
             | ServerRequest::Rebind { .. }

@@ -860,6 +860,11 @@ impl P2PCore {
                 self.finish_blob_upload(&blob_id);
             }
 
+            // --- Download chunks (anonymous) ---
+            (ServerInflight::BlobChunk { server_id, file_id, chunk_index }, response) => {
+                self.anon_chunk_answer(&server_id, &file_id, chunk_index, Some(response));
+            }
+
             // --- Errors ---
             (inflight, ServerResponse::Err(code)) => self.handle_server_error(inflight, code),
 
@@ -1117,6 +1122,9 @@ impl P2PCore {
         }
         if let ServerInflight::Ack { server_id, acks } = &inflight {
             self.restage_acks(server_id, acks.clone());
+        }
+        if let ServerInflight::BlobChunk { server_id, file_id, chunk_index } = &inflight {
+            self.anon_chunk_answer(server_id, file_id, *chunk_index, None);
         }
         // If the deposit failed, undo the "already deposited" mark. Otherwise the retry path would stay closed (see `server_deposited`).
         if let ServerInflight::Deposit { server_id, dedup_key, .. } = &inflight {

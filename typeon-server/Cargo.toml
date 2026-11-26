@@ -24,7 +24,7 @@ path = "src/bin/typeon-server.rs"
 p2p_messenger_core = { path = "../p2p_messenger_android/app/src/main/cpp/rust" }
 
 # Versions MUST match the ones the client uses. `ServerRequest` and
-# `FileChunkRequest` come from the core and are passed as parameters to libp2p's
+# `ServerResponse` come from typeon-crypto and are passed as parameters to libp2p's
 # `request_response::cbor::Behaviour`. Two different libp2p versions would mean
 # two types with the same name that are NOT the same type, and the build would
 # fail. The same applies to rusqlite (`links = "sqlite3"` conflict, see the note

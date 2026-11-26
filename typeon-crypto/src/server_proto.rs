@@ -67,7 +67,9 @@ pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 ///    carries the secrets (`archive_bucket_for_purge_secret`).
 /// 9: one inbound mailbox per device and direction; `Deposit` and `Cancel` are
 ///    anonymous (no enrollment) and carry a deposit secret / cancel secret.
-pub const SERVER_PROTOCOL_VERSION: u16 = 9;
+/// 10: file chunks are fetched with the anonymous `BlobGet`; the server no longer
+///    speaks filexfer.
+pub const SERVER_PROTOCOL_VERSION: u16 = 10;
 
 /// Maximum payload of one `Deposit`. See the size-limit note at the top of the
 /// module: the codec's hard limit is 1 MiB, and this leaves room for CBOR framing.
@@ -335,6 +337,14 @@ pub enum ServerRequest {
         upload_secret: Vec<u8>,
     },
 
+    /// Fetches one chunk of a complete blob. Anonymous, like `Deposit`, on the same
+    /// kind of connection: the server learns that some peer downloaded `file_id`, not
+    /// which enrollment did, so an upload and its downloads do not link two users.
+    /// The file id is the authorisation: it is a hash of the uploader's secret, known
+    /// only to the file's recipients. Answered with `Chunk`, `Err(NotFound)` (unknown,
+    /// incomplete, or out of range) or `Err(RateLimited)`.
+    BlobGet { file_id: String, chunk_index: u32 },
+
     // --- Server to client (the one request in the reverse direction) ---
     /// "Mail is waiting." The payload is not carried here, and mailbox ids are not
     /// listed. The client replies `Ok` and calls `Fetch` in its next `poll_events`
@@ -392,6 +402,11 @@ pub enum ServerResponse {
     /// that did not verify, or a key other than the mailbox's. Do not send these
     /// again. If all ids registered, the reply is a plain `Ok`.
     Registered { proof_needed: Vec<MailboxId>, refused: Vec<MailboxId> },
+    /// `BlobGet`: the chunk as stored (ciphertext + AEAD tag).
+    Chunk {
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
     Ok,
     Err(ServerErrorCode),
 }
@@ -465,6 +480,8 @@ pub enum ServerErrorCode {
     /// blob was swept, or chunks are missing. Not permanent: the client uploads again
     /// from chunk 0.
     BlobIncomplete,
+    /// `BlobGet`: no complete blob under this id, or the chunk is out of range.
+    NotFound,
 }
 
 // ---------------------------------------------------------------------------

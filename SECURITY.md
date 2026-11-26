@@ -21,9 +21,10 @@ These are deliberate trade-offs, each explained further down:
   peer on the same LAN is dialled directly. Use Tor for reachability across
   NAT, not for anonymity from your contacts.
 - **A store-and-forward server sees which enrolled device reads which
-  mailbox, and when mail arrives.** Deposits are anonymous, so it does not see
-  who writes to whom, but timing can hint at it (see "What it can see"). It
-  never sees content.
+  mailbox, and when mail arrives.** Deposits and attachment downloads are
+  anonymous, so for text and files it does not see who writes to whom, but
+  timing can hint at it (see "What it can see"). Calls relayed through the
+  server are not covered: they link caller and callee. It never sees content.
 - **The server history archive is not forward-secret.** A leaked archive key
   decrypts every record uploaded with it, and a server can serve an older
   revision of a record to a freshly linked device without it noticing.
@@ -518,12 +519,22 @@ observer that this device tried to reach Tor. To limit how often that
 happens, a block is remembered for 24 h (file `direct-blocked` in arti's
 state directory): starts within that time go straight to the bridge. Once a
 process is on the bridge it never goes back to Direct. A user who must never
-be seen connecting to Tor directly should not rely on this fallback on a new
-network. A bridge that is not ready for 5 min of online time, at the start or
+be seen connecting to Tor directly turns on **Always use the bridge**
+(Settings > Network > Tor connection; server: `TYPEON_SERVER_TOR_ALWAYS_BRIDGE=1`):
+the app then starts on the bridge and never tries Direct. A bridge that is not ready for 5 min of online time, at the start or
 after it has died, is parked for growing pauses (10 min doubling to 2 h,
 with 5 min tries in between), so a dead Snowflake does not churn the radio
 and battery all day. arti uses one bridge as its primary guard; the other
 bridge line is only the fallback when the first is down.
+
+**Channel padding is reduced for battery.** arti runs with
+`PaddingLevel::Reduced`, and its idle padding interval is stretched to
+225-245 s (upstream allows at most 60 s; the vendored tor-netdir lifts the
+cap, see `vendor/PATCHES.md`). An idle phone on LTE so sends far fewer
+padding cells. The cost: Tor's padding is a defence against an ISP that keeps
+netflow records of your connection to the guard, and less padding makes
+those records more useful for traffic analysis. The other vendored arti
+patches are listed and risk-rated in the same file.
 
 **Still true regardless of Tor:** complete/absolute untraceability against a
 **global passive adversary** (one observing traffic entering *and* exiting
@@ -632,10 +643,17 @@ certificate.
     connection or the next radio window, which blurs this a little, not much.
   - **Boxes per reader.** The number of inbound boxes an enrollment reads is
     about its number of contact devices; their activity profiles stay visible.
-  - **Call relay and attachments are not covered.** Call media relay frames go
-    over the caller's enrollment connection to the callee's relay box, and a
-    server-held attachment is uploaded by the sender's enrollment and fetched
-    over the recipient's main connection. Both link the two ends.
+  - **Attachments: the upload is enrolled, the download is not.** The sender's
+    enrollment uploads the blob (its quota pays for it). Recipients fetch its
+    chunks with `BlobGet` over the anonymous connection, so the server sees
+    "enrollment A uploaded file X, some peers downloaded it", not who. Timing
+    still hints: B fetching its mail and an anonymous download of X moments
+    later. A download made while a deposit is in flight shares that burst's
+    PeerId (previous point).
+  - **Call relay is not covered.** Call media relay frames go over the
+    caller's enrollment connection to the callee's relay box. That links the
+    two ends. So "the server cannot see who talks to whom" holds for text and
+    files (up to timing), not for the whole social graph.
   The deposit secret is no secret from the server (it sees it on each
   deposit); it only keeps others who learn a box id from writing to it.
 - **Who made first contact with whom, by device fingerprint.** `Handshake` and

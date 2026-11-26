@@ -163,9 +163,9 @@ impl TorHandle {
         trim_dir_cache(cache_dir);
 
         // A configured bridge is a fallback: Direct first, unless Direct was blocked here in the last 24 h.
-        let bridge_configured = PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        let (bridge_configured, always) = PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map_or((false, false), |pt| (true, pt.always));
         let blocked_file = std::path::Path::new(state_dir).join(DIRECT_BLOCKED_FILE);
-        let on_bridge = bridge_configured && recently_blocked(&blocked_file, std::time::SystemTime::now());
+        let on_bridge = bridge_configured && (always || recently_blocked(&blocked_file, std::time::SystemTime::now()));
         BRIDGE_IN_USE.store(on_bridge, std::sync::atomic::Ordering::SeqCst);
         if on_bridge {
             log::info!("Tor: Direct was blocked less than 24 h ago, starting on the bridge");
@@ -504,6 +504,9 @@ struct PtSetup {
     /// One line at a time (`Hop::Bridge(i)`): Snowflake (a session per bridge is costly) and the built-in obfs4
     /// list (shared by every user, so one bridge each spreads the load). The user's own obfs4 lines go all at once.
     one_at_a_time: bool,
+    /// Start on the bridge, never try Direct first (user setting). A censor that watches for Tor then never sees a
+    /// Direct attempt from this device.
+    always: bool,
 }
 static PT_SETUP: Mutex<Option<PtSetup>> = Mutex::new(None);
 
@@ -717,9 +720,10 @@ pub fn parse_bridge_lines(text: &str) -> Result<Vec<String>, String> {
 
 /// Sets how the NEXT `TorHandle::launch` reaches Tor: "direct" (default), "snowflake", or "obfs4" with
 /// `bridges`. A bridge mode is a fallback: arti starts Direct and moves to the bridge only when Direct is
-/// blocked (see `watch_bridge_fallback`). A missing PT binary is not an error here: once on the bridge,
-/// arti then cannot connect (fails closed, never back to Direct within the process).
-pub fn set_transport(mode: &str, bridges: &str, pt_dir: &str) -> Result<(), String> {
+/// blocked (see `watch_bridge_fallback`), unless `always`: then it starts on the bridge and never tries Direct.
+/// A missing PT binary is not an error here: once on the bridge, arti then cannot connect (fails closed, never
+/// back to Direct within the process). `always` is ignored for "direct".
+pub fn set_transport(mode: &str, bridges: &str, pt_dir: &str, always: bool) -> Result<(), String> {
     let setup = match mode {
         "direct" => None,
         "snowflake" | "obfs4" => {
@@ -738,7 +742,7 @@ pub fn set_transport(mode: &str, bridges: &str, pt_dir: &str) -> Result<(), Stri
             } else {
                 (parse_bridge_lines(bridges)?, false)
             };
-            Some(PtSetup { protocol, binary, lines, one_at_a_time })
+            Some(PtSetup { protocol, binary, lines, one_at_a_time, always })
         }
         other => return Err(format!("unknown Tor mode: {other}")),
     };
@@ -1050,7 +1054,7 @@ mod bridge_tests {
 
     #[test]
     fn hop_configs_build() {
-        set_transport("snowflake", "", "/nonexistent").unwrap();
+        set_transport("snowflake", "", "/nonexistent", false).unwrap();
         let d = std::env::temp_dir().join(format!("typeon-hop-{}", std::process::id()));
         let (st, ca) = (d.join("s"), d.join("c"));
         let (st, ca) = (st.to_str().unwrap(), ca.to_str().unwrap());
@@ -1066,6 +1070,6 @@ mod bridge_tests {
             let want = match hop { Hop::Direct => 0, Hop::Bridge(_) => 1, Hop::Paused => SNOWFLAKE_BRIDGES.len() };
             assert_eq!(n, want, "snowflake lines in the config");
         }
-        set_transport("direct", "", "").unwrap();
+        set_transport("direct", "", "", false).unwrap();
     }
 }

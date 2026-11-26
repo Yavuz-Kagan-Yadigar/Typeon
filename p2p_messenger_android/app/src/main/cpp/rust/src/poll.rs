@@ -922,32 +922,8 @@ impl P2PCore {
                     }
                 }
                 FileChunkEventLocal::OutboundFailure { request_id } => {
-                    // Before, a single network error (for example a brief Tor circuit drop) failed the download at once. Now the same chunk is retried for up to
-                    // `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min).
                     if let Some((file_id, chunk_index)) = self.download_request_ids.remove(&request_id) {
-                        // Drop it from the in-flight set. `retry_or_give_up_download` refills the window.
-                        if let Some(s) = self.active_downloads.get_mut(&file_id) {
-                            s.inflight_chunks.remove(&chunk_index);
-                            s.chunk_sent_at.remove(&chunk_index);
-                            // Timeout or error means the path is overloaded or dropped: halve the window (see `DOWNLOAD_WINDOW_MIN`).
-                            s.window = (s.window / 2).max(DOWNLOAD_WINDOW_MIN);
-                            // A source that is gone is asked again ten times
-                            // slower: every request to it fails at once, and
-                            // at the normal delay that was a dial every 3 s
-                            // for the 10 minutes before giving up. Waiting for
-                            // `retry_at` does not hold the wake lock (`downloads_busy`).
-                            let connected = self.swarm.as_ref().map_or(false, |sw| sw.is_connected(&s.peer_id));
-                            s.retry_at = current_time_ms() + if connected { DOWNLOAD_RETRY_DELAY_MS } else { 10 * DOWNLOAD_RETRY_DELAY_MS };
-                        }
-                        // A dead parallel circuit may be the cause. Do not decide on a single event. Count it (see `note_bulk_timeout`).
-                        if let Some(p) = self.active_downloads.get(&file_id).map(|s| s.peer_id) {
-                            self.note_bulk_timeout(p);
-                        }
-                        // Only this one request failed: not `retry_or_give_up_download`,
-                        // which threw away every other request in flight (their
-                        // answers then matched no id) and counted toward a source
-                        // switch. The index is asked for again by the next chunk
-                        // answer, or after `DOWNLOAD_RETRY_DELAY_MS` (`retry_at`).
+                        self.chunk_request_failed(&file_id, chunk_index);
                     }
                 }
             }

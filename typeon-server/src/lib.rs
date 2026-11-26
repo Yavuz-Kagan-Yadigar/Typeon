@@ -47,7 +47,7 @@ use log::{debug, error, info, warn};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use p2p_messenger::attachments::{self, FileChunkRequest, FileChunkResponse};
+use p2p_messenger::attachments;
 use p2p_messenger::call::{encode_frame, pump_writes, read_frame, LINK_QUEUE, RELAY_PROTOCOL};
 use p2p_messenger::server_proto::{
     self, MailItem, ServerErrorCode, ServerLimits, ServerRequest, ServerResponse, MAX_DEPOSIT_BYTES,
@@ -70,11 +70,6 @@ pub use config::public_join_token;
 use relay_streams::*;
 use limits::*;
 
-/// Attachment protocol id. The SAME protocol clients already speak. The server registers it with
-/// `ProtocolSupport::Inbound`, so a server-held attachment is just another source peer to a client. The
-/// client's whole download state machine runs unchanged.
-const FILE_TRANSFER_PROTOCOL: &str = "/p2pmessenger/filexfer/1.0.0";
-
 /// Fixed port that libp2p must listen on while Tor is on. The onion service bridges incoming streams here
 /// (same reason as `TOR_LIBP2P_PORT` in the core, but for the server's own port).
 const TOR_LIBP2P_PORT: u16 = 42612;
@@ -89,7 +84,7 @@ const NOTIFY_RESEND_MS: u64 = 20_000;
 /// Maximum requests per connection per minute. Unlike the quota, this is an INSTANT limit. Its purpose is to
 /// stop one peer from using up the server's disk and CPU alone.
 const RATE_WINDOW_MS: u64 = 60_000;
-/// File-chunk requests per peer per `RATE_WINDOW_MS` (see `serve_chunk`). Tor carries about one 256 KiB chunk
+/// File-chunk requests per peer per `RATE_WINDOW_MS` (see `serve_blob_get`). Tor carries about one 256 KiB chunk
 /// a second. 10 per second is far above a real download and caps one peer at about 2.5 MiB/s of disk reads.
 const CHUNKS_PER_MINUTE: u32 = 600;
 /// Blobs (files on disk) one enrollment may hold. Bytes have their own quota. A heavy month of attachments
@@ -120,6 +115,10 @@ const MAX_ANON_BOXES_PER_PEER: usize = 512;
 /// refill per ms (20 a second). Refilled on access, no timer.
 const ANON_BUCKET_CAP: f64 = 3_000.0;
 const ANON_REFILL_PER_MS: f64 = 0.02;
+/// Global token bucket for `BlobGet`, from all connections together: burst size and refill per ms (20 chunks a
+/// second, about 5 MiB/s of disk reads at most). Separate from `ANON_BUCKET_CAP`, so downloads never stop mail.
+const CHUNK_BUCKET_CAP: f64 = 2_400.0;
+const CHUNK_REFILL_PER_MS: f64 = 0.02;
 /// Archive and blob writes stop at `budget - budget / MAIL_RESERVE_DIVISOR`. The rest stays for mail, so a full
 /// archive or blob store does not stop store-and-forward.
 const MAIL_RESERVE_DIVISOR: u64 = 10;
@@ -269,8 +268,6 @@ pub struct ServerConfig {
 pub struct ServerBehaviour {
     /// Mailbox RPC. `Full` lets the server send `Notify` to clients on its own (see `ServerRequest::Notify`).
     server_rpc: request_response::cbor::Behaviour<ServerRequest, ServerResponse>,
-    /// File chunks. `Inbound`: the server only serves them and never requests them.
-    file_chunks: request_response::cbor::Behaviour<FileChunkRequest, FileChunkResponse>,
     identify: identify::Behaviour,
     limits: libp2p::connection_limits::Behaviour,
     /// Relay service, enabled in node mode. `Toggle::from(None)` is deliberate: the relay HOP handler
@@ -349,6 +346,8 @@ pub struct ServerCore {
     deposit_window: HashMap<String, (u64, u64, u32)>,
     /// (`mono_ms` of the last refill, tokens): see `ANON_BUCKET_CAP`.
     anon_bucket: (u64, f64),
+    /// See `CHUNK_BUCKET_CAP`.
+    chunk_bucket: (u64, f64),
     /// `mono_ms` of the last sweep. `None` means sweep on the first tick.
     last_sweep: Option<u64>,
     /// (wall ms, mono ms) pair the wall clock is checked against, and since when (mono ms) it has been off. See
@@ -530,14 +529,6 @@ impl ServerCore {
                         .with_request_timeout(Duration::from_millis(p2p_messenger::server_client_timeout_ms()))
                         .with_max_concurrent_streams(MAX_STREAMS_PER_CONNECTION),
                 );
-                // 90 s (`BLOB_REQUEST_TIMEOUT_MS` in the core), the same as the client's `file_chunks`. Over Tor, the
-                // library's default of 10 s is often too short for a 256 KiB chunk.
-                let file_chunks = request_response::cbor::Behaviour::new(
-                    [(StreamProtocol::new(FILE_TRANSFER_PROTOCOL), ProtocolSupport::Inbound)],
-                    request_response::Config::default()
-                        .with_request_timeout(Duration::from_millis(p2p_messenger::server_client_timeout_ms()))
-                        .with_max_concurrent_streams(MAX_STREAMS_PER_CONNECTION),
-                );
                 let identify = identify::Behaviour::new(identify::Config::new(
                     "/p2pmessenger/1.0.0".to_string(),
                     keypair.public(),
@@ -556,7 +547,7 @@ impl ServerCore {
                 } else {
                     None.into()
                 };
-                ServerBehaviour { server_rpc, file_chunks, identify, limits, relay, stream: libp2p_stream::Behaviour::new() }
+                ServerBehaviour { server_rpc, identify, limits, relay, stream: libp2p_stream::Behaviour::new() }
             })
             .map_err(|e| e.to_string())?
             // Keeps the connection alive through quiet periods and avoids rebuilding Tor circuits for nothing. The
@@ -588,6 +579,7 @@ impl ServerCore {
             notified: HashMap::new(),
             deposit_window: HashMap::new(),
             anon_bucket: (mono_ms(), ANON_BUCKET_CAP),
+            chunk_bucket: (mono_ms(), CHUNK_BUCKET_CAP),
             last_sweep: None,
             clock_anchor: None,
             clock_off_since: None,
@@ -800,13 +792,6 @@ impl ServerCore {
             )) => {
                 if self.live_interest.contains_key(&peer) {
                     self.notified.entry(peer).or_insert((0, 0));
-                }
-            }
-            SwarmEvent::Behaviour(ServerBehaviourEvent::FileChunks(
-                request_response::Event::Message { peer, message },
-            )) => {
-                if let request_response::Message::Request { request, channel, .. } = message {
-                    self.serve_chunk(peer, request, channel);
                 }
             }
             _ => {}

@@ -1,6 +1,8 @@
 //! Attachment offers, chunked downloads and serving chunks.
 
 use super::*;
+use crate::server_client::ServerInflight;
+use crate::server_proto::{ServerErrorCode, ServerRequest, ServerResponse};
 
 impl P2PCore {
 
@@ -697,13 +699,27 @@ impl P2PCore {
         if want.is_empty() {
             return;
         }
-        let mut issued: Vec<(request_response::OutboundRequestId, u32)> = Vec::new();
-        if let Some(swarm) = &mut self.swarm {
+        // A server source is asked over the anonymous connection (`BlobGet`), never over the enrollment connection:
+        // the server would otherwise see which enrollment downloads which upload, and link the two users. Its answers
+        // come back through `anon_chunk_answer`.
+        let server_id = self.server_rt.iter().find(|(_, rt)| rt.peer_id == Some(peer)).map(|(sid, _)| sid.clone());
+        let mut issued: Vec<(Option<request_response::OutboundRequestId>, u32)> = Vec::new();
+        if let Some(server_id) = server_id {
+            for idx in want {
+                let req = ServerRequest::BlobGet { file_id: file_id.to_string(), chunk_index: idx };
+                let inflight = ServerInflight::BlobChunk { server_id: server_id.clone(), file_id: file_id.to_string(), chunk_index: idx };
+                // `false`: no Tor yet. The chunk stays missing; `check_stalled_downloads` asks again.
+                if !self.anon_send(&server_id, req, inflight) {
+                    break;
+                }
+                issued.push((None, idx));
+            }
+        } else if let Some(swarm) = &mut self.swarm {
             for idx in want {
                 let request_id = swarm.behaviour_mut().file_chunks.send_request(
                     &peer, FileChunkRequest { file_id: file_id.to_string(), chunk_index: idx },
                 );
-                issued.push((request_id, idx));
+                issued.push((Some(request_id), idx));
             }
         }
         let now = current_time_ms();
@@ -712,8 +728,62 @@ impl P2PCore {
                 s.inflight_chunks.insert(idx);
                 s.chunk_sent_at.insert(idx, now);
             }
-            self.download_request_ids.insert(request_id, (file_id.to_string(), idx));
+            if let Some(request_id) = request_id {
+                self.download_request_ids.insert(request_id, (file_id.to_string(), idx));
+            }
         }
+    }
+
+    /// The answer to a `BlobGet` sent to `server_id` (`request_next_chunk`), or `None` when none came (timeout, broken
+    /// connection). Taken only while that server is still the download's source and the chunk still in flight: an
+    /// answer after a source switch belongs to the old source (the filexfer path drops those through
+    /// `download_request_ids`).
+    pub(crate) fn anon_chunk_answer(&mut self, server_id: &str, file_id: &str, chunk_index: u32, response: Option<ServerResponse>) {
+        let Some(peer) = self.server_rt.get(server_id).and_then(|rt| rt.peer_id) else { return };
+        if !self.active_downloads.get(file_id).is_some_and(|s| s.peer_id == peer && s.inflight_chunks.contains(&chunk_index)) {
+            return;
+        }
+        let response = match response {
+            Some(ServerResponse::Chunk { data }) => FileChunkResponse::Chunk { data },
+            Some(ServerResponse::Err(ServerErrorCode::NotFound)) => FileChunkResponse::NotFound,
+            Some(ServerResponse::Err(ServerErrorCode::RateLimited)) => FileChunkResponse::Busy,
+            other => {
+                if let Some(r) = other {
+                    warn!("Unexpected answer to a file chunk request: {:?}", std::mem::discriminant(&r));
+                }
+                self.chunk_request_failed(file_id, chunk_index);
+                return;
+            }
+        };
+        self.handle_chunk_response(file_id, chunk_index, response);
+    }
+
+    /// One chunk request got no answer. Before, a single network error (for example a brief Tor circuit drop) failed
+    /// the download at once. Now the same chunk is retried for up to `DOWNLOAD_GIVE_UP_TIMEOUT_MS` (10 min).
+    pub(crate) fn chunk_request_failed(&mut self, file_id: &str, chunk_index: u32) {
+        // Drop it from the in-flight set. `retry_or_give_up_download` refills the window.
+        if let Some(s) = self.active_downloads.get_mut(file_id) {
+            s.inflight_chunks.remove(&chunk_index);
+            s.chunk_sent_at.remove(&chunk_index);
+            // Timeout or error means the path is overloaded or dropped: halve the window (see `DOWNLOAD_WINDOW_MIN`).
+            s.window = (s.window / 2).max(DOWNLOAD_WINDOW_MIN);
+            // A source that is gone is asked again ten times
+            // slower: every request to it fails at once, and
+            // at the normal delay that was a dial every 3 s
+            // for the 10 minutes before giving up. Waiting for
+            // `retry_at` does not hold the wake lock (`downloads_busy`).
+            let connected = self.swarm.as_ref().map_or(false, |sw| sw.is_connected(&s.peer_id));
+            s.retry_at = current_time_ms() + if connected { DOWNLOAD_RETRY_DELAY_MS } else { 10 * DOWNLOAD_RETRY_DELAY_MS };
+        }
+        // A dead parallel circuit may be the cause. Do not decide on a single event. Count it (see `note_bulk_timeout`).
+        if let Some(p) = self.active_downloads.get(file_id).map(|s| s.peer_id) {
+            self.note_bulk_timeout(p);
+        }
+        // Only this one request failed: not `retry_or_give_up_download`,
+        // which threw away every other request in flight (their
+        // answers then matched no id) and counted toward a source
+        // switch. The index is asked for again by the next chunk
+        // answer, or after `DOWNLOAD_RETRY_DELAY_MS` (`retry_at`).
     }
 
     /// Moves the download to its next alternative source (see

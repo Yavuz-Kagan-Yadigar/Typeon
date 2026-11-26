@@ -411,10 +411,21 @@ internal fun SettingsFragment.showTorModeDialog() {
     root.addView(bridgesHelp)
     root.addView(bridgesInput)
     root.addView(errorView)
+    // Off: Direct first, the bridge only once Direct is blocked. On: a censor never sees a Direct attempt.
+    val storedAlways = P2PService.getTorAlwaysBridge(ctx)
+    val alwaysBox = android.widget.CheckBox(ctx).apply {
+        setText(R.string.lbl_tor_always_bridge)
+        isChecked = storedAlways
+    }
+    val alwaysHelp = TextView(ctx).apply { setText(R.string.msg_tor_always_bridge) }
+    root.addView(alwaysBox)
+    root.addView(alwaysHelp)
     fun selected(): String = group.findViewById<View>(group.checkedRadioButtonId)?.tag as? String ?: "direct"
     fun syncVisibility() {
         bridgesInput.visibility = if (selected() == "obfs4") View.VISIBLE else View.GONE
         bridgesHelp.visibility = bridgesInput.visibility
+        alwaysBox.visibility = if (selected() == "direct") View.GONE else View.VISIBLE
+        alwaysHelp.visibility = alwaysBox.visibility
         errorView.visibility = View.GONE
     }
     group.setOnCheckedChangeListener { _, _ -> syncVisibility() }
@@ -439,8 +450,9 @@ internal fun SettingsFragment.showTorModeDialog() {
                 }
             }
             dialog.dismiss()
-            if (mode == current && (mode != "obfs4" || bridges == storedBridges)) return@setOnClickListener
-            P2PService.setTorTransport(ctx, mode, if (mode == "obfs4") bridges else storedBridges)
+            val always = alwaysBox.isChecked
+            if (mode == current && (mode != "obfs4" || bridges == storedBridges) && (mode == "direct" || always == storedAlways)) return@setOnClickListener
+            P2PService.setTorTransport(ctx, mode, if (mode == "obfs4") bridges else storedBridges, always)
             AppRestarter.restart(ctx)
         }
     }

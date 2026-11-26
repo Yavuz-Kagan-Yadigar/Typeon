@@ -117,6 +117,8 @@
     <string name="tor_state_direct">Şu an: Doğrudan</string>
     <string name="tor_state_bridge">Şu an: köprü kullanılıyor, Tor engelliydi</string>
     <string name="msg_tor_bridges_help">Kendi köprülerinizi https://bridges.torproject.org/options adresinden alıp aşağıya yapıştırın. Boş bırakılırsa Tor\'un herkese açık yerleşik köprüleri kullanılır.</string>
+    <string name="lbl_tor_always_bridge">Köprüyü her zaman kullan</string>
+    <string name="msg_tor_always_bridge">Önce doğrudan bağlantı hiç denenmez. Tor kullanmanın kendisi riskliyse bunu açın: ağ bu cihazdan hiçbir zaman doğrudan Tor bağlantısı görmez. Daha fazla pil ve veri harcar.</string>
     <string name="hint_tor_bridges">obfs4 köprü satırlarını yapıştırın, her satıra bir tane</string>
     <string name="msg_tor_mode_restart">Snowflake ve köprüler yalnızca Tor engelliyse kullanılır: uygulama önce doğrudan dener, bir dakika Tor\'a ulaşamazsa geçer. Doğrudan bağlantıdan daha çok pil harcarlar. Değişikliği uygulamak için uygulama yeniden başlar.</string>
     <string name="msg_tor_bridges_invalid">Geçersiz köprü: %1$s</string>

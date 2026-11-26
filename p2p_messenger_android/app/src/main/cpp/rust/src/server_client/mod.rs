@@ -375,6 +375,8 @@ pub(crate) enum ServerInflight {
     ArchivePurge { server_id: String, keys: String, rest: Vec<String> },
     BlobPut { server_id: String, blob_id: String, chunk_index: u32, total_chunks: u32, sent_at: u64 },
     BlobFinish { server_id: String, blob_id: String },
+    /// `BlobGet` on the anonymous connection, for a download whose source is this server (`request_next_chunk`).
+    BlobChunk { server_id: String, file_id: String, chunk_index: u32 },
 }
 
 impl ServerInflight {
@@ -393,7 +395,8 @@ impl ServerInflight {
             | ServerInflight::ArchiveProbe { server_id, .. }
             | ServerInflight::ArchivePurge { server_id, .. }
             | ServerInflight::BlobPut { server_id, .. }
-            | ServerInflight::BlobFinish { server_id, .. } => server_id,
+            | ServerInflight::BlobFinish { server_id, .. }
+            | ServerInflight::BlobChunk { server_id, .. } => server_id,
         }
     }
 }

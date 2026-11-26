@@ -29,6 +29,8 @@ pub struct Prefs {
     pub tor_mode: String,
     /// Pasted obfs4 bridge lines, kept when another mode is picked.
     pub tor_bridges: String,
+    /// Start on the bridge, never try Direct first (core `tor::set_transport` `always`). Start-time only.
+    pub tor_always_bridge: bool,
     pub history_storage_limit_bytes: u64,
     /// Conversation id -> last-read epoch ms. Key is the peer device
     /// fingerprint for 1:1, `"group:<id>"` for groups — the same convention
@@ -94,6 +96,7 @@ impl Default for Prefs {
             tor_enabled: true,
             tor_mode: "direct".to_string(),
             tor_bridges: String::new(),
+            tor_always_bridge: false,
             history_storage_limit_bytes: DEFAULT_HISTORY_LIMIT_BYTES,
             read_state: HashMap::new(),
             pinned: HashSet::new(),

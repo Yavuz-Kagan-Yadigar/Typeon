@@ -166,8 +166,8 @@ pub fn set_node_mode(enabled: bool) {
 
 /// Tor mode for the next `start_network` ("direct", "snowflake", "obfs4"). PT binaries are looked up next
 /// to the executable (Flatpak: /app/bin, Windows: bin\).
-pub fn set_tor_transport(mode: &str, bridges: &str) -> Result<(), String> {
-    parse_unit(api::set_tor_transport(mode, bridges, ""))
+pub fn set_tor_transport(mode: &str, bridges: &str, always_bridge: bool) -> Result<(), String> {
+    parse_unit(api::set_tor_transport(mode, bridges, "", always_bridge))
 }
 
 /// `Err("line N: ...")` for the first bad obfs4 bridge line.

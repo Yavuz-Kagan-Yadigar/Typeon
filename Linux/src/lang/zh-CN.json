@@ -634,5 +634,7 @@
   "🎬 Video": "🎬 视频",
   "🎤 Voice message": "🎤 语音消息",
   "📎 File": "📎 文件",
-  "Open Typeon": "打开 Typeon"
+  "Open Typeon": "打开 Typeon",
+  "Always use the bridge": "始终使用网桥",
+  "Never try Direct first. Use this where using Tor itself is risky. Uses more battery and data.": "从不先尝试直连。在使用 Tor 本身就有风险的地方开启。会消耗更多电量和流量。"
 }

@@ -10,8 +10,13 @@
 //! Tor can go dormant again. `poll_events` drives it (`drive_anon_conns`), and `wait_for_network_activity` wakes on
 //! its events.
 //!
-//! Linkability: deposits that share one connection (one burst) share its PeerId and circuit, so the server can tell
-//! they came from one sender. They are not linked to the enrollment, and the next burst has a new PeerId.
+//! Downloads from a server (`BlobGet`, see `request_next_chunk`) use the same connection, so the server cannot tell
+//! which enrollment fetched an upload.
+//!
+//! Linkability: requests that share one connection (one burst) share its PeerId and circuit, so the server can tell
+//! they came from one sender: several deposits, or a deposit and a download made at the same time. They are not
+//! linked to the enrollment, and the next burst has a new PeerId. A connection per box would hide that too, at a
+//! Tor circuit (and its radio and battery cost) per box; the design keeps one per burst (Description.md).
 
 use super::*;
 use futures::{FutureExt as _, StreamExt as _};
@@ -69,7 +74,7 @@ impl AnonConn {
 impl P2PCore {
     /// Sends `req` to `server_id` over its anonymous connection, opening one if none is open. `false`: no connection
     /// can be made (no Tor, no address); the caller treats the request as not sent.
-    pub(super) fn anon_send(&mut self, server_id: &str, req: ServerRequest, inflight: ServerInflight) -> bool {
+    pub(crate) fn anon_send(&mut self, server_id: &str, req: ServerRequest, inflight: ServerInflight) -> bool {
         if !self.anon_conns.contains_key(server_id) {
             let Some(conn) = self.open_anon_conn(server_id) else { return false };
             self.anon_conns.insert(server_id.to_string(), conn);
@@ -261,14 +266,15 @@ impl P2PCore {
         }
     }
 
-    /// Every deposit and cancel queued or in flight, on any anonymous connection.
+    /// Every deposit, cancel and chunk request queued or in flight, on any anonymous connection.
     pub(super) fn anon_inflight_mut(&mut self) -> impl Iterator<Item = &mut ServerInflight> {
         self.anon_conns
             .values_mut()
             .flat_map(|c| c.queue.iter_mut().map(|(_, i)| i).chain(c.inflight.values_mut()))
     }
 
-    /// A deposit or cancel is queued or in flight: real work for a bounded time (the dial and request timeouts).
+    /// A deposit, cancel or chunk request is queued or in flight: real work for a bounded time (the dial and request
+    /// timeouts).
     pub(crate) fn anon_busy(&self) -> bool {
         self.anon_conns.values().any(AnonConn::busy)
     }

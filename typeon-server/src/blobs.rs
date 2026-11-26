@@ -83,7 +83,7 @@ impl ServerCore {
         if state.owner != e.enrollment_id {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
-        // A verified blob is final. Another chunk (or a new stride) would let `serve_chunk` hand out bytes the hash
+        // A verified blob is final. Another chunk (or a new stride) would let `serve_blob_get` hand out bytes the hash
         // never covered.
         if state.complete {
             return ServerResponse::Ok;
@@ -91,7 +91,7 @@ impl ServerCore {
         if chunk_index >= state.total_chunks {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
         }
-        // The stride is fixed by the first chunk (`blob_set_chunk_size`). Another one would write where `serve_chunk`
+        // The stride is fixed by the first chunk (`blob_set_chunk_size`). Another one would write where `serve_blob_get`
         // does not read.
         if (state.chunk_size != 0 || state.received_chunks > 0) && state.chunk_size != chunk_size {
             return ServerResponse::Err(ServerErrorCode::BadDirection);
@@ -109,7 +109,7 @@ impl ServerCore {
         // could only send one chunk per round trip. The `.enc` format has a fixed stride (see
         // `attachments::read_chunk_from_disk`), so writing at an offset is safe.
         use std::io::{Seek, SeekFrom, Write};
-        // The stride is stored WITH the blob. `serve_chunk` must read with the same value.
+        // The stride is stored WITH the blob. `serve_blob_get` must read with the same value.
         self.store.blob_set_chunk_size(&blob_id, chunk_size);
         let write = std::fs::OpenOptions::new()
             .create(true)
@@ -231,67 +231,47 @@ impl ServerCore {
         }
     }
 
-    /// Serves a file chunk.
+    /// `BlobGet`: serves one file chunk to any peer, enrolled or not. It comes on the client's anonymous connection
+    /// (throwaway PeerId), so the server cannot tell which enrollment downloads an upload. The file id is the
+    /// authorisation: a hash of the uploader's secret, known only to the file's recipients.
     ///
-    /// The server counterpart of `serve_chunk_request` in the core. It is deliberately almost identical:
     /// `read_chunk_from_disk_with` reads the `.enc` file AS IT IS, because the disk format is the wire format. The
     /// server encrypts, decrypts and re-frames nothing.
-    pub(super) fn serve_chunk(
-        &mut self,
-        peer: PeerId,
-        req: FileChunkRequest,
-        channel: ResponseChannel<FileChunkResponse>,
-    ) {
-        // This is a separate request_response behaviour, called from `handle_swarm_event`, not from `handle_request`.
-        // It checks enrollment itself, so a stranger cannot fetch chunks by guessing a `blob_id`. An unenrolled peer
-        // within budget gets `NotFound` (the same answer as an unknown file, so it reveals nothing). A peer over its
-        // budget gets `Busy` whether enrolled or not, and should back off to another source.
-        //
-        // The budget is `CHUNKS_PER_MINUTE` (10 per second), separate from the RPC budget. The rate check runs first
-        // for every peer: it is in memory, while the enrollment lookup is a query. Refusals log at debug only, so a
-        // request loop does not fill the journal.
-        let reply = if !self.check_rate(peer, true, 1) {
-            Some(FileChunkResponse::Busy)
-        } else if self.active(peer).is_none() {
-            Some(FileChunkResponse::NotFound)
-        } else {
-            None
-        };
-        if let Some(reply) = reply {
-            debug!("File chunk request rejected (rate limit or unregistered peer)");
+    ///
+    /// Limits: `CHUNKS_PER_MINUTE` per connection, and one global bucket for all chunk requests together
+    /// (`CHUNK_BUCKET_CAP`), since PeerIds are free. Both are in memory and run before any disk read. Refusals log
+    /// at debug only, so a request loop does not fill the journal.
+    pub(super) fn serve_blob_get(&mut self, peer: PeerId, file_id: String, chunk_index: u32) -> ServerResponse {
+        if !self.check_rate(peer, true, 1) || !anon_bucket_take_with(&mut self.chunk_bucket, mono_ms(), CHUNK_BUCKET_CAP, CHUNK_REFILL_PER_MS) {
+            debug!("File chunk request rejected (rate limit)");
             self.stats.rejected += 1;
-            let _ = self.swarm.behaviour_mut().file_chunks.send_response(channel, reply);
-            return;
+            return ServerResponse::Err(ServerErrorCode::RateLimited);
         }
-        let response = if !is_safe_id(&req.file_id) {
-            FileChunkResponse::NotFound
-        } else {
-            match self.store.blob_state(&req.file_id) {
-                Some(state) if state.complete => {
-                    // Touched once per download (chunk 0), not once per chunk, which would be a DB write per chunk.
-                    if req.chunk_index == 0 {
-                        self.store.blob_touch(&req.file_id, now_ms());
-                    }
-                    // The stride is the one `handle_blob_put` stored with the blob (from `BlobPut.chunk_size`). A
-                    // fixed stride here would read from the wrong offsets.
-                    match attachments::read_chunk_from_disk_with(
-                        &self.blob_path(&req.file_id),
-                        req.chunk_index,
-                        state.chunk_size as usize,
-                    ) {
-                        Ok(Some(data)) => {
-                            self.stats.blob_chunks_served += 1;
-                            FileChunkResponse::Chunk { data }
-                        }
-                        _ => FileChunkResponse::NotFound,
-                    }
-                }
-                // A partial upload is never served. On `NotFound` the client switches to another source at once
-                // (see `handle_chunk_response` in the core).
-                _ => FileChunkResponse::NotFound,
-            }
+        if !is_safe_id(&file_id) {
+            return ServerResponse::Err(ServerErrorCode::NotFound);
+        }
+        // A partial upload is never served. On `NotFound` the client switches to another source at once
+        // (see `handle_chunk_response` in the core).
+        let Some(state) = self.store.blob_state(&file_id).filter(|s| s.complete) else {
+            return ServerResponse::Err(ServerErrorCode::NotFound);
         };
-        let _ = self.swarm.behaviour_mut().file_chunks.send_response(channel, response);
+        // Touched once per download (chunk 0), not once per chunk, which would be a DB write per chunk.
+        if chunk_index == 0 {
+            self.store.blob_touch(&file_id, now_ms());
+        }
+        // The stride is the one `handle_blob_put` stored with the blob (from `BlobPut.chunk_size`). A fixed
+        // stride here would read from the wrong offsets.
+        match attachments::read_chunk_from_disk_with(&self.blob_path(&file_id), chunk_index, state.chunk_size as usize) {
+            Ok(Some(data)) => {
+                self.stats.blob_chunks_served += 1;
+                // A download in progress keeps its anonymous connection (see `UNENROLLED_GRACE_MS`).
+                if let Some(c) = self.conns.get_mut(&peer) {
+                    c.last_anon_at = mono_ms();
+                }
+                ServerResponse::Chunk { data }
+            }
+            _ => ServerResponse::Err(ServerErrorCode::NotFound),
+        }
     }
 
 }

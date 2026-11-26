@@ -327,7 +327,7 @@ fn orphaned_reader_does_not_block_deletion() {
     assert_eq!(s.ack("mb_1", seq, &reader).unwrap(), 1);
 }
 
-/// The stride must be stored with the blob, or `serve_chunk` would read from the wrong offsets.
+/// The stride must be stored with the blob, or `serve_blob_get` would read from the wrong offsets.
 #[test]
 fn blob_remembers_the_chunk_stride_it_was_written_with() {
     let s = Store::open_in_memory().unwrap();

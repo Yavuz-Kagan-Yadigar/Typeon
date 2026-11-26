@@ -23,6 +23,7 @@ class P2PService : Service() {
         const val PREFS_NAME = "p2p_settings"
         const val KEY_NODE_MODE = "node_mode_enabled"
         const val KEY_TOR_MODE = "tor_mode"
+        const val KEY_TOR_ALWAYS_BRIDGE = "tor_always_bridge"
         const val KEY_TOR_BRIDGES = "tor_bridges"
         /** Byte limit for history and attachment storage in node mode (see Rust `history_storage_limit_bytes`). */
         const val KEY_HISTORY_STORAGE_LIMIT = "history_storage_limit_bytes"
@@ -189,10 +190,15 @@ class P2PService : Service() {
         fun getTorBridges(context: Context): String =
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_TOR_BRIDGES, "") ?: ""
 
+        /** Start on the bridge, never try Direct first (Rust `tor::set_transport` `always`). */
+        fun getTorAlwaysBridge(context: Context): Boolean =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_TOR_ALWAYS_BRIDGE, false)
+
         /** `commit`, not `apply`: the caller restarts the process right after. */
-        fun setTorTransport(context: Context, mode: String, bridges: String) {
+        fun setTorTransport(context: Context, mode: String, bridges: String, alwaysBridge: Boolean) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                .putString(KEY_TOR_MODE, mode).putString(KEY_TOR_BRIDGES, bridges).commit()
+                .putString(KEY_TOR_MODE, mode).putString(KEY_TOR_BRIDGES, bridges)
+                .putBoolean(KEY_TOR_ALWAYS_BRIDGE, alwaysBridge).commit()
         }
 
         fun setNodeModeEnabled(context: Context, enabled: Boolean) {
@@ -888,7 +894,7 @@ class P2PService : Service() {
             // Bridges / PT before arti starts. Fails closed: a bridge mode that cannot be set never starts a
             // direct Tor connection instead (a missing PT binary starts arti, which then cannot connect).
             val torMode = getTorMode(applicationContext)
-            val torSet = P2PLib.setTorTransport(torMode, getTorBridges(applicationContext), applicationInfo.nativeLibraryDir)
+            val torSet = P2PLib.setTorTransport(torMode, getTorBridges(applicationContext), applicationInfo.nativeLibraryDir, getTorAlwaysBridge(applicationContext))
             if (torSet.startsWith("Error")) {
                 Log.w(TAG, "Tor mode $torMode not applied: $torSet")
                 retryStart { startNet() }

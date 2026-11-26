@@ -116,6 +116,8 @@
     <string name="tor_state_direct">الحالة الآن: مباشر</string>
     <string name="tor_state_bridge">الحالة الآن: يتم استخدام الجسر لأن Tor كان محجوبًا</string>
     <string name="msg_tor_bridges_help">احصل على جسورك الخاصة من https://bridges.torproject.org/options والصقها أدناه. إذا تُركت فارغة، تُستخدم الجسور العامة المدمجة في Tor.</string>
+    <string name="lbl_tor_always_bridge">استخدم الجسر دائمًا</string>
+    <string name="msg_tor_always_bridge">لا تُجرَّب الاتصال المباشر أولًا أبدًا. فعّله حيث يكون استخدام Tor نفسه خطرًا: لن ترى الشبكة أي اتصال مباشر بـ Tor من هذا الجهاز. يستهلك مزيدًا من البطارية والبيانات.</string>
     <string name="hint_tor_bridges">الصق أسطر جسور obfs4، سطرًا لكل جسر</string>
     <string name="msg_tor_mode_restart">تُستخدم Snowflake والجسور فقط عند حجب Tor: يحاول التطبيق الاتصال المباشر أولًا، ثم ينتقل إليها بعد دقيقة دون Tor. تستهلك بطارية أكثر من الاتصال المباشر. يُعاد تشغيل التطبيق لتطبيق التغيير.</string>
     <string name="msg_tor_bridges_invalid">جسر غير صالح: %1$s</string>

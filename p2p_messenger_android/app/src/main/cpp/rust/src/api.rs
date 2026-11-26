@@ -152,9 +152,10 @@ pub fn start_network(node_mode: bool, tor_enabled: bool) -> String {
 }
 
 /// Tor connection mode for the next `start_network`: "direct", "snowflake" or "obfs4" (+ `bridges`).
-/// `pt_dir`: folder of the PT binaries; empty = next to the executable. "OK" or "Error: ...".
-pub fn set_tor_transport(mode: &str, bridges: &str, pt_dir: &str) -> String {
-    ok_result(catch_panic(move || crate::tor::set_transport(mode, bridges, pt_dir)))
+/// `pt_dir`: folder of the PT binaries; empty = next to the executable. `always_bridge`: start on the bridge,
+/// never try Direct first. "OK" or "Error: ...".
+pub fn set_tor_transport(mode: &str, bridges: &str, pt_dir: &str, always_bridge: bool) -> String {
+    ok_result(catch_panic(move || crate::tor::set_transport(mode, bridges, pt_dir, always_bridge)))
 }
 
 /// "OK", or "Error: line N: ..." for the first bad obfs4 bridge line.

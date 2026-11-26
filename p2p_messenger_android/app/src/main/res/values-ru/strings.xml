@@ -113,6 +113,8 @@
     <string name="tor_state_direct">Сейчас: напрямую</string>
     <string name="tor_state_bridge">Сейчас: используется мост, потому что Tor заблокирован</string>
     <string name="msg_tor_bridges_help">Свои мосты можно получить на https://bridges.torproject.org/options и вставить ниже. Если поле пустое, используются встроенные публичные мосты Tor.</string>
+    <string name="lbl_tor_always_bridge">Всегда использовать мост</string>
+    <string name="msg_tor_always_bridge">Прямое подключение не пробуется. Включите, если само использование Tor опасно: сеть никогда не увидит прямого подключения к Tor с этого устройства. Расходует больше заряда и трафика.</string>
     <string name="hint_tor_bridges">Вставьте строки мостов obfs4, по одной на строку</string>
     <string name="msg_tor_mode_restart">Snowflake и мосты используются только если Tor заблокирован: приложение сначала пробует подключиться напрямую и переключается, если минуту нет связи через Tor. Они расходуют больше батареи, чем прямое подключение. Для применения изменения приложение перезапустится.</string>
     <string name="msg_tor_bridges_invalid">Неверный мост: %1$s</string>

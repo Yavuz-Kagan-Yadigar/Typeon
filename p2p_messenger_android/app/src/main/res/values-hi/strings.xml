@@ -113,6 +113,8 @@
     <string name="tor_state_direct">अभी: सीधा</string>
     <string name="tor_state_bridge">अभी: ब्रिज इस्तेमाल हो रहा है, क्योंकि Tor ब्लॉक था</string>
     <string name="msg_tor_bridges_help">अपने ब्रिज https://bridges.torproject.org/options से लेकर नीचे चिपकाएँ। खाली छोड़ने पर Tor के सार्वजनिक अंतर्निहित ब्रिज इस्तेमाल होते हैं।</string>
+    <string name="lbl_tor_always_bridge">हमेशा ब्रिज इस्तेमाल करें</string>
+    <string name="msg_tor_always_bridge">पहले सीधा कनेक्शन कभी नहीं आज़माया जाता। जहाँ Tor इस्तेमाल करना ही जोखिम भरा हो, वहाँ इसे चालू करें: नेटवर्क को इस डिवाइस से कभी सीधा Tor कनेक्शन नहीं दिखेगा। इसमें बैटरी और डेटा ज़्यादा लगता है।</string>
     <string name="hint_tor_bridges">obfs4 ब्रिज की लाइनें चिपकाएँ, हर पंक्ति में एक</string>
     <string name="msg_tor_mode_restart">Snowflake और ब्रिज केवल तब इस्तेमाल होते हैं जब Tor ब्लॉक हो: ऐप पहले सीधा कनेक्शन आज़माता है, और एक मिनट तक Tor न मिले तो बदल जाता है। ये सीधे कनेक्शन से ज़्यादा बैटरी लेते हैं। बदलाव लागू करने के लिए ऐप दोबारा शुरू होता है।</string>
     <string name="msg_tor_bridges_invalid">अमान्य ब्रिज: %1$s</string>

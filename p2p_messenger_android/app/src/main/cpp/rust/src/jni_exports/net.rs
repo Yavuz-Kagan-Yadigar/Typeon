@@ -231,11 +231,11 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_notifyNetworkChanged(_env: 
 
 /// See api `set_tor_transport`. Kotlin calls it right before `startNetwork`, with `nativeLibraryDir` as `ptDir`.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_setTorTransport<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, mode: JString<'local>, bridges: JString<'local>, pt_dir: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setTorTransport<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, mode: JString<'local>, bridges: JString<'local>, pt_dir: JString<'local>, always_bridge: jboolean) -> jstring {
     let mode = jstr(&mut env, &mode).unwrap_or_default();
     let bridges = jstr(&mut env, &bridges).unwrap_or_default();
     let pt_dir = jstr(&mut env, &pt_dir).unwrap_or_default();
-    let out = crate::api::set_tor_transport(&mode, &bridges, &pt_dir);
+    let out = crate::api::set_tor_transport(&mode, &bridges, &pt_dir, always_bridge != 0);
     safe_new_jstring(&mut env, out)
 }
 

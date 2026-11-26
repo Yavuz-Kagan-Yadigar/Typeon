@@ -1,0 +1,380 @@
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-chanmgr/src/builder.rs vendor/tor-chanmgr/src/builder.rs
+--- upstream/tor-chanmgr/src/builder.rs
++++ vendor/tor-chanmgr/src/builder.rs
+@@ -73,7 +73,10 @@
+         let delay = if target.chan_method().is_direct() {
+             std::time::Duration::new(5, 0)
+         } else {
+-            std::time::Duration::new(10, 0)
++            // Typeon patch: 10 s upstream. Snowflake on a phone often needs longer (broker, proxy, WebRTC
++            // DataChannel, then TLS through it), so every attempt timed out and started a new snowflake
++            // session: thousands of proxy cycles, never a channel.
++            std::time::Duration::new(60, 0)
+         };
+ 
+         let connect_future = self.connect_no_timeout(target, reporter.0, memquota);
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-chanmgr/src/event.rs vendor/tor-chanmgr/src/event.rs
+--- upstream/tor-chanmgr/src/event.rs
++++ vendor/tor-chanmgr/src/event.rs
+@@ -219,6 +219,9 @@
+     /// If we get to this point, we can successfully talk to something that
+     /// holds the private key that it's supposed to.
+     last_chan_success: Option<Instant>,
++
++    /// Typeon patch: channel builds that failed since `last_chan_success`.
++    failures_since_chan_success: usize,
+ }
+ 
+ impl ChanMgrStatus {
+@@ -233,6 +236,7 @@
+             last_tls_success: None,
+             last_chan_auth_success: None,
+             last_chan_success: None,
++            failures_since_chan_success: 0,
+         }
+     }
+ 
+@@ -261,7 +265,12 @@
+             (false, false) => Some(false),
+         };
+ 
+-        let handshake_works = match (self.last_chan_success.is_some(), early) {
++        // Typeon patch: upstream counted one success forever, so a client whose only guards (bridges)
++        // had died still looked ready. A success (or use of an open channel, see `record_channel_used`)
++        // older than MIN_DURATION, followed by MIN_ATTEMPTS failed channel builds, no longer counts.
++        let stale = self.last_chan_success.is_some_and(|t| now >= t + MIN_DURATION)
++            && self.failures_since_chan_success >= MIN_ATTEMPTS;
++        let handshake_works = match (self.last_chan_success.is_some() && !stale, early) {
+             (true, _) => Some(true),
+             (_, true) => None,
+             (false, false) => Some(false),
+@@ -304,6 +313,7 @@
+     fn record_handshake_done(&mut self, now: Instant) {
+         self.last_chan_auth_success = Some(now);
+         self.last_chan_success = Some(now);
++        self.failures_since_chan_success = 0;
+     }
+ }
+ 
+@@ -380,6 +390,21 @@
+         self.mgr_status.record_handshake_done(now);
+         self.push_at(now);
+     }
++
++    /// Typeon patch: a channel build failed (any stage, including a PT that did not start).
++    pub(crate) fn record_channel_failed(&mut self) {
++        let now = Instant::now();
++        self.mgr_status.failures_since_chan_success += 1;
++        self.push_at(now);
++    }
++
++    /// Typeon patch: a request was served by an open channel, so a channel still works. Counts like a
++    /// fresh handshake for the staleness rule in `conn_status_at`.
++    pub(crate) fn record_channel_used(&mut self) {
++        let now = Instant::now();
++        self.mgr_status.record_handshake_done(now);
++        self.push_at(now);
++    }
+ }
+ 
+ /// Create a new channel for sending connectivity status events to other crates.
+@@ -417,6 +442,24 @@
+     const TOL: f32 = 0.00001;
+ 
+     #[test]
++    fn typeon_stale_success() {
++        let t0 = Instant::now();
++        let mut ms = ChanMgrStatus::new_at(t0);
++        for _ in 0..6 {
++            ms.record_attempt();
++        }
++        ms.record_tcp_success(t0);
++        ms.record_handshake_done(t0);
++        let later = t0 + Duration::from_secs(120);
++        assert!(ms.conn_status_at(later).usable(), "old success, no failed attempts since: still usable");
++        ms.failures_since_chan_success = 6;
++        assert!(!ms.conn_status_at(later).usable(), "6 failed builds after 60 s: stale");
++        assert!(ms.conn_status_at(t0 + Duration::from_secs(30)).usable(), "within 60 s of the success: usable");
++        ms.record_handshake_done(later);
++        assert!(ms.conn_status_at(later).usable(), "a new success (or channel use) resets it");
++    }
++
++    #[test]
+     fn status_basics() {
+         let s1 = ConnStatus::default();
+         assert_eq!(s1.to_string(), "connecting to the internet");
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-chanmgr/src/mgr.rs vendor/tor-chanmgr/src/mgr.rs
+--- upstream/tor-chanmgr/src/mgr.rs
++++ vendor/tor-chanmgr/src/mgr.rs
+@@ -231,6 +231,10 @@
+                 }
+                 // Easy case: we have an error or a channel to return.
+                 Some(Action::Return(v)) => {
++                    if v.is_ok() {
++                        // Typeon patch: see `ChanMgrEventSender::record_channel_used`.
++                        self.reporter.0.lock().expect("Lock poisoned").record_channel_used();
++                    }
+                     return v.map(|chan| (chan, provenance));
+                 }
+                 // There's an in-progress channel.  Wait for it.
+@@ -257,6 +261,11 @@
+                 }
+                 // We need to launch a channel.
+                 Some(Action::Launch((handle, send))) => {
++                    // Typeon patch: if this future is dropped while the channel is being built (a
++                    // circuit-build timeout above us drops it), the guard removes the pending entry.
++                    // Upstream 0.24 left it in the map for good, so no channel to that relay was ever
++                    // built again: with two bridges as the only guards, Snowflake never carried traffic.
++                    let mut guard = PendingGuard { channels: &self.channels, handle: Some(handle) };
+                     // WARNING: do not drop the handle without calling
+                     // `upgrade_pending_channel_to_open` or `remove_pending_channel`. If you don't,
+                     // then the pending entry will remain in the channel map forever, and arti will
+@@ -281,11 +290,15 @@
+                         match chan_result {
+                             Ok(ref chan) => {
+                                 // Replace the pending channel with the newly built channel.
++                                let handle = guard.handle.take().expect("pending handle used once");
+                                 self.channels
+                                     .upgrade_pending_channel_to_open(handle, Arc::clone(chan))?;
+                             }
+                             Err(_) => {
++                                // Typeon patch: see `ChanMgrEventSender::record_channel_failed`.
++                                self.reporter.0.lock().expect("Lock poisoned").record_channel_failed();
+                                 // Remove the pending channel.
++                                let handle = guard.handle.take().expect("pending handle used once");
+                                 if let Err(e) = self.channels.remove_pending_channel(handle) {
+                                     // Just log an error if we're unable to remove it, since there's
+                                     // nothing else we can do here, and returning the error would
+@@ -703,3 +716,20 @@
+         });
+     }
+ }
++
++/// Typeon patch: removes a pending channel entry when the future building it is dropped (see the
++/// `Action::Launch` arm of `get_or_launch_internal`).
++struct PendingGuard<'a, CF: AbstractChannelFactory> {
++    /// The channel map holding the pending entry.
++    channels: &'a state::MgrState<CF>,
++    /// Taken by the normal paths, which remove or upgrade the entry themselves.
++    handle: Option<state::PendingChannelHandle>,
++}
++
++impl<CF: AbstractChannelFactory> Drop for PendingGuard<'_, CF> {
++    fn drop(&mut self) {
++        if let Some(handle) = self.handle.take() {
++            let _ = self.channels.remove_pending_channel(handle);
++        }
++    }
++}
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-circmgr/src/timeouts/pareto.rs vendor/tor-circmgr/src/timeouts/pareto.rs
+--- upstream/tor-circmgr/src/timeouts/pareto.rs
++++ vendor/tor-circmgr/src/timeouts/pareto.rs
+@@ -562,6 +562,12 @@
+         self.p = parameters;
+         let new_success_len = self.p.success_history_len;
+         self.history.set_success_history_len(new_success_len);
++        // Typeon patch: drop the cached timeouts, so the new parameters (cbtmintimeout) apply now.
++        // Upstream kept the value computed from the stored history under the old minimum until a
++        // hop succeeded. Over Snowflake no hop ever did: a fast Direct history gave a 1-hop circuit
++        // about 1.2 s, each abandoned build cancelled its bridge channel, and a new snowflake
++        // session started every second, forever.
++        self.timeouts = None;
+     }
+ 
+     fn note_hop_completed(&mut self, hop: u8, delay: Duration, is_last: bool) {
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-hsservice/src/anon_level.rs vendor/tor-hsservice/src/anon_level.rs
+--- upstream/tor-hsservice/src/anon_level.rs
++++ vendor/tor-hsservice/src/anon_level.rs
+@@ -16,7 +16,7 @@
+     ///
+     /// (This is implemented using our "single onion service" design.)
+     ///
+-    /// Can be represented in a serde-based configuration as`"non_anonymous"`
++    /// Can be represented in a serde-based configuration as `"not_anonymous"`
+     /// (case insensitive).
+     DangerouslyNonAnonymous,
+ }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-hsservice/src/ipt_mgr.rs vendor/tor-hsservice/src/ipt_mgr.rs
+--- upstream/tor-hsservice/src/ipt_mgr.rs
++++ vendor/tor-hsservice/src/ipt_mgr.rs
+@@ -1689,6 +1689,20 @@
+             TS::Good { .. } => Err(()),
+         };
+ 
++        // TypeOn patch: an IPT that was Good and is re-establishing its circuit
++        // (same relay, same keys) stays Good, so it stays in the published set.
++        // It leaves only when it turns Faulty. Otherwise every lost intro circuit
++        // changed the set twice and re-uploaded the descriptor to all HsDirs.
++        // The Good that follows keeps the original time_to_establish (only the
++        // details are refreshed), so the publish holdoff keeps working.
++        match (&update, &mut ipt.status_last) {
++            (ISS::Establishing, TS::Good { .. }) => return,
++            (ISS::Good(new), TS::Good { details, .. }) => {
++                *details = new.clone();
++                return;
++            }
++            _ => {}
++        }
+         ipt.status_last = match update {
+             ISS::Establishing => TS::Establishing {
+                 started: started.unwrap_or_else(|()| now()),
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-hsservice/src/ipt_set.rs vendor/tor-hsservice/src/ipt_set.rs
+--- upstream/tor-hsservice/src/ipt_set.rs
++++ vendor/tor-hsservice/src/ipt_set.rs
+@@ -235,7 +235,7 @@
+ /// Lock the shared state and obtain a lock guard
+ ///
+ /// Does not do any notification.
+-fn lock_shared(shared: &Shared) -> MutexGuard<PublishIptSet> {
++fn lock_shared(shared: &Shared) -> MutexGuard<'_, PublishIptSet> {
+     // Propagating panics is fine since if either the manager or the publisher crashes,
+     // the other one cannot survive.
+     shared.lock().expect("IPT set shared state poisoned")
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-hsservice/src/keys.rs vendor/tor-hsservice/src/keys.rs
+--- upstream/tor-hsservice/src/keys.rs
++++ vendor/tor-hsservice/src/keys.rs
+@@ -147,7 +147,7 @@
+ pub(crate) enum IptKeyRole {
+     /// `k_hss_ntor`
+     KHssNtor,
+-    /// `k_hss_ntor`
++    /// `k_sid`
+     KSid,
+ }
+ 
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-hsservice/src/publish/reactor.rs vendor/tor-hsservice/src/publish/reactor.rs
+--- upstream/tor-hsservice/src/publish/reactor.rs
++++ vendor/tor-hsservice/src/publish/reactor.rs
+@@ -138,6 +138,9 @@
+     inner: Arc<Mutex<Inner>>,
+     /// A channel for receiving IPT change notifications.
+     ipt_watcher: IptsPublisherView,
++    /// TypeOn patch: the IPT set (by local id, plus lifetime) last acted on,
++    /// so a notification that leaves it unchanged does not re-upload.
++    last_ipt_key: Option<String>,
+     /// A channel for receiving onion service config change notifications.
+     config_rx: watch::Receiver<Arc<OnionServiceConfig>>,
+     /// A channel for receiving restricted discovery key_dirs change notifications.
+@@ -593,6 +596,7 @@
+             inner: Arc::new(Mutex::new(inner)),
+             dir_provider,
+             ipt_watcher,
++            last_ipt_key: None,
+             config_rx,
+             key_dirs_rx,
+             key_dirs_tx,
+@@ -834,6 +838,9 @@
+             humantime::format_duration(duration),
+         );
+ 
++        // TypeOn patch: one reupload timer per time period. Upstream pushed a new
++        // one for every upload round and each kept its own 60-120 min chain alive.
++        inner.reupload_timers.retain(|t| t.period != time_period);
+         inner.reupload_timers.push(ReuploadTimer {
+             period: time_period,
+             when: reupload_when,
+@@ -1061,6 +1068,35 @@
+         trace!(nickname=%self.imm.nickname, "received IPT change notification from IPT manager");
+         match update {
+             Some(Ok(())) => {
++                // TypeOn patch: the IPT manager notifies on every update of the
++                // shared set, changed or not; each notification used to re-upload
++                // the descriptor to every HsDir (~200 KB on mobile data).
++                // The key is the whole set (lids, relay details, lifetime), so a
++                // relay that changes its ntor key or address still re-uploads.
++                let key = self
++                    .ipt_watcher
++                    .borrow_for_publish()
++                    .ipts
++                    .as_ref()
++                    .map(|s| format!("{s:?}"));
++                if key.is_some() && key == self.last_ipt_key {
++                    trace!(nickname=%self.imm.nickname, "introduction points unchanged");
++                    // An earlier upload of this same set may have failed and left
++                    // HsDirs Dirty; this notification is the only prompt retry.
++                    let dirty = self
++                        .inner
++                        .lock()
++                        .expect("poisoned lock")
++                        .time_periods
++                        .iter()
++                        .any(|tp| tp.hs_dirs.iter().any(|(_, st)| *st == DescriptorStatus::Dirty));
++                    if dirty {
++                        self.update_publish_status_unless_rate_lim(PublishStatus::UploadScheduled)
++                            .await?;
++                    }
++                    return Ok(ShutdownStatus::Continue);
++                }
++                self.last_ipt_key = key;
+                 let should_upload = self.note_ipt_change();
+                 debug!(nickname=%self.imm.nickname, "the introduction points have changed");
+ 
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-hsservice/src/timeout_track.rs vendor/tor-hsservice/src/timeout_track.rs
+--- upstream/tor-hsservice/src/timeout_track.rs
++++ vendor/tor-hsservice/src/timeout_track.rs
+@@ -582,7 +582,7 @@
+     /// also,
+     /// when working with checked time arithmetic,
+     /// this can helpfully centralise the out-of-bounds error handling site.
+-    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow> {
++    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow<'_>> {
+         let threshold = self.now.checked_sub(offset)?;
+         Some(TrackingInstantOffsetNow {
+             threshold,
+@@ -606,7 +606,7 @@
+     ///
+     /// For the same reason there is no
+     /// `.checked_sub()` method on [`TrackingSystemTimeNow`].
+-    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow> {
++    pub fn checked_sub(&self, offset: Duration) -> Option<TrackingInstantOffsetNow<'_>> {
+         self.instant.checked_sub(offset)
+     }
+ }
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-netdir/src/params.rs vendor/tor-netdir/src/params.rs
+--- upstream/tor-netdir/src/params.rs
++++ vendor/tor-netdir/src/params.rs
+@@ -33,7 +33,8 @@
+ ///   <https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/586#note_2813638>
+ /// pending an update to the specifications
+ ///   <https://gitlab.torproject.org/tpo/core/torspec/-/issues/120>
+-pub const CHANNEL_PADDING_TIMEOUT_UPPER_BOUND: i32 = 60_000;
++// Typeon: 60 s -> 10 min, see `client_config` in src/tor.rs.
++pub const CHANNEL_PADDING_TIMEOUT_UPPER_BOUND: i32 = 600_000;
+ 
+ /// An object that can be constructed from an i32, with saturating semantics.
+ pub trait FromInt32Saturating {
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.toml.orig -x target -x 'LICENSE-*' -x semver.md -x Cargo.lock upstream/tor-ptmgr/src/managed.rs vendor/tor-ptmgr/src/managed.rs
+--- upstream/tor-ptmgr/src/managed.rs
++++ vendor/tor-ptmgr/src/managed.rs
+@@ -185,7 +185,30 @@
+                 drop(all_next_messages);
+ 
+                 match internal {
+-                    Some(PtReactorMessage::Reconfigured) => {},
++                    Some(PtReactorMessage::Reconfigured) => {
++                        // Typeon patch: stop each running PT that is no longer configured as a managed
++                        // transport. Upstream kept it running ("On reconfigure, we should shut down any
++                        // no-longer-used transports"), and lyrebird kept dialing the Snowflake broker for
++                        // sessions arti had already given up on.
++                        let stale: Vec<usize> = {
++                            let state = self.state.read().expect("ptmgr state poisoned");
++                            self.running
++                                .iter()
++                                .enumerate()
++                                .filter(|(_, pt)| {
++                                    !pt.transport_methods()
++                                        .keys()
++                                        .all(|t| matches!(state.configured.get(t), Some(TransportOptions::Managed(_))))
++                                })
++                                .map(|(i, _)| i)
++                                .collect()
++                        };
++                        for i in stale.into_iter().rev() {
++                            let pt = self.running.remove(i);
++                            debug!("Stopping PT {}: no longer configured", pt.identifier());
++                            self.remove_pt(pt);
++                        }
++                    },
+                     Some(PtReactorMessage::Spawn { pt, result }) => {
+                         // Make sure we don't already have a running request.
+                         if let Some(requests) = self.requests.get_mut(&pt) {

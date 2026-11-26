@@ -654,6 +654,28 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
     editor.set_visible(current == "obfs4");
     group.add(&editor);
 
+    // Off: Direct first, the bridge only once Direct is blocked. On: the network never sees a Direct Tor attempt.
+    let always = adw::SwitchRow::builder()
+        .title(t("Always use the bridge"))
+        .subtitle(t("Never try Direct first. Use this where using Tor itself is risky. Uses more battery and data."))
+        .active(app.prefs.borrow().tor_always_bridge)
+        .visible(current != "direct")
+        .build();
+    {
+        let app = app.clone();
+        always.connect_active_notify(move |row| {
+            let mut prefs = app.prefs.borrow_mut();
+            if prefs.tor_always_bridge == row.is_active() {
+                return;
+            }
+            prefs.tor_always_bridge = row.is_active();
+            prefs.save();
+            drop(prefs);
+            app.toast(t("Tor connection applies after a restart."));
+        });
+    }
+    group.add(&always);
+
     let store = {
         let app = app.clone();
         move |mode: &str, bridges: Option<String>| {
@@ -671,7 +693,7 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
         }
     };
     {
-        let (app, editor, store) = (app.clone(), editor.clone(), store.clone());
+        let (app, editor, store, always) = (app.clone(), editor.clone(), store.clone(), always.clone());
         let reverting = Rc::new(Cell::new(false));
         combo.connect_selected_notify(move |row| {
             if reverting.replace(false) {
@@ -688,6 +710,7 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
                 return;
             }
             editor.set_visible(mode == "obfs4");
+            always.set_visible(mode != "direct");
             // obfs4 is stored by "Save bridges", once the lines are checked.
             if mode != "obfs4" {
                 store(mode, None);

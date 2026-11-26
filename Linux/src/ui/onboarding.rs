@@ -421,7 +421,7 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
 
     host.set_child(Some(&framed(&spinner_page(t("Starting the network…")))));
 
-    let (node_mode, tor_enabled, storage_limit, tor_mode, tor_bridges) = {
+    let (node_mode, tor_enabled, storage_limit, tor_mode, tor_bridges, tor_always_bridge) = {
         let prefs = app.prefs.borrow();
         (
             prefs.node_mode,
@@ -429,6 +429,7 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
             prefs.history_storage_limit_bytes,
             prefs.tor_mode.clone(),
             prefs.tor_bridges.clone(),
+            prefs.tor_always_bridge,
         )
     };
 
@@ -439,7 +440,7 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
     app::run_in_background(
         // Bridges first. Fails closed: a bridge mode that cannot be set never starts a direct connection.
         move || {
-            core::set_tor_transport(&tor_mode, &tor_bridges).map_err(|e| tf!("Tor bridges: {}", e))?;
+            core::set_tor_transport(&tor_mode, &tor_bridges, tor_always_bridge).map_err(|e| tf!("Tor bridges: {}", e))?;
             core::start_network(node_mode, tor_enabled)
         },
         move |result| {

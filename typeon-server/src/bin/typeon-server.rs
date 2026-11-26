@@ -272,7 +272,8 @@ fn usage() {
          Tor bridges (environment, read by `run`):\n\
          TYPEON_SERVER_TOR_MODE=direct|snowflake|obfs4   default direct; a bridge is used only when Direct is blocked\n\
          TYPEON_SERVER_BRIDGES_FILE=<path>               obfs4 bridge lines, one per line (unset: Tor built-in bridges)\n\
-         TYPEON_SERVER_PT_DIR=<dir>                      lyrebird, obfs4 + snowflake (default: next to this binary)\n"
+         TYPEON_SERVER_PT_DIR=<dir>                      lyrebird, obfs4 + snowflake (default: next to this binary)\n\
+         TYPEON_SERVER_TOR_ALWAYS_BRIDGE=1               start on the bridge, never try Direct first\n"
     );
 }
 
@@ -288,7 +289,8 @@ fn apply_tor_transport() {
         Err(_) => String::new(),
     };
     let pt_dir = std::env::var("TYPEON_SERVER_PT_DIR").unwrap_or_default();
-    if let Err(e) = p2p_messenger::tor::set_transport(mode.trim(), &bridges, &pt_dir) {
+    let always = std::env::var("TYPEON_SERVER_TOR_ALWAYS_BRIDGE").is_ok_and(|v| v.trim() == "1");
+    if let Err(e) = p2p_messenger::tor::set_transport(mode.trim(), &bridges, &pt_dir, always) {
         eprintln!("TYPEON_SERVER_TOR_MODE: {e}");
         std::process::exit(1);
     }

@@ -534,6 +534,7 @@ Deposit { mailbox_id, deposit_secret, cancel_hash, sealed }  -> server stores th
 Fetch   { cursors }              -> recipient fetches everything after its cursor on return
 Ack     { mailbox_id, seq }      -> processed, can be deleted
 Cancel  { mailbox_id, seq, cancel_secret }  -> sender withdraws an undelivered copy (anonymous)
+BlobGet { file_id, chunk_index }  -> recipient fetches one attachment chunk (anonymous)
 ```
 
 - Mailboxes are per device and direction: for each session, a device reads one
@@ -548,6 +549,15 @@ Cancel  { mailbox_id, seq, cancel_secret }  -> sender withdraws an undelivered c
   unknown box get the same `UnknownMailbox`. Mail is charged to the reader's quota;
   each box has its own item, byte and deposit-rate caps. The server so sees who reads
   which box, not who writes to it (timing leaks remain, see `SECURITY.md`).
+- Attachment chunks come the same way: `BlobGet` on the anonymous connection, the file
+  id (a hash of the uploader's secret, known only to recipients) as the authorisation,
+  one per-connection and one global chunk budget. The upload stays on the sender's
+  enrollment (its quota). The server so sees who uploaded a file, not who downloaded it.
+- One anonymous connection carries everything queued for that server while it is open
+  (one burst): those requests share a PeerId, so the server can group them (a group
+  message's fan-out, or a deposit and a download at the same time). A connection per box
+  would hide that, at a Tor circuit and its radio time per box; Typeon keeps one per
+  burst. Calls relayed by the server are not anonymous (`SECURITY.md`).
 
 - `mailbox_id` is derived from the same HKDF topic string the client computes
   (`p2pmsg-v0.1-gossip-topic`; the name is historical, there is no gossipsub any more),

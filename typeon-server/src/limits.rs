@@ -98,6 +98,8 @@ pub(super) fn verify_hybrid(pk: &[u8], pk_pq: &[u8], message: &[u8], sig: &[u8],
 /// `Register` pays 64 per `MailboxProof` it carries (each is a hybrid verify). `Enroll` and `Rebind` are a flat 30.
 pub(super) fn request_cost(req: &ServerRequest) -> u32 {
     let n = match req {
+        // Counted against `CHUNKS_PER_MINUTE` in `serve_blob_get` instead.
+        ServerRequest::BlobGet { .. } => return 0,
         ServerRequest::Enroll { .. } | ServerRequest::Rebind { .. } => return 30,
         // Each bucket counts up to 65,536 index entries, so each one pays a full unit.
         ServerRequest::ArchiveProbe { buckets } => return 1u32.saturating_add(buckets.len() as u32),
@@ -135,8 +137,13 @@ pub(super) fn box_window_admit(win: &mut (u64, u64, u32), now: u64, bytes: u64, 
 
 /// Takes one token from the global anonymous bucket (`ANON_BUCKET_CAP`), refilled by the time since the last call.
 pub(super) fn anon_bucket_take(bucket: &mut (u64, f64), now: u64) -> bool {
+    anon_bucket_take_with(bucket, now, ANON_BUCKET_CAP, ANON_REFILL_PER_MS)
+}
+
+/// `anon_bucket_take` with its own size and refill rate (the chunk bucket, `CHUNK_BUCKET_CAP`).
+pub(super) fn anon_bucket_take_with(bucket: &mut (u64, f64), now: u64, cap: f64, refill_per_ms: f64) -> bool {
     let (at, tokens) = bucket;
-    *tokens = (*tokens + now.saturating_sub(*at) as f64 * ANON_REFILL_PER_MS).min(ANON_BUCKET_CAP);
+    *tokens = (*tokens + now.saturating_sub(*at) as f64 * refill_per_ms).min(cap);
     *at = now;
     if *tokens < 1.0 {
         return false;

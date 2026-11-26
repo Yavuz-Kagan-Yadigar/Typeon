@@ -634,5 +634,7 @@
  "🎬 Video": "🎬 Відео",
  "🎤 Voice message": "🎤 Голосове повідомлення",
  "📎 File": "📎 Файл",
- "Open Typeon": "Відкрити Typeon"
+ "Open Typeon": "Відкрити Typeon",
+ "Always use the bridge": "Завжди використовувати місток",
+ "Never try Direct first. Use this where using Tor itself is risky. Uses more battery and data.": "Пряме підключення не пробується. Увімкніть, якщо саме використання Tor небезпечне. Витрачає більше заряду й трафіку."
 }

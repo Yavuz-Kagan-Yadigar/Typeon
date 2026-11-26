@@ -47,7 +47,7 @@ object P2PLib {
     external fun startNetwork(nodeMode: Boolean, torEnabled: Boolean): String
     external fun setNodeMode(enabled: Boolean)
     /** Tor connection for the next `startNetwork`: mode "direct" / "snowflake" / "obfs4" (+ bridge lines). `ptDir` = nativeLibraryDir. "OK" or "Error: ...". */
-    external fun setTorTransport(mode: String, bridges: String, ptDir: String): String
+    external fun setTorTransport(mode: String, bridges: String, ptDir: String, alwaysBridge: Boolean): String
     /** "OK", or "Error: line N: ..." for the first bad obfs4 bridge line. */
     external fun validateBridgeLines(text: String): String
     /** The PT binary for [mode] ships in this APK (liblyrebird.so in [ptDir]: obfs4 + snowflake). */
