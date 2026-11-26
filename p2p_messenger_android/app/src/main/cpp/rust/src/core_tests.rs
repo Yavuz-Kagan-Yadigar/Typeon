@@ -147,7 +147,7 @@ mod review_oct2026_tests {
     fn a_received_time_is_never_in_the_future() {
         let mut content = MessageContent::Text {
             text: "t".into(), group_id: None, group_message_local_id: None, sent_at_ms: 5_000,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs: None,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, mentions: Vec::new(), expire_secs: None,
         };
         clamp_received_times(&mut content, 1_000);
         assert!(matches!(content, MessageContent::Text { sent_at_ms: 1_000, .. }));
@@ -163,11 +163,11 @@ mod review_oct2026_tests {
                 sender_identity_id: String::new(), sender_device_fingerprint: String::new(), message_id: String::new(),
                 ratchet_pubkey: Vec::new(), message_number: 0, prev_chain_length: 0, rotation_kyber_ciphertext: None, sent_at_ms: 0,
             }).unwrap(),
-            ciphertext: Vec::new(), signature_classical: Vec::new(), signature_pq: Vec::new(),
+            ciphertext: Vec::new(),
         };
         let text = |conv: &str| MessageContent::Text {
             text: "t".into(), group_id: None, group_message_local_id: Some(conv.into()), sent_at_ms: 0,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs: None,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, mentions: Vec::new(), expire_secs: None,
         };
         let echo = |mid: &str| MessageContent::SiblingEcho {
             conversation_identity_id: None, group_id: None,
@@ -813,7 +813,7 @@ mod recovery_tests {
         let entry = |id: &str, at: u64| SiblingHistoryEntry {
             conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "t".into(),
             message_id: id.into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None, file: None, reactions: Vec::new(),
+            reply_to_sender_identity_id: None, sent_at_ms: at, relayed_by: None, file: None, reactions: Vec::new(),
         };
         core.apply_sibling_history("", vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)], false);
         assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""), "cleared row stays gone");
@@ -1013,7 +1013,7 @@ mod recovery_tests {
         let entry = |id: &str, at: u64| SiblingHistoryEntry {
             conversation_identity_id: Some("id1".into()), group_id: None, direction: "received".into(), text: "t".into(),
             message_id: id.into(), sender_identity_id: None, reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None, file: None, reactions: Vec::new(),
+            reply_to_sender_identity_id: None, sent_at_ms: at, relayed_by: None, file: None, reactions: Vec::new(),
         };
         core.apply_sibling_history("", vec![entry("m1", 1), entry("m2", current_time_ms() + 1_000)], false);
         assert!(!core.message_exists_in_chat("m1", None, "dev1"), "cleared row stays gone");
@@ -1024,7 +1024,7 @@ mod recovery_tests {
         let synced = |id: &str, at: u64| SyncedMessage {
             direction: "sent".into(), text: "t".into(), timestamp: at, sender_identity_id: None,
             message_id: Some(id.into()), sent_at_ms: at, is_deleted: false, is_edited: false,
-            author_proof: None, reactions: Vec::new(),
+            reactions: Vec::new(),
         };
         let page = || vec![synced("old", floor - 100 * day), synced("a", floor - 40 * day), synced("b", floor - 20 * day), synced("new", floor + 1)];
         // Chat-open sync (no cursor) and a reply to no request of ours: floor holds.
@@ -1089,7 +1089,7 @@ mod recovery_tests {
         let entry = SiblingHistoryEntry {
             conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "old".into(),
             message_id: "m1".into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: 100, author_proof: None, file: None, reactions: Vec::new(),
+            reply_to_sender_identity_id: None, sent_at_ms: 100, relayed_by: None, file: None, reactions: Vec::new(),
         };
         core.apply_sibling_history("", vec![entry.clone()], false);
         assert!(!core.message_exists_in_chat("m1", Some(gid.as_str()), ""));
@@ -1221,7 +1221,7 @@ mod recovery_tests {
         let entry = |id: &str, at: u64| SiblingHistoryEntry {
             conversation_identity_id: None, group_id: Some(gid.clone()), direction: "received".into(), text: "t".into(),
             message_id: id.into(), sender_identity_id: Some("x".into()), reply_to_message_id: None, reply_to_preview: None,
-            reply_to_sender_identity_id: None, sent_at_ms: at, author_proof: None, file: None, reactions: Vec::new(),
+            reply_to_sender_identity_id: None, sent_at_ms: at, relayed_by: None, file: None, reactions: Vec::new(),
         };
         // Press [100, 1000), cursor at 100. A cut page down to 500, budget
         // left but no sibling connected: cursor back up to 501.
@@ -1659,34 +1659,6 @@ mod at_rest_tests {
         assert!(conn.execute("INSERT INTO contacts VALUES ('three', 'a', 'idA', '[]', 0, NULL)", []).is_err());
     }
 
-    /// a revoked device of a group member who is not
-    /// a contact signs rows dated after its revoke in vain.
-    #[test]
-    fn non_contact_revoke_dates_group_author_proofs() {
-        let base = std::env::temp_dir().join(format!("typeon-orv-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let mut cores: Vec<P2PCore> = (0..2).map(|i| {
-            let d = base.join(i.to_string());
-            std::fs::create_dir_all(&d).unwrap();
-            let mut c = P2PCore::new();
-            c.init_db(d.to_str().unwrap(), &[1u8; 32]).unwrap();
-            c
-        }).collect();
-        let m = cores[1].generate_identity("m".into()).unwrap().0;
-        let mut rec = cores[1].own_devices[&m].clone();
-        let proof = cores[1].sign_group_author("g", "x", "t").unwrap();
-        cores[0].generate_identity("me".into()).unwrap();
-        rec.is_active = false;
-        cores[0].known_remote_devices.insert(m.clone(), rec);
-        // Inactive with no revoke time: refused.
-        assert!(!cores[0].group_author_proof_valid("g", "x", &m, "t", 100, Some(&proof)));
-        cores[0].meta_put(&format!("orv:{m}:{m}"), "1000");
-        assert!(cores[0].owner_revoked(&m, &m));
-        assert!(cores[0].group_author_proof_valid("g", "x", &m, "t", 999, Some(&proof)));
-        assert!(!cores[0].group_author_proof_valid("g", "x", &m, "t", 1000, Some(&proof)));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
     /// The automatic sibling backfill ends a cut answer at a time over all
     /// chats and the next answer starts there: a busy chat loses no rows.
     #[test]
@@ -1720,26 +1692,12 @@ mod at_rest_tests {
     }
 
     #[test]
-    fn group_author_statement_separates_its_fields() {
-        // "ab"+"c" and "a"+"bc" must not sign the same bytes.
-        assert_ne!(group_author_statement("ab", "c", "i", "d", "t"), group_author_statement("a", "bc", "i", "d", "t"));
-        assert_ne!(group_author_statement("g", "m", "i", "d", "hello"), group_author_statement("g", "m", "i", "d", "hellp"));
-        // A deletion is not the signature of an empty text.
-        assert_ne!(group_author_statement("g", "m", "i", "d", ""), group_author_statement("g", "m", "i", "d", GROUP_TOMBSTONE));
-        // No keys and no known device: nothing verifies.
-        let core = P2PCore::new();
-        assert!(!core.group_author_proof_valid("g", "m", "i", "t", 1, None));
-        assert!(!core.group_author_proof_valid("g", "m", "i", "t", 1, Some("fp:00")));
-        assert!(!core.group_author_proof_valid("g", "m", "i", "t", 1, Some("fp:00:00")));
-    }
-
-    #[test]
     fn queued_content_is_sealed_and_legacy_rows_still_load() {
         let mut core = P2PCore::new();
         core.skipped_key_encryption_key = Some([5u8; 32]);
         let plain = ciborium_bytes(&MessageContent::Text {
             text: "secret-marker".into(), group_id: None, group_message_local_id: None, sent_at_ms: 1,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs: None,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, mentions: Vec::new(), expire_secs: None,
         }).unwrap();
         let sealed = core.seal_local_blob(&plain).unwrap();
         assert!(!sealed.windows(13).any(|w| w == b"secret-marker"));
@@ -1873,12 +1831,12 @@ mod review5_tests {
         let m1 = format!("{}-1", hex::encode(group_msg_tag(gid, &author, "-1")));
         core.archive_group_message(gid, &author, "received", b"old", Some(&m1), None, None, None, 5, None).unwrap();
         // Another member may not edit it: the id carries the author's tag.
-        let other = MessageContent::Edit { target_message_id: m1.clone(), new_text: "x".into(), group_id: Some(gid.into()), edited_at_ms: 9, author_proof: None };
+        let other = MessageContent::Edit { target_message_id: m1.clone(), new_text: "x".into(), group_id: Some(gid.into()), edited_at_ms: 9 };
         assert_eq!(core.apply_edit_or_delete_content("fp", &"cd".repeat(32), "p0", other)["type"], "noop");
-        let edit = MessageContent::Edit { target_message_id: m1.clone(), new_text: "new".into(), group_id: Some(gid.into()), edited_at_ms: 10, author_proof: None };
+        let edit = MessageContent::Edit { target_message_id: m1.clone(), new_text: "new".into(), group_id: Some(gid.into()), edited_at_ms: 10 };
         assert_eq!(core.apply_edit_or_delete_content("fp", &author, "p1", edit)["type"], "group_edit");
         core.remove_group_locally(gid);
-        let delete = MessageContent::Delete { target_message_id: m1, group_id: Some(gid.into()), author_proof: None };
+        let delete = MessageContent::Delete { target_message_id: m1, group_id: Some(gid.into()) };
         assert_eq!(core.apply_edit_or_delete_content("fp", &author, "p2", delete)["type"], "noop");
         let _ = std::fs::remove_dir_all(&dir);
     }

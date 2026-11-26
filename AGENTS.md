@@ -41,6 +41,7 @@ Windows specifics:
 - Autostart: Settings → Network → "Start with Windows" (HKCU Run, `--background`).
 - Custom fonts: `pango_font_map_add_font_file` (`src/win.rs`).
 - Debug log: the package ships `bin\typeon-debug.exe` (a release build with `--features console`: a console window, no debug assertions or debug hooks) and `gdbus.exe`. From `cmd` in `Typeon\bin`: `set RUST_LOG=info` then `typeon-debug.exe 2> log.txt`. The release `typeon.exe` has no console.
+- Tor bridges: `package.sh` copies `pt-bin/windows-x86_64/lyrebird.exe` (obfs4 + snowflake; from `tools/fetch-pt-binaries.sh`, owner runs it) into `bin\`; the core looks next to `typeon.exe`.
 
 Testing on Windows: write findings to `Linux/packaging/windows/TEST-NOTES.md` (what you did, what broke, exact error text). The Linux side reads it after reboot.
 
@@ -48,3 +49,4 @@ Testing on Windows: write findings to `Linux/packaging/windows/TEST-NOTES.md` (w
 Build inside the GNOME SDK (the host has no GStreamer -devel):
 `flatpak run --user --filesystem=home --share=network --command=sh org.gnome.Sdk//49 -c 'export PATH=/usr/lib/sdk/rust-stable/bin:$PATH CARGO_TARGET_DIR=target-sdk; cargo build'`
 Release packaging is a Flatpak: see `Linux/packaging/README.md`.
+Tor bridges: the manifest installs `pt-bin/linux-x86_64/lyrebird` (obfs4 + snowflake) into `/app/bin` (from `tools/fetch-pt-binaries.sh`); Android gets `jniLibs/<abi>/liblyrebird.so` from the same script.

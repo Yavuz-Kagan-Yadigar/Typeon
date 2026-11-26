@@ -22,6 +22,9 @@ impl ServerCore {
                 self.handle_rebind(peer, enrollment_id, ts_ms, sig, sig_pq)
             }
 
+            // Anonymous: no enrollment, the deposit secret or cancel secret is the authorisation.
+            req @ (ServerRequest::Deposit { .. } | ServerRequest::Cancel { .. }) => self.handle_anonymous(peer, req),
+
             // --- Enrollment is REQUIRED from here on ---
             other => {
                 let Some(e) = self.authenticate(peer) else {
@@ -293,7 +296,6 @@ impl ServerCore {
             ServerRequest::Fetch { cursors, .. } => cursors.len() > boxes,
             ServerRequest::Ack { acks } => acks.len() > boxes,
             ServerRequest::ArchiveProbe { buckets } | ServerRequest::ArchivePurge { purge_secrets: buckets } => buckets.len() > boxes,
-            ServerRequest::Cancel { seqs, .. } => seqs.len() > boxes,
             ServerRequest::ArchivePut { records, .. } => records.len() > server_proto::MAX_ARCHIVE_PUT_RECORDS,
             _ => false,
         };
@@ -311,9 +313,7 @@ impl ServerCore {
             ServerRequest::ArchivePurge { purge_secrets } => {
                 purge_secrets.iter().any(|s| server_proto::archive_bucket_for_purge_secret(s).is_none())
             }
-            ServerRequest::Deposit { mailbox: id, .. }
-            | ServerRequest::Cancel { mailbox: id, .. }
-            | ServerRequest::ArchivePut { bucket: id, .. }
+            ServerRequest::ArchivePut { bucket: id, .. }
             | ServerRequest::ArchiveFetch { bucket: id, .. } => !is_safe_id(id),
             _ => false,
         };
@@ -331,14 +331,17 @@ impl ServerCore {
                     return ServerResponse::Err(ServerErrorCode::RateLimited);
                 }
                 let me = self.swarm.local_peer_id().to_string();
-                let proved: Vec<(String, Vec<u8>)> = proofs
+                let proved: Vec<store::ProvedReader> = proofs
                     .iter()
                     .filter(|p| add.contains(&p.mailbox))
                     .filter(|p| {
                         let input = server_proto::register_signing_input(&p.mailbox, &e.enrollment_id, &me);
                         verify_hybrid(&p.pk, &p.pk_pq, &input, &p.sig, &p.sig_pq)
                     })
-                    .map(|p| (p.mailbox.clone(), server_proto::mailbox_key_hash(&p.pk, &p.pk_pq).to_vec()))
+                    .map(|p| {
+                        let verifier = (p.deposit_verifier.len() == 32).then(|| p.deposit_verifier.clone());
+                        (p.mailbox.clone(), server_proto::mailbox_key_hash(&p.pk, &p.pk_pq).to_vec(), verifier)
+                    })
                     .collect();
                 // A proof that did not verify is a refusal, not `proof_needed`. The client would send the same bytes again.
                 let bad_proof = proofs.iter().filter(|p| add.contains(&p.mailbox)).count().saturating_sub(proved.len());
@@ -373,65 +376,6 @@ impl ServerCore {
                 ServerResponse::Registered { proof_needed: unproven, refused }
             }
 
-            ServerRequest::Deposit { mailbox, sealed } => {
-                if sealed.len() > limits.max_item_bytes as usize || sealed.len() > MAX_DEPOSIT_BYTES {
-                    return ServerResponse::Err(ServerErrorCode::TooLarge);
-                }
-                // Depositing into a mailbox that is not registered tells the client "this recipient is not on my
-                // server". The client then delivers without this server for a while (its `UnknownMailbox` pause),
-                // so no round trip is wasted on every message.
-                if !self.store.mailbox_has_other_reader(&mailbox, &e.enrollment_id) {
-                    return ServerResponse::Err(ServerErrorCode::UnknownMailbox);
-                }
-                // Only this request's own counter. A full blob quota must not stop the device from messaging.
-                if e.bytes_mail as u64 > limits.max_mail_bytes {
-                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
-                }
-                // See `total_budget_exceeded`. The per-record quota alone does not protect the device's disk.
-                let row_bytes = store::mail_row_bytes(&mailbox, &sealed);
-                if self.total_budget_exceeded(row_bytes, true) {
-                    warn!("Total disk budget full, delivery rejected");
-                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
-                }
-                // Per depositor (see `depositor_usage`). A box full of someone else's deposits must not refuse ours. The
-                // byte share keeps one unreachable reader from taking the depositor's whole quota, which would stop its
-                // mail to every other box too.
-                let (rows, bytes) = self.store.depositor_usage(&mailbox, &e.enrollment_id);
-                if rows >= limits.max_items_per_mailbox as i64
-                    || bytes.max(0) as u64 + row_bytes as u64 > limits.max_mail_bytes / MAIL_BOX_SHARE
-                {
-                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
-                }
-                // What one depositor pushes into one box per window, acknowledged or not. Acks free the quota within
-                // seconds, so without this a sender could make a reader download junk without end.
-                let mono = mono_ms();
-                let win = self.deposit_window.entry((peer, mailbox.clone())).or_insert((mono, 0));
-                if mono.saturating_sub(win.0) > DEPOSIT_WINDOW_MS {
-                    *win = (mono, 0);
-                }
-                if win.1 + row_bytes as u64 > DEPOSIT_BYTES_PER_BOX_WINDOW {
-                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
-                }
-                match self.store.deposit_written(&mailbox, &sealed, &e.enrollment_id, now, limits.mailbox_ttl_ms as i64) {
-                    // A repeat wrote nothing: no charge, no push.
-                    Ok((seq, false)) => ServerResponse::Deposited { seq },
-                    Ok((seq, true)) => {
-                        if let Some(win) = self.deposit_window.get_mut(&(peer, mailbox.clone())) {
-                            win.1 += row_bytes as u64;
-                        }
-                        self.note_total_written(row_bytes);
-                        self.stats.deposits += 1;
-                        let item = MailItem { mailbox_id: mailbox.clone(), seq, deposited_at_ms: now as u64, sealed };
-                        self.notify_owner_of(&mailbox, peer, item);
-                        ServerResponse::Deposited { seq }
-                    }
-                    Err(msg) => {
-                        error!("Deposit could not be written: {msg}");
-                        ServerResponse::Err(ServerErrorCode::Internal)
-                    }
-                }
-            }
-
             ServerRequest::Fetch { cursors, max_items, max_bytes } => {
                 self.notified.remove(&peer);
                 let (items, more) = self.store.fetch(
@@ -447,11 +391,10 @@ impl ServerCore {
 
             ServerRequest::Ack { acks } => {
                 match self.store.ack_many(&acks, &e.enrollment_id) {
-                    Ok(deleted) => {
-                        if deleted > 0 {
-                            // Quota must not only grow. Delivered bytes are charged back to the depositor's account.
-                            self.mail_recount_due = true;
-                        }
+                    Ok(_) => {
+                        // Quota must not only grow. What the owner acked is taken off its account, deleted or not (a
+                        // co-reader that never acks keeps the row; see `recount_mail_bytes`). Once per tick.
+                        self.mail_recount_due = true;
                         ServerResponse::Ok
                     }
                     // `Ok` would make the client keep its cursor and never ack these items again.
@@ -460,17 +403,6 @@ impl ServerCore {
                         ServerResponse::Err(ServerErrorCode::Internal)
                     }
                 }
-            }
-
-            // See `ServerRequest::Cancel`. The sender withdraws its own undelivered packet. The ownership check is in
-            // the query itself: `depositor = requester`.
-            ServerRequest::Cancel { mailbox, seqs } => {
-                let removed = self.store.cancel_own_deposits(&mailbox, &seqs, &e.enrollment_id);
-                if removed > 0 {
-                    self.mail_recount_due = true;
-                    info!("Sender withdrew {} packets", removed);
-                }
-                ServerResponse::Ok
             }
 
             ServerRequest::ArchivePut { bucket, records } => {
@@ -552,12 +484,126 @@ impl ServerCore {
                 ServerResponse::Ok
             }
 
-            // Types a client may never send to the server.
-            ServerRequest::Hello { .. }
+            // Types a client may never send to the server here (`Deposit` and `Cancel` went to `handle_anonymous`).
+            ServerRequest::Deposit { .. }
+            | ServerRequest::Cancel { .. }
+            | ServerRequest::Hello { .. }
             | ServerRequest::Enroll { .. }
             | ServerRequest::Rebind { .. }
             | ServerRequest::Notify
             | ServerRequest::Push { .. } => ServerResponse::Err(ServerErrorCode::BadDirection),
+        }
+    }
+
+    /// `Deposit` and `Cancel`. They come on a connection with a throwaway PeerId (see `ServerRequest::Deposit`), so no
+    /// limit here is per peer: the box's deposit secret is the authorisation, and its owner's quota, the box's own caps
+    /// and the box's deposit rate are the limits.
+    pub(super) fn handle_anonymous(&mut self, peer: PeerId, req: ServerRequest) -> ServerResponse {
+        let now = now_ms();
+        let mono = mono_ms();
+        // One global budget for every anonymous connection together: PeerIds are free, so a per-peer limit alone does
+        // not bound the work.
+        if !anon_bucket_take(&mut self.anon_bucket, mono) {
+            self.stats.rejected += 1;
+            return ServerResponse::Err(ServerErrorCode::RateLimited);
+        }
+        let limits = self.config.limits.clone();
+        match req {
+            ServerRequest::Deposit { mailbox, deposit_secret, cancel_hash, sealed } => {
+                if !is_safe_id(&mailbox) || deposit_secret.len() != server_proto::DEPOSIT_SECRET_LEN || cancel_hash.len() != 32 {
+                    return ServerResponse::Err(ServerErrorCode::BadDirection);
+                }
+                if sealed.len() > limits.max_item_bytes as usize || sealed.len() > MAX_DEPOSIT_BYTES {
+                    return ServerResponse::Err(ServerErrorCode::TooLarge);
+                }
+                // Unknown box and wrong secret: one query, one answer. The client reads it as "this recipient is not on my
+                // server" and pauses deposits to the box (its `UnknownMailbox` pause).
+                let Some(owner) = self.store.deposit_owner(&mailbox, &deposit_secret, limits.max_mail_bytes) else {
+                    self.stats.rejected += 1;
+                    return ServerResponse::Err(ServerErrorCode::UnknownMailbox);
+                };
+                // Per box, repeats included: a client stuck re-depositing the same envelope (the old handshake storm,
+                // about one a second) is stopped here, whatever PeerId it comes from.
+                // This connection's own share comes first, so one sender cannot use up the box for the others.
+                let row_bytes = store::mail_row_bytes(&mailbox, &sealed);
+                let Some(conn) = self.conns.get_mut(&peer) else {
+                    return ServerResponse::Err(ServerErrorCode::RateLimited);
+                };
+                if !conn.anon_boxes.contains_key(&mailbox) && conn.anon_boxes.len() >= MAX_ANON_BOXES_PER_PEER {
+                    return ServerResponse::Err(ServerErrorCode::RateLimited);
+                }
+                let peer_win = conn.anon_boxes.entry(mailbox.clone()).or_insert((mono, 0, 0));
+                if let Err(code) = box_window_admit(peer_win, mono, row_bytes as u64, PEER_SHARE_OF_BOX_WINDOW) {
+                    return ServerResponse::Err(code);
+                }
+                let win = self.deposit_window.entry(mailbox.clone()).or_insert((mono, 0, 0));
+                if let Err(code) = box_window_admit(win, mono, row_bytes as u64, 1) {
+                    return ServerResponse::Err(code);
+                }
+                // Charged to the box's owner. Only this counter: a full blob quota must not stop its mail.
+                if self.store.enrollment_by_id(&owner).map_or(true, |e| e.bytes_mail.max(0) as u64 > limits.max_mail_bytes) {
+                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+                }
+                // See `total_budget_exceeded`. The per-record quota alone does not protect the device's disk.
+                if self.total_budget_exceeded(row_bytes, true) {
+                    warn!("Total disk budget full, delivery rejected");
+                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+                }
+                // One box holds at most this share of its owner's quota, so one dead conversation (a contact that sends
+                // and sends while this reader is away) cannot take the owner's whole quota and stop its other boxes.
+                let (rows, bytes) = self.store.mailbox_usage(&mailbox);
+                if rows >= limits.max_items_per_mailbox as i64
+                    || bytes.max(0) as u64 + row_bytes as u64 > limits.max_mail_bytes / MAIL_BOX_SHARE
+                {
+                    return ServerResponse::Err(ServerErrorCode::QuotaExceeded);
+                }
+                match self.store.deposit_written(&mailbox, &sealed, &owner, &cancel_hash, now, limits.mailbox_ttl_ms as i64) {
+                    // A repeat wrote nothing: no charge, no push.
+                    Ok((seq, false)) => {
+                        self.note_anon_done(peer, mono);
+                        ServerResponse::Deposited { seq }
+                    }
+                    Ok((seq, true)) => {
+                        self.note_anon_done(peer, mono);
+                        if let Some(win) = self.deposit_window.get_mut(&mailbox) {
+                            win.1 += row_bytes as u64;
+                        }
+                        if let Some(win) = self.conns.get_mut(&peer).and_then(|c| c.anon_boxes.get_mut(&mailbox)) {
+                            win.1 += row_bytes as u64;
+                        }
+                        self.note_total_written(row_bytes);
+                        self.stats.deposits += 1;
+                        let item = MailItem { mailbox_id: mailbox.clone(), seq, deposited_at_ms: now as u64, sealed };
+                        self.notify_owner_of(&mailbox, item);
+                        ServerResponse::Deposited { seq }
+                    }
+                    Err(msg) => {
+                        error!("Deposit could not be written: {msg}");
+                        ServerResponse::Err(ServerErrorCode::Internal)
+                    }
+                }
+            }
+            // See `ServerRequest::Cancel`. The check is in the query: the cancel secret must hash to the stored hash.
+            ServerRequest::Cancel { mailbox, seq, cancel_secret } => {
+                if !is_safe_id(&mailbox) || cancel_secret.len() != server_proto::DEPOSIT_SECRET_LEN {
+                    return ServerResponse::Err(ServerErrorCode::BadDirection);
+                }
+                if self.store.cancel_deposit(&mailbox, seq, &cancel_secret) > 0 {
+                    self.mail_recount_due = true;
+                    self.note_anon_done(peer, mono);
+                    info!("Sender withdrew a packet");
+                }
+                ServerResponse::Ok
+            }
+            _ => ServerResponse::Err(ServerErrorCode::BadDirection),
+        }
+    }
+
+    /// See `UNENROLLED_GRACE_MS`: a connection whose deposit or cancel went through is not idle. A refused one (junk,
+    /// wrong secret, over a limit) does not keep its slot.
+    fn note_anon_done(&mut self, peer: PeerId, mono: u64) {
+        if let Some(c) = self.conns.get_mut(&peer) {
+            c.last_anon_at = mono;
         }
     }
 
@@ -569,11 +615,11 @@ impl ServerCore {
     ///
     /// Without this the client would have to poll with `Fetch` constantly, which means battery drain on a phone.
     /// The payload is not carried here. The client runs `Fetch` in its own cycle, so cursor logic stays intact.
-    pub(super) fn notify_owner_of(&mut self, mailbox: &str, depositor: PeerId, item: MailItem) {
+    pub(super) fn notify_owner_of(&mut self, mailbox: &str, item: MailItem) {
         let targets: Vec<PeerId> = self
             .live_interest
             .iter()
-            .filter(|(peer, boxes)| **peer != depositor && boxes.contains(mailbox))
+            .filter(|(_, boxes)| boxes.contains(mailbox))
             .map(|(peer, _)| *peer)
             .collect();
         for peer in targets {

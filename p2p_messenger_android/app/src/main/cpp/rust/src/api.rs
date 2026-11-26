@@ -151,6 +151,22 @@ pub fn start_network(node_mode: bool, tor_enabled: bool) -> String {
     }))
 }
 
+/// Tor connection mode for the next `start_network`: "direct", "snowflake" or "obfs4" (+ `bridges`).
+/// `pt_dir`: folder of the PT binaries; empty = next to the executable. "OK" or "Error: ...".
+pub fn set_tor_transport(mode: &str, bridges: &str, pt_dir: &str) -> String {
+    ok_result(catch_panic(move || crate::tor::set_transport(mode, bridges, pt_dir)))
+}
+
+/// "OK", or "Error: line N: ..." for the first bad obfs4 bridge line.
+pub fn validate_bridge_lines(text: &str) -> String {
+    ok_result(catch_panic(move || crate::tor::parse_bridge_lines(text).map(|_| ())))
+}
+
+/// The PT binary for `mode` is shipped in this build (see `set_tor_transport` for `pt_dir`).
+pub fn tor_transport_available(mode: &str, pt_dir: &str) -> bool {
+    crate::tor::pt_available(mode, pt_dir)
+}
+
 pub fn set_node_mode(enabled: bool) {
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();

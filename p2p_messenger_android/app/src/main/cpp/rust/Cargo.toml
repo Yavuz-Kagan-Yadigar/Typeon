@@ -1,6 +1,6 @@
 [package]
 name = "p2p_messenger_core"
-version = "8.0.0"
+version = "9.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
@@ -124,8 +124,9 @@ rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"]
 # SECURITY.md, section 5, "Tor onion services"). rustls is used instead of
 # native-tls, to avoid cross-compiling OpenSSL. arti's rustls uses `ring`, which
 # this project already cross-compiles. onion-service-service = host a service;
-# onion-service-client + keymgr = a persistent .onion address.
-arti-client = { version = "0.24", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "compression", "keymgr"] }
+# onion-service-client + keymgr = a persistent .onion address. pt-client (implies
+# bridge-client) = Tor bridges over obfs4 (lyrebird) / Snowflake, see tor.rs `set_transport`.
+arti-client = { version = "0.24", default-features = false, features = ["tokio", "rustls", "onion-service-client", "onion-service-service", "compression", "keymgr", "pt-client"] }
 tor-hsservice = "0.24"
 tor-cell = "0.24"
 # Inbound BEGIN port check (`IncomingStreamRequest`). Same version arti pulls in.
@@ -161,3 +162,4 @@ strip = true
 [patch.crates-io]
 tor-hsservice = { path = "vendor/tor-hsservice" }
 tor-netdir = { path = "vendor/tor-netdir" }
+tor-chanmgr = { path = "vendor/tor-chanmgr" }

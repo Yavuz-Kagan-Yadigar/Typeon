@@ -336,3 +336,97 @@ internal fun SettingsFragment.buildServerRow(obj: org.json.JSONObject): View {
 
     return row
 }
+
+/** Tor connection modes, in dialog order. See Rust `tor::set_transport`. */
+private val TOR_MODES = arrayOf("direct", "snowflake", "obfs4")
+
+internal fun SettingsFragment.torModeLabel(mode: String): String = getString(
+    when (mode) {
+        "snowflake" -> R.string.tor_mode_snowflake
+        "obfs4" -> R.string.tor_mode_obfs4
+        else -> R.string.tor_mode_direct
+    }
+)
+
+internal fun SettingsFragment.setupTorMode(view: View) {
+    val desc = view.findViewById<TextView>(R.id.tor_mode_desc)
+    desc.text = torModeLabel(P2PService.getTorMode(requireContext()))
+    view.findViewById<Button>(R.id.btn_tor_mode).setOnClickListener { showTorModeDialog() }
+}
+
+/** Direct / Snowflake / obfs4 bridges. A change is stored and the app restarts: arti reads it only at start
+ *  (see util/AppRestarter.kt). A mode whose PT binary is not in this APK cannot be picked. */
+internal fun SettingsFragment.showTorModeDialog() {
+    val ctx = requireContext()
+    val ptDir = ctx.applicationInfo.nativeLibraryDir
+    val current = P2PService.getTorMode(ctx)
+    val storedBridges = P2PService.getTorBridges(ctx)
+    val pad = (16 * resources.displayMetrics.density).toInt()
+    val root = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
+    root.addView(TextView(ctx).apply { setText(R.string.msg_tor_mode_restart) })
+    val group = android.widget.RadioGroup(ctx)
+    TOR_MODES.forEachIndexed { i, mode ->
+        // ponytail: Snowflake is off on Android. Device test 2026-11-26: lyrebird's WebRTC never opened a
+        // DataChannel on the phone (same binary version and network work on Linux). Re-enable once fixed.
+        val broken = mode == "snowflake"
+        val available = !broken && P2PLib.torTransportAvailable(mode, ptDir)
+        group.addView(android.widget.RadioButton(ctx).apply {
+            id = View.generateViewId()
+            tag = mode
+            text = if (available) torModeLabel(mode)
+                else torModeLabel(mode) + "\n" + getString(if (broken) R.string.tor_mode_not_yet_android else R.string.tor_mode_unavailable)
+            isEnabled = available || mode == current
+            isChecked = mode == current || (i == 0 && current !in TOR_MODES)
+        })
+    }
+    root.addView(group)
+    val bridgesInput = EditText(ctx).apply {
+        hint = getString(R.string.hint_tor_bridges)
+        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        setSingleLine(false)
+        minLines = 3
+        maxLines = 8
+        textSize = 12f
+        typeface = android.graphics.Typeface.MONOSPACE
+        setText(storedBridges)
+    }
+    val errorView = TextView(ctx).apply {
+        setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
+        visibility = View.GONE
+    }
+    root.addView(bridgesInput)
+    root.addView(errorView)
+    fun selected(): String = group.findViewById<View>(group.checkedRadioButtonId)?.tag as? String ?: "direct"
+    fun syncVisibility() {
+        bridgesInput.visibility = if (selected() == "obfs4") View.VISIBLE else View.GONE
+        errorView.visibility = View.GONE
+    }
+    group.setOnCheckedChangeListener { _, _ -> syncVisibility() }
+    syncVisibility()
+
+    val dialog = AlertDialog.Builder(ctx)
+        .setTitle(R.string.lbl_tor_connection)
+        .setView(android.widget.ScrollView(ctx).apply { addView(root) })
+        .setPositiveButton(android.R.string.ok, null)
+        .setNegativeButton(android.R.string.cancel, null)
+        .create()
+    dialog.setOnShowListener {
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val mode = selected()
+            val bridges = bridgesInput.text.toString().trim()
+            if (mode == "obfs4") {
+                val check = P2PLib.validateBridgeLines(bridges)
+                if (check.startsWith("Error")) {
+                    errorView.text = getString(R.string.msg_tor_bridges_invalid, check.removePrefix("Error: "))
+                    errorView.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
+            }
+            dialog.dismiss()
+            if (mode == current && (mode != "obfs4" || bridges == storedBridges)) return@setOnClickListener
+            P2PService.setTorTransport(ctx, mode, if (mode == "obfs4") bridges else storedBridges)
+            AppRestarter.restart(ctx)
+        }
+    }
+    dialog.show()
+}

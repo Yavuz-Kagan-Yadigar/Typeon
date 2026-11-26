@@ -480,10 +480,7 @@ impl P2PCore {
                 (None, key, rows)
             }
             Some(gid) => {
-                let mut rows = self.load_group_message_history_opt(&gid, u32::MAX, None, false);
-                for m in rows.iter_mut() {
-                    m.author_proof = m.message_id.as_deref().and_then(|id| self.group_author_proof(&gid, id));
-                }
+                let rows = self.load_group_message_history_opt(&gid, u32::MAX, None, false);
                 (Some(gid), key, rows)
             }
         }
@@ -505,7 +502,7 @@ impl P2PCore {
                         let author = m.sender_identity_id.clone().unwrap_or_else(|| own_id.clone());
                         self.archive_group_message(g, &author, &m.direction, m.text.as_bytes(), mid,
                             m.reply_to_message_id.as_deref(), m.reply_to_preview.as_deref(), m.reply_to_sender_identity_id.as_deref(),
-                            m.sent_at_ms, m.author_proof.as_deref())
+                            m.sent_at_ms, m.relayed_by.as_deref())
                     }
                     None => self.archive_message(&key, &m.direction, m.text.as_bytes(), mid, m.status.as_deref(),
                         m.reply_to_message_id.as_deref(), m.reply_to_preview.as_deref(), m.sent_at_ms),
@@ -519,7 +516,7 @@ impl P2PCore {
                     direction: m.direction.clone(), text: m.text.clone(), timestamp: m.timestamp,
                     sender_identity_id: m.sender_identity_id.clone(), message_id: m.message_id.clone(),
                     sent_at_ms: m.sent_at_ms, is_deleted: m.is_deleted, is_edited: m.is_edited,
-                    author_proof: m.author_proof.clone(), reactions: Vec::new(),
+                    reactions: Vec::new(),
                 };
                 self.apply_synced_message_flags(gid.as_deref(), &key, &synced);
             }

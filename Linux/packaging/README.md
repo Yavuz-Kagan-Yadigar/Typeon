@@ -37,6 +37,13 @@ Check the builder's own exit code, and verify the commit date before packaging:
 ostree --repo=repo log app/com.p2p.messenger.Typeon/x86_64/master | head -4
 ```
 
+### Tor bridges (obfs4, Snowflake)
+
+Settings → Network → Tor connection needs the PT client `lyrebird` (it does both obfs4 and snowflake). Run
+`tools/fetch-pt-binaries.sh` once (fill `TB_VERSION` and the sha256 pins first, see its header): it puts
+it in `pt-bin/linux-x86_64/` (gitignored), and the manifest installs it next to `/app/bin/typeon`.
+Without it the build still succeeds and those modes show "not available in this build".
+
 ### Why Flatpak (not AppImage or RPM)
 
 - The app is built on **GTK4 + libadwaita**. Packaging these by hand into an AppImage

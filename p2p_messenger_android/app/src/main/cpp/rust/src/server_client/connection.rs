@@ -53,11 +53,12 @@ impl P2PCore {
             let before = self.server_deposit_locations.len();
             let pending: std::collections::HashSet<String> =
                 self.awaiting_confirmation.keys().cloned().collect();
-            self.server_deposit_locations.retain(|(_, key), _| pending.contains(location_message_id(key)));
+            self.server_deposit_locations.retain(|(_, key), loc| loc.cancelling || pending.contains(location_message_id(key)));
             let dropped = before - self.server_deposit_locations.len();
             if dropped > 0 {
                 info!("Cleaned {} stale entries from server deposit location record", dropped);
             }
+            self.resend_cancels();
         }
 
         // Only what the loop reads. A full clone carried both enrollment secret keys through every sweep.
@@ -550,32 +551,32 @@ impl P2PCore {
             }
 
             // --- Deposit ---
-            (ServerInflight::Deposit { mailbox, server_id, envelope, cancelled, .. }, ServerResponse::Deposited { seq }) => {
+            (ServerInflight::Deposit { mailbox, server_id, envelope, cancelled, cancel_secret, .. }, ServerResponse::Deposited { seq }) => {
                 if let Some(rt) = self.server_rt.get_mut(&server_id) {
                     rt.deposit_failures = 0;
                 }
                 self.server_unknown_streak.remove(&(server_id.clone(), mailbox.clone()));
                 info!("Server stored envelope: mailbox={} seq={}", mailbox_log_id(&mailbox), seq);
-                if cancelled {
-                    if let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) {
-                        let req = ServerRequest::Cancel { mailbox, seqs: vec![seq] };
-                        if let Some(id) = self.send_server_request(peer_id, req) {
-                            self.server_inflight.insert(id, ServerInflight::Cancel { server_id });
-                        }
-                    }
-                    return;
-                }
                 // The "already deposited" mark was set at send time (`try_server_deposit`).
                 if let NetworkEnvelope::Message(m) = &envelope {
                     // See `server_deposit_locations`. We store where the packet sits in the mailbox, so it can be withdrawn.
+                    let key = format!("{}|{}", mailbox, m.header.message_id);
                     self.server_deposit_locations.insert(
-                        (server_id.clone(), format!("{}|{}", mailbox, m.header.message_id)),
-                        (mailbox.clone(), seq),
+                        (server_id.clone(), key.clone()),
+                        DepositLocation { mailbox: mailbox.clone(), seq, cancel: cancel_secret, cancelling: cancelled },
                     );
+                    if cancelled {
+                        self.send_cancel(&server_id, &key);
+                    }
                 }
             }
 
-            (ServerInflight::Cancel { .. }, ServerResponse::Ok) => {}
+            // Busy server: kept, sent again at the next sweep.
+            (ServerInflight::Cancel { .. }, ServerResponse::Err(ServerErrorCode::RateLimited)) => {}
+            // Any other answer settles it: done, or the server cannot do it (sending again would not change that).
+            (ServerInflight::Cancel { server_id, key }, _) => {
+                self.server_deposit_locations.remove(&(server_id, key));
+            }
 
             // --- Fetch ---
             (ServerInflight::Fetch { server_id }, ServerResponse::Batch { items, more }) => {
@@ -669,7 +670,11 @@ impl P2PCore {
                     bytes += raw.len();
                     opened_in.insert(item.mailbox_id.clone());
                     if let Some(rt) = self.server_rt.get_mut(&server_id) {
-                        rt.taken.insert(Sha256::digest(&raw).into(), (item.mailbox_id.clone(), item.seq));
+                        let carrier = match key {
+                            MailboxKey::Session(_, peer_fp) => ItemCarrier::Session(peer_fp.clone()),
+                            MailboxKey::FirstContact(secret) => ItemCarrier::FirstContact(zeroize::Zeroizing::new(secret.clone())),
+                        };
+                        rt.taken.insert(Sha256::digest(&raw).into(), (item.mailbox_id.clone(), item.seq, carrier));
                     }
                     // CRITICAL: `None`.
                     //
@@ -1021,7 +1026,9 @@ impl P2PCore {
             // server-wide backoff below would lock the whole account out of the server, call invites included, for as long as the dead mailbox stayed full.
             // ponytail: QuotaExceeded also covers the per-account and disk caps. For those, this retries each mailbox once per backoff instead of once
             // per server, which is bounded by the mailbox count.
-            ServerErrorCode::QuotaExceeded if matches!(inflight, ServerInflight::Deposit { .. }) => {
+            // `RateLimited` on a deposit is the box's own deposit rate (the anonymous connection has no account to
+            // limit), so it pauses that box too, not the whole server.
+            ServerErrorCode::QuotaExceeded | ServerErrorCode::RateLimited if matches!(inflight, ServerInflight::Deposit { .. }) => {
                 if let ServerInflight::Deposit { mailbox, .. } = &inflight {
                     // The pause doubles per refusal, like `UnknownMailbox`. A `Deposited` resets the streak.
                     let key = (server_id.clone(), mailbox.clone());
@@ -1091,6 +1098,12 @@ impl P2PCore {
     }
 
     pub(super) fn handle_server_failure(&mut self, inflight: ServerInflight) {
+        self.handle_server_failure_with(inflight, true);
+    }
+
+    /// `back_off`: a lost `Deposit` backs the server's deposits off. The anonymous path passes `false`: it backs off
+    /// once per broken connection itself (`drive_anon_conns`).
+    pub(super) fn handle_server_failure_with(&mut self, inflight: ServerInflight, back_off: bool) {
         if let ServerInflight::Hello { server_id } | ServerInflight::Fetch { server_id } = &inflight {
             if let Some(rt) = self.server_rt.get_mut(server_id) {
                 rt.hello_sent_at = 0;
@@ -1111,8 +1124,10 @@ impl P2PCore {
             // only `Message` was ever marked.
             self.server_deposited.remove(&(server_id.clone(), dedup_key.clone()));
             // No answer: without a backoff, the retry below deposited again at once (the server still counts as ready), on every request timeout.
-            if let Some(rt) = self.server_rt.get_mut(server_id) {
-                Self::back_off_deposits(rt);
+            if back_off {
+                if let Some(rt) = self.server_rt.get_mut(server_id) {
+                    Self::back_off_deposits(rt);
+                }
             }
         }
         // The caller of a restore already got "OK": tell the UI the result is partial.

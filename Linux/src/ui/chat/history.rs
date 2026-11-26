@@ -336,6 +336,7 @@ pub(super) fn fetch_page(
             seen_by: if mine { core::parse_seen_by(message.seen_by.clone()) } else { Vec::new() },
             reactions: message.reactions.clone(),
             expire: message.expire_secs.zip(message.expire_at_ms),
+            relayed_by: message.relayed_by.clone(),
         }));
     }
 
@@ -452,5 +453,6 @@ pub(super) fn attachment_entry(attachment: &core::AttachmentSummary, peer_finger
         seen_by: Vec::new(),
         reactions: String::new(),
         expire: attachment.expire_secs.zip(attachment.expire_at_ms),
+        relayed_by: None,
     }
 }

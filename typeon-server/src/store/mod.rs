@@ -88,11 +88,12 @@ pub struct Store {
     conn: Connection,
 }
 
-/// Readers of one mailbox that registered with the same proof key: both ends of a session, or the one device of a
-/// first-contact box.
+/// Readers of one mailbox that registered with the same proof key: the device a box is the inbound box of, plus room
+/// for that device restored under a new enrollment.
 ///
 /// A key-bound box (`server_proto::KEY_BOUND_MAILBOX_PREFIX`: session and relay boxes) accepts only the key its id
-/// is derived from, so there the cap applies per box. A first-contact box cannot be bound that way, because its
+/// is derived from, and takes ONE reader (`register_mailboxes_proved`): its sender derives the same key, and as a
+/// second reader that never acks it held every row until the TTL. A first-contact box cannot be bound that way, because its
 /// sender holds the pairing code, not the reader's key. So it is counted per key, not per box. Anyone who knows a
 /// first-contact id (every co-member of a group) can make a proof with a key of its own. A per-box cap, or binding
 /// to the first key, would let such a party take the box before the real device and lock that device out. A reader
@@ -111,7 +112,7 @@ const READER_EVICT_IDLE_MS: i64 = 7 * 24 * 3600 * 1000;
 /// 150 bytes.
 const ARCHIVE_ROW_OVERHEAD: usize = 128;
 
-/// The same for a mail row (mailbox id, depositor, hash, three index entries). Charging only `sealed` would let
+/// The same for a mail row (mailbox id, owner, hashes, three index entries). Charging only `sealed` would let
 /// 3-byte items cost 3 bytes against a row of about 250 bytes.
 const MAIL_ROW_OVERHEAD: usize = 128;
 
@@ -120,8 +121,17 @@ pub fn mail_row_bytes(mailbox_id: &str, sealed: &[u8]) -> usize {
     sealed.len() + mailbox_id.len() + MAIL_ROW_OVERHEAD
 }
 
+/// (mailbox id, hash of the proof key, deposit verifier) of a `MailboxProof` whose signature was verified.
+pub type ProvedReader = (String, Vec<u8>, Option<Vec<u8>>);
+
+/// Tests: the deposit secret `register_mailboxes` registers the verifier of.
+#[cfg(test)]
+pub fn test_secret(mailbox_id: &str) -> [u8; 32] {
+    Sha256::digest(mailbox_id.as_bytes()).into()
+}
+
 /// Bump on every change to `init_schema`, or existing databases skip the migration.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Bytes an archive record is charged against its quota and the server-wide budget.
 pub fn archive_row_bytes(rec: &ArchiveRecord) -> usize {
@@ -273,6 +283,20 @@ impl Store {
         if version == SCHEMA_VERSION {
             return Ok(());
         }
+        // Version 7: per-direction inbound boxes and anonymous deposits (protocol 9). Old boxes, readers and mail are
+        // keyed to the shared pair boxes and the depositor's enrollment; they are dropped, not migrated. `mail_seq`
+        // stays, so a first-contact box (same id as before) keeps counting above old cursors.
+        // Told by the columns too: an old DB can carry `user_version` 0 (stamped by nothing, or reset).
+        let legacy_mail: bool = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('mail') WHERE name = 'depositor'", [], |r| r.get::<_, i64>(0))
+            .map_or(false, |n| n > 0);
+        if (version != 0 && version < 7) || legacy_mail {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS mail; DROP TABLE IF EXISTS mail_acks; DROP TABLE IF EXISTS mailbox_readers;
+                                DROP TABLE IF EXISTS mailboxes; DROP TABLE IF EXISTS mailbox_keys;")
+                .map_err(|e| format!("Schema could not be created: {e}"))?;
+        }
         self.conn
             .execute_batch(
                 r#"
@@ -306,20 +330,10 @@ impl Store {
                 -- `ConnState` on use: a table of used ones only grew.
                 DROP TABLE IF EXISTS used_challenges;
 
-                CREATE TABLE IF NOT EXISTS mailboxes (
-                    mailbox_id   TEXT PRIMARY KEY,
-                    owner        BLOB NOT NULL,
-                    created_at   INTEGER NOT NULL,
-                    last_seen_at INTEGER NOT NULL
-                );
-
-                -- Defter #03: bir kutunun TEK sahibi YOK — bir ratchet
-                -- kutusunu iki taraf da hem yazar hem okur (kutu kimliği
-                -- ortak kök anahtardan türüyor, bkz. `server_seal::
-                -- session_mailbox_secret`), o yüzden `mailboxes.mailbox_id`
-                -- birincil anahtarı yanlış modeldi. Erişim kontrolü artık
-                -- "bu kutuyu KAYDETMİŞ miydin" sorusu: kaydetmemiş bir
-                -- istemci ne okuyabilir ne silebilir.
+                -- Who reads a box. A session box has one reader (the device
+                -- it is the inbound box of); a first-contact box can have more
+                -- (see `MAX_READERS_PER_KEY`). Only a registered reader can
+                -- fetch or ack.
                 CREATE TABLE IF NOT EXISTS mailbox_readers (
                     mailbox_id   TEXT NOT NULL,
                     owner        BLOB NOT NULL,
@@ -328,14 +342,12 @@ impl Store {
                     -- Hash of the public keys of the `MailboxProof` this
                     -- reader registered with (see `MAX_READERS_PER_KEY`).
                     key_hash     BLOB,
+                    -- `server_proto::deposit_verifier` of the box's deposit
+                    -- secret. NULL: nobody may deposit for this reader.
+                    deposit_verifier BLOB,
                     PRIMARY KEY (mailbox_id, owner)
                 );
                 CREATE INDEX IF NOT EXISTS idx_reader_owner ON mailbox_readers(owner);
-
-                -- Mevcut kurulumlardan tek seferlik taşıma (idempotent).
-                INSERT OR IGNORE INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at)
-                    SELECT mailbox_id, owner, created_at, last_seen_at FROM mailboxes;
-                DELETE FROM mailboxes;
 
                 -- `seq` counts per mailbox (`mail_seq`): a server-global one
                 -- let any reader measure the server-wide intake rate.
@@ -347,8 +359,12 @@ impl Store {
                     byte_len        INTEGER NOT NULL,
                     deposited_at_ms INTEGER NOT NULL,
                     expires_at_ms   INTEGER NOT NULL,
-                    depositor       BLOB NOT NULL,
+                    -- The reader enrollment the item is charged to (the
+                    -- depositor is anonymous).
+                    owner           BLOB NOT NULL,
                     sealed_hash     BLOB,
+                    -- `server_proto::cancel_hash` of the deposit's cancel secret.
+                    cancel_hash     BLOB,
                     UNIQUE (mailbox_id, seq)
                 );
                 -- Last seq handed out per mailbox. Never pruned: a reset
@@ -359,11 +375,9 @@ impl Store {
                 DROP INDEX IF EXISTS idx_mail_dedup;
                 DROP INDEX IF EXISTS idx_mail_fetch;
 
-                -- Okuyucu başına onay imleci. Kayıt herkese açık olduğundan
-                -- (ilk-temas kutusunun kimliği cihaz parmak izinden türüyor),
-                -- tek bir okuyucunun `Ack`'i postayı başkaları için SİLEMEZ:
-                -- satır ancak bırakan dışındaki bütün okuyucular onaylayınca
-                -- gider (bkz. `delete_fully_acked`).
+                -- Per-reader ack cursor. One reader's `Ack` cannot delete mail
+                -- for another: a row goes once every active reader acked it
+                -- (see `delete_fully_acked`).
                 CREATE TABLE IF NOT EXISTS mail_acks (
                     mailbox_id  TEXT NOT NULL,
                     owner       BLOB NOT NULL,
@@ -437,62 +451,27 @@ impl Store {
             }
         };
         add_column("ALTER TABLE blobs ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 0")?;
-        add_column("ALTER TABLE mail ADD COLUMN sealed_hash BLOB")?;
         // Hash of the invite the enrollment came in with. The public join code gets a small allowance of active
         // enrollments (see `handle_enroll`).
         add_column("ALTER TABLE enrollments ADD COLUMN invite_hash BLOB")?;
-        // The global AUTOINCREMENT `seq` becomes per mailbox. Old rows keep their seq. New rows start above the old
-        // high-water mark (`mail_seq_base`), so no client cursor ends up above new mail.
-        let old_mail: bool = self
-            .conn
-            .query_row("SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master WHERE type = 'table' AND name = 'mail'", [], |r| r.get(0))
-            .map_err(|e| format!("Schema could not be created: {e}"))?;
-        if old_mail {
-            self.conn
-                .execute_batch(
-                    "BEGIN;
-                     INSERT OR REPLACE INTO meta (k, v) VALUES ('mail_seq_base',
-                         MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'mail'), 0),
-                             COALESCE((SELECT MAX(seq) FROM mail), 0)));
-                     CREATE TABLE mail_new (
-                         id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, mailbox_id TEXT NOT NULL,
-                         sealed BLOB NOT NULL, byte_len INTEGER NOT NULL, deposited_at_ms INTEGER NOT NULL,
-                         expires_at_ms INTEGER NOT NULL, depositor BLOB NOT NULL, sealed_hash BLOB,
-                         UNIQUE (mailbox_id, seq));
-                     INSERT INTO mail_new (id, seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
-                         SELECT seq, seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash FROM mail;
-                     DROP TABLE mail;
-                     ALTER TABLE mail_new RENAME TO mail;
-                     COMMIT;",
-                )
-                .map_err(|e| format!("Schema could not be created: {e}"))?;
-        }
-        // The per-mailbox key binding becomes a per-reader key. Each reader keeps the key its box was bound to, then
-        // the binding table is dropped.
-        add_column("ALTER TABLE mailbox_readers ADD COLUMN key_hash BLOB")?;
-        let _ = self.conn.execute(
-            "UPDATE mailbox_readers SET key_hash = (SELECT k.key_hash FROM mailbox_keys k
-                                                    WHERE k.mailbox_id = mailbox_readers.mailbox_id)
-             WHERE key_hash IS NULL",
-            [],
-        );
-        let _ = self.conn.execute("DROP TABLE IF EXISTS mailbox_keys", []);
         // `deposit` finds a repeated item through this index alone.
         self.conn
             .execute_batch(
-                "CREATE INDEX IF NOT EXISTS idx_mail_hash ON mail(mailbox_id, depositor, sealed_hash);
+                "CREATE INDEX IF NOT EXISTS idx_mail_hash ON mail(mailbox_id, sealed_hash);
                  CREATE INDEX IF NOT EXISTS idx_mail_expiry ON mail(expires_at_ms);
                  -- Covering: `recount_mail_bytes` and `total_stored_bytes` sum
                  -- from the index and never touch the `sealed` blobs.
-                 CREATE INDEX IF NOT EXISTS idx_mail_depositor ON mail(depositor, byte_len);
-                 -- Covering for `depositor_usage`: count and bytes without reading `sealed`.
-                 CREATE INDEX IF NOT EXISTS idx_mail_box_depositor ON mail(mailbox_id, depositor, seq, byte_len);
-                 -- `fetch` and `unacked_for` skip the reader's own rows in the index, not in the table.
-                 CREATE INDEX IF NOT EXISTS idx_mail_reader ON mail(mailbox_id, seq, depositor);
+                 -- `recount_mail_bytes` checks each row against its owner's ack cursor.
+                 DROP INDEX IF EXISTS idx_mail_owner;
+                 CREATE INDEX IF NOT EXISTS idx_mail_owner_seq ON mail(owner, mailbox_id, seq, byte_len);
+                 -- Covering for `mailbox_usage`, `fetch` and `unacked_for`: no `sealed` read.
+                 CREATE INDEX IF NOT EXISTS idx_mail_box ON mail(mailbox_id, seq, byte_len);
                  -- `sweep_expired_archive` reads a range, not the whole table.
                  CREATE INDEX IF NOT EXISTS idx_archive_expiry ON archive(updated_at, owner);",
             )
             .map_err(|e| format!("Schema could not be created: {e}"))?;
+        // The dropped mail was charged to its owners: their quota counters start from what is left (nothing).
+        self.recount_mail_bytes();
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| format!("Schema could not be created: {e}"))?;

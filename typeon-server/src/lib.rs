@@ -19,9 +19,9 @@
 //!
 //! ## What it can see (documented in SECURITY.md)
 //!
-//! Size, timing and volume, and which `PeerId` registered which mailbox. That is the contact graph
-//! among ITS OWN users. Hiding it would need an anonymous credential per mailbox plus separate circuits,
-//! which is out of scope.
+//! Size, timing and volume, and which enrollment reads which mailbox. Each device reads only its own inbound
+//! boxes, and deposits arrive anonymously (throwaway PeerId, own Tor circuit, a per-box deposit secret), so the
+//! server does not see who writes to whom. Timing can still hint at it; SECURITY.md lists the leaks.
 
 pub mod store;
 
@@ -100,12 +100,26 @@ const BLOB_CHUNK_MIN_CHARGE: u64 = 64;
 /// How many strides past the current file end a `BlobPut` may write. Covers the client's upload pipeline
 /// (`BLOB_WINDOW_MAX` = 40). Further out is refused, so one request cannot charge (or zero-fill) gigabytes.
 const BLOB_PUT_AHEAD_CHUNKS: u64 = 64;
-/// One depositor may hold at most `max_mail_bytes / MAIL_BOX_SHARE` in one box. A reader that never comes back
-/// then costs the depositor only this share, not its mail to every other box.
+/// One box may hold at most `max_mail_bytes / MAIL_BOX_SHARE` unacknowledged. A box whose sender keeps sending while
+/// the reader is away then costs the reader only this share of its quota, not its mail in every other box.
 const MAIL_BOX_SHARE: u64 = 8;
-/// What one depositor may put into one box per `DEPOSIT_WINDOW_MS`, acknowledged or not.
+/// What one box may take per `DEPOSIT_WINDOW_MS`, acknowledged or not, from all (anonymous) depositors together.
 const DEPOSIT_BYTES_PER_BOX_WINDOW: u64 = 16 * 1024 * 1024;
+/// Deposits (repeats included) one box takes per `DEPOSIT_WINDOW_MS`. A real conversation stays far below it; a client
+/// stuck re-depositing (the old one-a-second handshake storm) hits it within the window.
+const DEPOSITS_PER_BOX_WINDOW: u32 = 1_200;
 const DEPOSIT_WINDOW_MS: u64 = 60 * 60 * 1000;
+/// One anonymous connection (PeerId) takes at most this share of a box's window, so one holder of a shared deposit
+/// secret (a group member, anyone with a shown QR code) cannot use up the box for every other sender alone.
+/// ponytail: PeerIds are free, so `PEER_SHARE_OF_BOX_WINDOW` connections still can; only the global anonymous budget
+/// (`ANON_BUCKET_CAP`) bounds that.
+const PEER_SHARE_OF_BOX_WINDOW: u64 = 4;
+/// Boxes one anonymous connection may deposit into within its lifetime (bounds its `ConnState.anon_boxes`).
+const MAX_ANON_BOXES_PER_PEER: usize = 512;
+/// Global token bucket for anonymous requests (`Deposit`, `Cancel`), from all connections together: burst size and
+/// refill per ms (20 a second). Refilled on access, no timer.
+const ANON_BUCKET_CAP: f64 = 3_000.0;
+const ANON_REFILL_PER_MS: f64 = 0.02;
 /// Archive and blob writes stop at `budget - budget / MAIL_RESERVE_DIVISOR`. The rest stays for mail, so a full
 /// archive or blob store does not stop store-and-forward.
 const MAIL_RESERVE_DIVISOR: u64 = 10;
@@ -163,6 +177,8 @@ const MAX_STREAMS_PER_CONNECTION: usize = 64;
 /// A connected peer without an active enrollment is cut after this long. Otherwise it held one of the
 /// `MAX_INBOUND_CONNECTIONS` slots indefinitely.
 const UNENROLLED_GRACE_MS: u64 = 60_000;
+/// Hard cap on an unenrolled (anonymous deposit) connection, deposits or not. A client's burst is over in seconds.
+const UNENROLLED_MAX_LIFETIME_MS: u64 = 5 * 60_000;
 /// What one relayed frame is charged on top of its payload (encoding, queue slot, loop over `live_interest`).
 /// See `RelayEvent::Frame`.
 const RELAY_FRAME_OVERHEAD: usize = 64;
@@ -288,9 +304,29 @@ struct ConnState {
     chunks_in_window: u32,
     /// `mono_ms` of the peer's first open connection. See `UNENROLLED_GRACE_MS`.
     connected_at: u64,
+    /// `mono_ms` of its last anonymous request (`Deposit`, `Cancel`). An anonymous connection counts as idle from here.
+    last_anon_at: u64,
     /// (window start `mono_ms`, checks): this peer's share of the `Enroll`/`Rebind` and `Register` verify pools.
     enroll_verifies: (u64, u32),
     register_verifies: (u64, u32),
+    /// This peer's own per-box deposit windows (see `PEER_SHARE_OF_BOX_WINDOW`).
+    anon_boxes: HashMap<String, (u64, u64, u32)>,
+}
+
+impl ConnState {
+    fn new(now: u64) -> Self {
+        ConnState {
+            challenge: None,
+            window_start: now,
+            requests_in_window: 0,
+            chunks_in_window: 0,
+            connected_at: now,
+            last_anon_at: 0,
+            enroll_verifies: (0, 0),
+            register_verifies: (0, 0),
+            anon_boxes: HashMap::new(),
+        }
+    }
 }
 
 pub struct ServerCore {
@@ -308,8 +344,11 @@ pub struct ServerCore {
     /// Peers that owe a `Fetch`: (`mono_ms` of the last `Notify` sent, 0 = send one on the next tick; unanswered
     /// resends). Repeated with a doubling pause until the peer fetches. See `resend_notifies`.
     notified: HashMap<PeerId, (u64, u32)>,
-    /// (depositor, mailbox) to (window start `mono_ms`, bytes deposited). See `DEPOSIT_BYTES_PER_BOX_WINDOW`.
-    deposit_window: HashMap<(PeerId, String), (u64, u64)>,
+    /// Mailbox to (window start `mono_ms`, bytes deposited, deposits). See `DEPOSIT_BYTES_PER_BOX_WINDOW` and
+    /// `DEPOSITS_PER_BOX_WINDOW`.
+    deposit_window: HashMap<String, (u64, u64, u32)>,
+    /// (`mono_ms` of the last refill, tokens): see `ANON_BUCKET_CAP`.
+    anon_bucket: (u64, f64),
     /// `mono_ms` of the last sweep. `None` means sweep on the first tick.
     last_sweep: Option<u64>,
     /// (wall ms, mono ms) pair the wall clock is checked against, and since when (mono ms) it has been off. See
@@ -548,6 +587,7 @@ impl ServerCore {
             live_interest: HashMap::new(),
             notified: HashMap::new(),
             deposit_window: HashMap::new(),
+            anon_bucket: (mono_ms(), ANON_BUCKET_CAP),
             last_sweep: None,
             clock_anchor: None,
             clock_off_since: None,
@@ -725,15 +765,7 @@ impl ServerCore {
             }
             SwarmEvent::ConnectionEstablished { peer_id, num_established, .. } => {
                 let now = mono_ms();
-                let conn = self.conns.entry(peer_id).or_insert(ConnState {
-                    challenge: None,
-                    window_start: now,
-                    requests_in_window: 0,
-                    chunks_in_window: 0,
-                    connected_at: now,
-                    enroll_verifies: (0, 0),
-                    register_verifies: (0, 0),
-                });
+                let conn = self.conns.entry(peer_id).or_insert_with(|| ConnState::new(now));
                 if num_established.get() == 1 {
                     conn.connected_at = now;
                 }
@@ -847,6 +879,46 @@ mod tests {
             let mut peer = (0, 0);
             assert!(charge_verify(&mut peer, &mut pool, 1_000, 64, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE));
         }
+    }
+
+    /// Per-box deposit rate: the count stops a re-deposit loop (repeats count too), the bytes stop a junk flood, and
+    /// the window rolls over.
+    #[test]
+    fn a_box_takes_only_so_many_deposits_per_window() {
+        let mut win = (1_000, 0, 0);
+        for _ in 0..DEPOSITS_PER_BOX_WINDOW {
+            assert!(box_window_admit(&mut win, 1_000, 10, 1).is_ok());
+        }
+        assert_eq!(box_window_admit(&mut win, 1_000, 10, 1), Err(ServerErrorCode::RateLimited));
+        assert!(box_window_admit(&mut win, 1_000 + DEPOSIT_WINDOW_MS + 1, 10, 1).is_ok(), "a new window");
+        win.1 = DEPOSIT_BYTES_PER_BOX_WINDOW;
+        assert_eq!(box_window_admit(&mut win, 1_000 + DEPOSIT_WINDOW_MS + 1, 1, 1), Err(ServerErrorCode::QuotaExceeded));
+        // Another box has its own window.
+        let mut other = (1_000, 0, 0);
+        assert!(box_window_admit(&mut other, 1_000, 10, 1).is_ok());
+        // One connection's share stops it well before the box is full for everyone else.
+        let (mut peer, mut boxw) = ((1_000, 0, 0), (1_000, 0, 0));
+        let mut admitted = 0;
+        while box_window_admit(&mut peer, 1_000, 10, PEER_SHARE_OF_BOX_WINDOW).is_ok() {
+            assert!(box_window_admit(&mut boxw, 1_000, 10, 1).is_ok());
+            admitted += 1;
+        }
+        assert_eq!(admitted as u64, DEPOSITS_PER_BOX_WINDOW as u64 / PEER_SHARE_OF_BOX_WINDOW);
+        let mut next_peer = (1_000, 0, 0);
+        assert!(box_window_admit(&mut next_peer, 1_000, 10, PEER_SHARE_OF_BOX_WINDOW).is_ok());
+        assert!(box_window_admit(&mut boxw, 1_000, 10, 1).is_ok(), "another sender still gets in");
+    }
+
+    /// The global anonymous bucket: a burst up to the cap, then refill by elapsed time only.
+    #[test]
+    fn the_anonymous_bucket_refills_by_time() {
+        let mut b = (0, ANON_BUCKET_CAP);
+        for _ in 0..ANON_BUCKET_CAP as u32 {
+            assert!(anon_bucket_take(&mut b, 0));
+        }
+        assert!(!anon_bucket_take(&mut b, 0));
+        assert!(anon_bucket_take(&mut b, (1.0 / ANON_REFILL_PER_MS) as u64 + 1), "one token back after its time");
+        assert!(!anon_bucket_take(&mut b, (1.0 / ANON_REFILL_PER_MS) as u64 + 1));
     }
 
     #[test]

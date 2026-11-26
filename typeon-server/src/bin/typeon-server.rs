@@ -268,8 +268,33 @@ fn usage() {
          version                             Version\n\n\
          Global options (for every command):\n\
          --dir <path>                          Data directory (TYPEON_SERVER_DIR)\n\
-         --storage <size>                  Total disk budget, e.g. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n"
+         --storage <size>                  Total disk budget, e.g. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n\n\
+         Tor bridges (environment, read by `run`):\n\
+         TYPEON_SERVER_TOR_MODE=direct|snowflake|obfs4   default direct\n\
+         TYPEON_SERVER_BRIDGES_FILE=<path>               obfs4 bridge lines, one per line\n\
+         TYPEON_SERVER_PT_DIR=<dir>                      lyrebird, obfs4 + snowflake (default: next to this binary)\n"
     );
+}
+
+/// Tor bridges from the environment (see `usage`). A bad setting stops the server: it never falls back
+/// to a direct Tor connection the operator turned away from.
+fn apply_tor_transport() {
+    let mode = std::env::var("TYPEON_SERVER_TOR_MODE").unwrap_or_else(|_| "direct".to_string());
+    let bridges = match std::env::var("TYPEON_SERVER_BRIDGES_FILE") {
+        Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("TYPEON_SERVER_BRIDGES_FILE: {e}");
+            std::process::exit(1);
+        }),
+        Err(_) => String::new(),
+    };
+    let pt_dir = std::env::var("TYPEON_SERVER_PT_DIR").unwrap_or_default();
+    if let Err(e) = p2p_messenger::tor::set_transport(mode.trim(), &bridges, &pt_dir) {
+        eprintln!("TYPEON_SERVER_TOR_MODE: {e}");
+        std::process::exit(1);
+    }
+    if !p2p_messenger::tor::pt_available(mode.trim(), &pt_dir) {
+        eprintln!("warning: no PT binary for Tor mode {mode}; Tor cannot connect");
+    }
 }
 
 async fn run() {
@@ -279,6 +304,7 @@ async fn run() {
         data_dir().display(),
         cfg.total_storage_budget_bytes.unwrap_or(0) >> 20
     );
+    apply_tor_transport();
     let core = match ServerCore::new(cfg) {
         Ok(c) => c,
         Err(e) => {

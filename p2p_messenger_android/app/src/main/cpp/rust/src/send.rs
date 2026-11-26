@@ -195,17 +195,8 @@ impl P2PCore {
             }
             self.outstanding_history_requests.insert(message_id.clone(), entry);
         }
-        let own_keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        let to_sign = packet_signing_input(header.raw(), &ciphertext, &peer_device_fingerprint);
-        let sig_classical: Ed25519Signature = own_keys.sign_sk_ed25519.sign(&to_sign);
-        let sig_pq: MlDsaSignature<MlDsa87> = own_keys.sign_sk_mldsa.sign(&to_sign);
-
-        let packet = MessagePacket {
-            header,
-            ciphertext,
-            signature_classical: sig_classical.to_bytes().to_vec(),
-            signature_pq: sig_pq.encode().to_vec(),
-        };
+        // No signature: the AEAD tag (header as associated data) authenticates the packet to the peer only (deniability).
+        let packet = MessagePacket { header, ciphertext };
 
         // Every device, node or not, keeps its own chat history, persisted and encrypted locally. Node mode only affects history-sync requests (see HistorySyncRequest) and the relay service.
         // The network packet is already end-to-end encrypted. This is a separate encryption-at-rest layer (see archive_message: `history_key` is always loaded, regardless of node mode, see P2PService/MessageHistoryManager).
@@ -272,6 +263,14 @@ impl P2PCore {
                 | MessageContent::AccountDeleted { .. }
                 | MessageContent::WbDigest { .. }
         ).then(|| content.clone());
+        // See `lazy_deposit_held`. An Ack is never held: it answers a packet just received, so the radio is awake and
+        // the acks of one fetch share one anonymous connection.
+        if matches!(
+            content,
+            MessageContent::Seen { .. } | MessageContent::ReadStateSync { .. } | MessageContent::TypingIndicator { .. }
+        ) {
+            self.note_lazy_deposit(&message_id);
+        }
         if needs_delivery_confirmation {
             self.publish_with_ack_tracking(
                 &peer_device_fingerprint, &message_id, NetworkEnvelope::Message(packet), regen_content,
@@ -308,7 +307,7 @@ impl P2PCore {
         let content = MessageContent::Text {
             group_id: None, text: plaintext.clone(), group_message_local_id: Some(conv_id.clone()), sent_at_ms,
             reply_to_message_id: reply_to_message_id.clone(), reply_to_preview: reply_to_preview.clone(),
-            reply_to_sender_identity_id: None, author_proof: None, mentions: Vec::new(), expire_secs,
+            reply_to_sender_identity_id: None, mentions: Vec::new(), expire_secs,
         };
         info!("Sending text: id={} peer={}", &conv_id[..8], &peer_device_fingerprint[..8.min(peer_device_fingerprint.len())]);
         let result = self.send_message_content_inner(
@@ -641,7 +640,7 @@ impl P2PCore {
         // Out-of-order Edit protection (see `apply_edit_to_archive`): all copies (the packet to the peer, the multi-device fan-out, sibling echoes and the
         // local archive) must carry the SAME timestamp, so every device makes the same ordering decision. So it is generated ONCE and shared.
         let edited_at_ms = current_time_ms();
-        let content = MessageContent::Edit { target_message_id: target_message_id.clone(), new_text: new_text.clone(), group_id: None, edited_at_ms, author_proof: None };
+        let content = MessageContent::Edit { target_message_id: target_message_id.clone(), new_text: new_text.clone(), group_id: None, edited_at_ms };
         // `?` first: an edit that could not even be queued must not show as
         // done here and on the siblings while the peer keeps the old text.
         let result = Ok(self.send_message_content(peer_device_fingerprint.clone(), &content, None)?);
@@ -685,7 +684,7 @@ impl P2PCore {
     }
 
     pub(crate) fn delete_message(&mut self, peer_device_fingerprint: String, target_message_id: String) -> Result<(String, String), String> {
-        let content = MessageContent::Delete { target_message_id: target_message_id.clone(), group_id: None, author_proof: None };
+        let content = MessageContent::Delete { target_message_id: target_message_id.clone(), group_id: None };
         // `?` first, like `edit_message`: nothing is deleted here unless the
         // delete could at least be queued for the peer.
         let result = Ok(self.send_message_content(peer_device_fingerprint.clone(), &content, None)?);
@@ -711,7 +710,6 @@ impl P2PCore {
             new_text: new_text.clone(),
             group_id: Some(group_id.clone()),
             edited_at_ms,
-            author_proof: Some(self.sign_group_author(&group_id, &target_group_message_local_id, &new_text)?),
         };
         let others = group.other_members(&own_identity_id);
         let mut sent_to_any = others.is_empty(); // alone in the group: nobody to tell
@@ -734,11 +732,9 @@ impl P2PCore {
     pub(crate) fn delete_group_message(&mut self, group_id: String, target_group_message_local_id: String) -> Result<(), String> {
         let own_identity_id = self.identity.as_ref().ok_or("No identity")?.identity_id.clone();
         let group = self.groups.get(&group_id).cloned_group()?;
-        let tombstone = self.sign_group_author(&group_id, &target_group_message_local_id, GROUP_TOMBSTONE)?;
         let content = MessageContent::Delete {
             target_message_id: target_group_message_local_id.clone(),
             group_id: Some(group_id.clone()),
-            author_proof: Some(tombstone.clone()),
         };
         let others = group.other_members(&own_identity_id);
         let mut sent_to_any = others.is_empty(); // alone in the group: nobody to tell
@@ -753,7 +749,6 @@ impl P2PCore {
         self.withdraw_unsent(&target_group_message_local_id);
         self.purge_attachment_if_exists(&target_group_message_local_id);
         self.apply_delete_to_archive(Some(&group_id), "", &target_group_message_local_id);
-        self.adopt_group_author_proof(&group_id, &target_group_message_local_id, Some(&tombstone));
         self.echo_group_to_siblings(&group_id, SiblingEchoBody::Delete {
             target_message_id: target_group_message_local_id.clone(),
         });

@@ -235,6 +235,17 @@ impl TorHandle {
                     let (Some(client_bg), Some(service_bg)) = (client_bg.upgrade(), service_bg.upgrade()) else { break };
                     match client_bg.bootstrap().await {
                         Ok(()) => {
+                            // Over a bridge, a directory loaded from the cache finishes `bootstrap` before any channel to
+                            // a bridge exists. Ready (and the dials it starts) waits until arti can carry traffic.
+                            if PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                                use futures::StreamExt;
+                                let mut events = client_bg.bootstrap_events();
+                                while !client_bg.bootstrap_status().ready_for_traffic() {
+                                    if events.next().await.is_none() {
+                                        break;
+                                    }
+                                }
+                            }
                             // The .onion name is guaranteed to exist after a successful bootstrap.
                             let name = service_bg.lock().unwrap_or_else(|p| p.into_inner()).as_ref().and_then(|s| s.onion_name());
                             if let Some(hsid) = name {
@@ -395,7 +406,115 @@ fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorCli
     // pure radio and battery cost.
     config.preemptive_circuits().initial_predicted_ports().clear();
     config.channel().padding(tor_config::PaddingLevel::Reduced);
+    // Bridges: arti picks its guards from these bridges only, so the onion service's intro and rendezvous
+    // circuits go through them as well. run_on_startup = false: the PT process starts on the first channel
+    // to a bridge, never in Direct mode. Direct (None) adds nothing here.
+    if let Some(pt) = PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        use arti_client::config::pt::TransportConfigBuilder;
+        // The first hop runs through the transport (Snowflake: broker, proxy, WebRTC). At 20 s the circuit
+        // timeout cut the bridge channel before it opened, over and over (see the vendored tor-chanmgr).
+        config.override_net_params().insert("cbtmintimeout".to_string(), 60_000);
+        use arti_client::config::{BridgeConfigBuilder, CfgPath};
+        for line in &pt.lines {
+            let bridge = line.parse::<BridgeConfigBuilder>().map_err(|e| format!("Bridge line: {e}"))?;
+            config.bridges().bridges().push(bridge);
+        }
+        let mut transport = TransportConfigBuilder::default();
+        transport
+            .protocols(vec![pt.protocol.parse::<arti_client::config::PtTransportName>().map_err(|e| format!("Transport name: {e}"))?])
+            .path(CfgPath::new_literal(pt.binary.clone()))
+            .run_on_startup(false);
+        config.bridges().transports().push(transport);
+    }
     config.build().map_err(|e| format!("Arti config: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Bridges and pluggable transports (Settings -> Network -> Tor connection).
+// ---------------------------------------------------------------------------
+
+/// Tor's built-in Snowflake bridges (bridges.torproject.org moat `builtin`, same as the tor-expert-bundle
+/// `pt_config.json`). Domain-fronted broker on CDN77; re-check on each release.
+pub const SNOWFLAKE_BRIDGES: &[&str] = &[
+    "snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn",
+    "snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn",
+];
+
+/// PT binary names. lyrebird implements both obfs4 and snowflake (the tor-expert-bundle ships no separate
+/// snowflake-client; its `transports.json` maps snowflake -> lyrebird). Android: in `nativeLibraryDir`
+/// (the only exec-allowed app path since API 29).
+#[cfg(target_os = "android")]
+const PT_BINARIES: [(&str, &str); 2] = [("obfs4", "liblyrebird.so"), ("snowflake", "liblyrebird.so")];
+#[cfg(windows)]
+const PT_BINARIES: [(&str, &str); 2] = [("obfs4", "lyrebird.exe"), ("snowflake", "lyrebird.exe")];
+#[cfg(not(any(target_os = "android", windows)))]
+const PT_BINARIES: [(&str, &str); 2] = [("obfs4", "lyrebird"), ("snowflake", "lyrebird")];
+
+/// Bridge setup read by `client_config`. `None` = Direct: no bridges, no PT process.
+struct PtSetup {
+    protocol: &'static str,
+    binary: std::path::PathBuf,
+    lines: Vec<String>,
+}
+static PT_SETUP: Mutex<Option<PtSetup>> = Mutex::new(None);
+
+/// The PT binary for `mode` ("obfs4" / "snowflake") in `pt_dir`, or next to the executable when `pt_dir` is empty.
+fn pt_binary(mode: &str, pt_dir: &str) -> Option<(&'static str, std::path::PathBuf)> {
+    let (protocol, name) = PT_BINARIES.iter().find(|(p, _)| *p == mode)?;
+    let dir = if pt_dir.is_empty() {
+        std::env::current_exe().ok()?.parent()?.to_path_buf()
+    } else {
+        std::path::PathBuf::from(pt_dir)
+    };
+    Some((*protocol, dir.join(name)))
+}
+
+/// The PT binary for `mode` is shipped in this build. "direct" is always available.
+pub fn pt_available(mode: &str, pt_dir: &str) -> bool {
+    mode == "direct" || pt_binary(mode, pt_dir).is_some_and(|(_, p)| p.is_file())
+}
+
+/// Checks pasted obfs4 bridge lines, one per line, with or without a leading "Bridge ". Blank and `#` lines
+/// are skipped. Returns the lines, or the first bad one ("line N: ...").
+pub fn parse_bridge_lines(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bridge = line.parse::<arti_client::config::BridgeConfigBuilder>().map_err(|e| format!("line {}: {e}", i + 1))?;
+        if bridge.get_transport() != Some("obfs4") {
+            return Err(format!("line {}: not an obfs4 bridge", i + 1));
+        }
+        bridge.build().map_err(|e| format!("line {}: {e}", i + 1))?;
+        out.push(line.to_string());
+    }
+    if out.is_empty() {
+        return Err("no bridge lines".to_string());
+    }
+    Ok(out)
+}
+
+/// Sets how the NEXT `TorHandle::launch` reaches Tor: "direct" (default), "snowflake", or "obfs4" with
+/// `bridges`. A missing PT binary is not an error here: arti then cannot connect (fails closed, never
+/// falls back to a direct connection the user turned away from).
+pub fn set_transport(mode: &str, bridges: &str, pt_dir: &str) -> Result<(), String> {
+    let setup = match mode {
+        "direct" => None,
+        "snowflake" | "obfs4" => {
+            let (protocol, binary) = pt_binary(mode, pt_dir).ok_or("no PT directory")?;
+            let lines = if mode == "snowflake" {
+                SNOWFLAKE_BRIDGES.iter().map(|s| s.to_string()).collect()
+            } else {
+                parse_bridge_lines(bridges)?
+            };
+            Some(PtSetup { protocol, binary, lines })
+        }
+        other => return Err(format!("unknown Tor mode: {other}")),
+    };
+    *PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()) = setup;
+    Ok(())
 }
 
 /// Accepts one inbound onion stream and hands it to the swarm (`OnionListen`). `slot` is the bridge slot; it travels with the stream and
@@ -543,9 +662,13 @@ impl Transport for ArtiDialTransport {
             // gets a few circuits. This is not the `isolate_every_stream` overhead that arti warns about.
             let mut prefs = arti_client::StreamPrefs::new();
             prefs.set_isolation(arti_client::IsolationToken::new());
-            let stream = client
-                .connect_with_prefs(tor_addr, &prefs)
+            // Its own task: libp2p drops this future when its dial times out. Dropped mid-way, arti 0.24
+            // leaves a half-open channel in its pending map ("'PendingChannelHandle' dropped unexpectedly")
+            // and every later request to that relay waits on it for good. With two bridges as the only guards,
+            // one such drop stopped all traffic over Snowflake. A detached task runs to its end instead.
+            let stream = tokio::spawn(async move { client.connect_with_prefs(tor_addr, &prefs).await })
                 .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             Ok(TorStream { inner: stream, prefix: Vec::new(), _slot: None })
         }))
@@ -659,5 +782,25 @@ mod trim_tests {
         let left: Vec<bool> = (0..5).map(|i| dir.join("dir_blobs").join(format!("f{i}")).exists()).collect();
         assert_eq!(left, [false, false, true, true, true]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    #[test]
+    fn bridge_lines() {
+        let ok = "Bridge obfs4 192.0.2.55:38114 316E643333645F6D79216558614D3931657A5F5F cert=YXJlIGZyZXF1ZW50bHkgZnVsbCBvZiBsaXR0bGUgbWVzc2FnZXMgeW91IGNhbiBmaW5kLg iat-mode=0";
+        let bare = ok.trim_start_matches("Bridge ");
+        assert_eq!(parse_bridge_lines(&format!("{ok}\n\n# c\n{bare}\n")).unwrap().len(), 2);
+        assert!(parse_bridge_lines("").is_err());
+        assert!(parse_bridge_lines("obfs4 nonsense").unwrap_err().starts_with("line 1"));
+        assert!(parse_bridge_lines(&format!("{ok}\n192.0.2.1:443 316E643333645F6D79216558614D3931657A5F5F")).unwrap_err().starts_with("line 2"));
+        for l in SNOWFLAKE_BRIDGES {
+            l.parse::<arti_client::config::BridgeConfigBuilder>().unwrap().build().unwrap();
+        }
+        assert!(pt_available("direct", ""));
+        assert!(!pt_available("obfs4", "/nonexistent"));
     }
 }

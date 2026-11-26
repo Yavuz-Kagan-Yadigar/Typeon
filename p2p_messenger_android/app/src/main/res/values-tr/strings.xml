@@ -108,6 +108,16 @@
     <string name="tor_status_bootstrapping">Tor: bağlanılıyor…</string>
     <string name="tor_status_ready">Tor: hazır — .onion adresi aktif</string>
     <string name="tor_status_failed">Tor: başarısız (kayıtlara bakın)</string>
+    <string name="lbl_tor_connection">Tor bağlantısı</string>
+    <string name="action_tor_mode">Değiştir</string>
+    <string name="tor_mode_direct">Doğrudan</string>
+    <string name="tor_mode_snowflake">Snowflake</string>
+    <string name="tor_mode_obfs4">Köprüler (obfs4)</string>
+    <string name="tor_mode_unavailable">Bu sürümde yok</string>
+    <string name="tor_mode_not_yet_android">Android\'de henüz çalışmıyor; köprü (obfs4) kullanın</string>
+    <string name="hint_tor_bridges">obfs4 köprü satırlarını yapıştırın, her satıra bir tane</string>
+    <string name="msg_tor_mode_restart">Tor engelliyse köprü kullanın. Doğrudan bağlantıdan daha çok pil harcarlar. Değişikliği uygulamak için uygulama yeniden başlar.</string>
+    <string name="msg_tor_bridges_invalid">Geçersiz köprü: %1$s</string>
     <string name="tor_restart_needed">Bu değişikliğin etkili olması için uygulamayı yeniden başlatın</string>
     <string name="action_tor_reconnect">Tor / ağı yeniden bağla</string>
     <string name="title_tor_reconnect">Ağ yeniden bağlansın mı?</string>
@@ -184,6 +194,7 @@
 
     <string name="lbl_edited">(düzenlendi)</string>
     <string name="lbl_synced">(geçmiş eşitlemesinden)</string>
+    <string name="lbl_relayed_unverified">%1$s aktardı · doğrulanmadı</string>
     <string name="lbl_you">Siz</string>
     <string name="lbl_today">Bugün</string>
     <string name="lbl_yesterday">Dün</string>

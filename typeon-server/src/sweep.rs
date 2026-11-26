@@ -59,7 +59,11 @@ impl ServerCore {
             let idle: Vec<PeerId> = self
                 .conns
                 .iter()
-                .filter(|(p, c)| mono.saturating_sub(c.connected_at) > UNENROLLED_GRACE_MS && self.swarm.is_connected(p))
+                .filter(|(p, c)| {
+                    (mono.saturating_sub(c.connected_at.max(c.last_anon_at)) > UNENROLLED_GRACE_MS
+                        || mono.saturating_sub(c.connected_at) > UNENROLLED_MAX_LIFETIME_MS)
+                        && self.swarm.is_connected(p)
+                })
                 .map(|(p, _)| *p)
                 .filter(|p| self.active(*p).is_none())
                 .collect();

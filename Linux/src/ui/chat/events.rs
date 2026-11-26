@@ -39,6 +39,7 @@ impl ChatView {
                         seen_by: Vec::new(),
                         reactions: String::new(),
                         expire: event_expiry(event),
+                        relayed_by: None,
                     },
                     true,
                 );
@@ -69,6 +70,7 @@ impl ChatView {
                         seen_by: Vec::new(),
                         reactions: String::new(),
                         expire: event_expiry(event),
+                        relayed_by: None,
                     },
                     true,
                 );
@@ -105,6 +107,7 @@ impl ChatView {
                         seen_by: Vec::new(),
                         reactions: String::new(),
                         expire: event_expiry(event),
+                        relayed_by: None,
                     },
                     true,
                 );
@@ -133,6 +136,7 @@ impl ChatView {
                         seen_by: Vec::new(),
                         reactions: String::new(),
                         expire: event_expiry(event),
+                        relayed_by: None,
                     },
                     true,
                 );
@@ -257,6 +261,7 @@ impl ChatView {
                         seen_by: Vec::new(),
                         reactions: String::new(),
                         expire: event_expiry(event),
+                        relayed_by: None,
                     },
                     true,
                 );

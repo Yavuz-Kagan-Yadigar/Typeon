@@ -278,6 +278,15 @@ impl ChatView {
             sender.add_css_class("caption-heading");
             column.append(&sender);
         }
+        if let Some(relayer) = entry.relayed_by.as_ref().filter(|_| self.is_group()) {
+            let relayed = gtk::Label::builder()
+                .label(format!("Relayed by {} · unverified", self.app().identity_name(relayer)).as_str())
+                .xalign(0.0)
+                .build();
+            relayed.add_css_class("caption");
+            relayed.add_css_class("dim-label");
+            column.append(&relayed);
+        }
 
         // Disappearing: only the placeholder (see `DISAPPEAR_HIDDEN`), no quote, file or forwarded mark around it.
         let hidden = entry.expire.is_some();

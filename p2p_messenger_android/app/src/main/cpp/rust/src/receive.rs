@@ -4,27 +4,44 @@ use super::*;
 
 impl P2PCore {
 
-    pub(crate) fn receive_message(&mut self, source: Option<PeerId>, packet: &MessagePacket) -> Result<String, String> {
+    /// `carrier`: `carrier_is_sender` for this packet, worked out by the caller. The packet has no signature, so its header is
+    /// only a claim until it decrypts: `Some(false)` is dropped before any ratchet work, an unproven direct carrier (`None`)
+    /// gets a few failed decrypts per window, and only a proven one (`Some(true)`) can count toward a session reset.
+    pub(crate) fn receive_message(&mut self, source: Option<PeerId>, packet: &MessagePacket, carrier: Option<bool>) -> Result<String, String> {
         let sender = self.known_remote_devices.get(&packet.header.sender_device_fingerprint).cloned()
-            .ok_or("Unknown sender device; cannot verify signatures")?;
+            .ok_or("Unknown sender device")?;
         // Same sender-identity check as in `process_handshake_init`.
         if !sender.is_active {
             self.answer_revoked_sibling(&sender.device_fingerprint);
             return Err("Sender device has been revoked".to_string());
         }
 
-        // The signature only proves that the `sender` DEVICE signed this packet. It does not prove that `sender_identity_id` in the header
-        // belongs to that device. The device-to-identity link is recorded at pairing (TOFU, `DeviceRecord.identity_id`). If the header value
+        // Decryption (below) only proves that the `sender` DEVICE's session made this packet. It does not prove that `sender_identity_id` in
+        // the header belongs to that device. The device-to-identity link is recorded at pairing (TOFU, `DeviceRecord.identity_id`). If the header value
         // is not checked against it, a paired device could write another person's identity_id and impersonate that person in group messages
         // (see the group_message arm), or redirect a `ProfileUpdate` to another contact and overwrite that contact's avatar (see the
         // ProfileUpdate arm, which trusted this field through `identity_to_contact`). A mismatch rejects the whole packet.
         if packet.header.sender_identity_id != sender.identity_id {
-            return Err("sender_identity_id does not match the signing device's stored identity".to_string());
+            return Err("sender_identity_id does not match the sender device's stored identity".to_string());
         }
-
-        let to_verify = packet_signing_input(packet.header.raw(), &packet.ciphertext, &self.get_active_own_device_fingerprint()?);
-        verify_hybrid_signature(&to_verify, &packet.signature_classical, &packet.signature_pq, &sender)?;
-
+        // No packet signature (deniability): the ratchet AEAD below, with the raw header as associated data, is the sender
+        // authentication. A packet that does not open was not made by this session, whatever its header says.
+        // Before it: a forged packet costs a state clone and, with a forged rotation or a far message number, KEM decaps and
+        // skip-ahead steps. A carrier proven to be someone else is dropped here. Server item: Ok, so the server copy goes
+        // (fetching it again cannot change the mailbox it came from). Direct: Err, so the dedup forgets it soon.
+        if carrier == Some(false) {
+            if source.is_some() {
+                return Err("Packet from a carrier that is not its sender device, not decrypted".to_string());
+            }
+            return Ok(serde_json::json!({"type": "noop"}).to_string());
+        }
+        if carrier.is_none() {
+            if let Some(pid) = source {
+                if self.unproven_fails_blocked(&pid) {
+                    return Err("Too many undecryptable packets from this carrier, not decrypted".to_string());
+                }
+            }
+        }
 
         // Ratchet rotation sync: if the sender triggered a DH/KEM rotation with this message (`rotation_kyber_ciphertext` is set),
         // call `apply_rotation` to derive the same new keys on our side. If empty (normal message, no rotation), nothing is done.
@@ -81,10 +98,9 @@ impl P2PCore {
                 // decryption, `message_id` cannot be read, so the packet cannot be deduplicated, so no Ack is sent. The sender keeps retrying the
                 // same envelope, which never decrypts, so the state stays locked. The lock only breaks when `MAX_UNCONFIRMED_AGE_MS` (~25 min)
                 // passes and `regen_content` produces a fresh ciphertext. Both phones spent those 25 minutes on signature checks and radio traffic.
-                // Breaking the lock does not need decryption. `MessagePacketHeader` is signed but NOT encrypted (see `send_message_content_inner`:
-                // the signature covers `header ‖ ciphertext`, and the header travels in clear) and carries `message_id` in clear. The signature
-                // was already verified at this point, so the field is trusted. If a message with that id IS in our archive, we processed this
-                // packet before, and we can resend the Ack to stop the sender.
+                // Breaking the lock does not need decryption. `MessagePacketHeader` travels in clear and carries `message_id`. It is NOT
+                // authenticated here (no signature, and the AEAD failed), so anyone could name an id: the only effect is an Ack, rate-limited
+                // in `reack_if_already_handled`, for a message the archive really holds from that device.
                 // Deliberately narrow: an Ack is sent only when the archive really holds the message. If the key was truly lost (cache overflow
                 // or rotation), the message is not in the archive, no Ack is sent, and the existing behaviour (retry with fresh encryption after
                 // 25 min) stays. An undelivered message is never acked by mistake.
@@ -99,16 +115,25 @@ impl P2PCore {
                 // duplicate packet (e.g. resent after an app restart, when
                 // `recently_acked` is empty again), not a sign of diverged sessions.
                 // Nor is a packet made before this session was set up or last
-                // rotated (`sent_at_ms` is signed): a captured old packet,
+                // rotated (`sent_at_ms`, a claim until it decrypts): a captured old packet,
                 // replayed three times, made us drop the live session, again
                 // every two minutes.
+                // Only when the carrier is proven to be the sender: the header is unauthenticated, and a stranger (or a contact replaying
+                // a packet it got) could otherwise reset our session with any device by sending it garbage under that device's name.
+                if carrier.is_none() {
+                    if let Some(pid) = source {
+                        self.note_unproven_fail(pid);
+                    }
+                }
                 let session_since = self.ratchets.get(&packet.header.sender_device_fingerprint).map_or(0, |s| s.last_rotation);
-                if !matches!(e, ratchet::RatchetError::KeyNotFound(_)) && packet.header.sent_at_ms >= session_since {
+                if carrier == Some(true) && !matches!(e, ratchet::RatchetError::KeyNotFound(_)) && packet.header.sent_at_ms >= session_since {
                     self.note_undecryptable(&packet.header.sender_device_fingerprint);
                 }
                 // A spent key and no record of the packet: it was taken once without an Ack (or lost in a crash before it was stored).
                 // The sender re-encrypts it on request; it ignores ids it no longer holds. A packet older than any retry is not asked for.
-                if matches!(e, ratchet::RatchetError::KeyNotFound(_))
+                // Proven carrier only: the header is a claim, and each request is a packet sent (the sender's own copies come
+                // from its PeerId or its session mailbox, both proven, and a replayed early packet keeps the flag it was buffered with).
+                if carrier == Some(true) && matches!(e, ratchet::RatchetError::KeyNotFound(_))
                     && current_time_ms().saturating_sub(packet.header.sent_at_ms) < TEXT_RETRY_GIVE_UP_MS
                 {
                     self.ask_resend(&packet.header.sender_device_fingerprint, &packet.header.message_id);
@@ -116,7 +141,7 @@ impl P2PCore {
                 return Err(e.to_string());
             }
         };
-        // The connection is mapped only now. A valid signature proves who WROTE the packet, not who DELIVERED it. Any contact holding an old
+        // The connection is mapped only now. A packet that decrypts proves who WROTE it, not who DELIVERED it. Any contact holding an old
         // packet of this device could replay it to get its own PeerId mapped here, then take our direct sends to the device and fake AckBatch
         // receipts. A replayed or cross-addressed packet never decrypts.
         self.record_peer_id_if_known(source, &packet.header.sender_device_fingerprint);
@@ -186,10 +211,8 @@ impl P2PCore {
             }
         };
         let mut content = content;
-        // The send time as the author sent it, for the revoke check of a group
-        // author proof: clamped to now, a future stamp from a device revoked
-        // later than now read as "sent before the revoke".
-        // A file offer has no send time of its own: the header's (signed) is the order key of its bubble.
+        // The send time as the author sent it, before clamping.
+        // A file offer has no send time of its own: the header's (AEAD-bound) is the order key of its bubble.
         let signed_sent_at_ms = match &content {
             MessageContent::Text { sent_at_ms, .. } => *sent_at_ms,
             MessageContent::FileOffer { .. } | MessageContent::SiblingEcho { .. } => packet.header.sent_at_ms,
@@ -253,6 +276,31 @@ impl P2PCore {
 
     /// See `MessageContent::ResendRequest`: `message_id` from `peer_fp` was decrypted but not taken, so its key is spent and a
     /// byte-identical retry cannot decrypt again. Fire-and-forget, like an Ack.
+    /// Failed decrypts from a direct carrier not yet tied to the device it names (`carrier_is_sender` = `None`): after
+    /// `UNPROVEN_FAIL_MAX` in `UNPROVEN_FAIL_WINDOW_MS`, its packets are dropped before decrypt until the window ends.
+    /// Checked on access, no timer. A real sender is proven after its first good packet (`record_peer_id_if_known`).
+    pub(crate) fn unproven_fails_blocked(&self, pid: &PeerId) -> bool {
+        self.unproven_fails.get(pid).map_or(false, |(since, n)| {
+            *n >= UNPROVEN_FAIL_MAX && current_time_ms().saturating_sub(*since) < UNPROVEN_FAIL_WINDOW_MS
+        })
+    }
+
+    pub(crate) fn note_unproven_fail(&mut self, pid: PeerId) {
+        let now = current_time_ms();
+        if self.unproven_fails.len() >= UNPROVEN_FAIL_PEERS && !self.unproven_fails.contains_key(&pid) {
+            self.unproven_fails.retain(|_, (since, _)| now.saturating_sub(*since) < UNPROVEN_FAIL_WINDOW_MS);
+            // ponytail: full of live entries (many throw-away PeerIds) clears the map; per-PeerId limits cannot stop a Sybil flood anyway.
+            if self.unproven_fails.len() >= UNPROVEN_FAIL_PEERS {
+                self.unproven_fails.clear();
+            }
+        }
+        let e = self.unproven_fails.entry(pid).or_insert((now, 0));
+        if now.saturating_sub(e.0) >= UNPROVEN_FAIL_WINDOW_MS {
+            *e = (now, 0);
+        }
+        e.1 = e.1.saturating_add(1);
+    }
+
     pub(crate) fn ask_resend(&mut self, peer_fp: &str, message_id: &str) {
         let content = MessageContent::ResendRequest { target_message_id: message_id.to_string() };
         if let Err(e) = self.send_message_content(peer_fp.to_string(), &content, None) {
@@ -334,7 +382,7 @@ impl P2PCore {
                     "expire_secs": expire_secs, "expire_at_ms": expire_secs.map(|s| first_expiry("received", s))
                 })
             }
-            MessageContent::Text { group_id: Some(gid), text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, author_proof, mentions, expire_secs } => {
+            MessageContent::Text { group_id: Some(gid), text, group_message_local_id, sent_at_ms, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, mentions, expire_secs } => {
                 let expire_secs = packet::disappear_secs(expire_secs);
                 // Group integration: this is one pairwise fan-out copy of a group message. It carries `group_id` AND the sender's `identity_id`
                 // (required in a group, unlike 1:1, since several people are in it), so GroupChatActivity can route it to the right chat.
@@ -377,16 +425,16 @@ impl P2PCore {
                     .map(|id| self.message_exists_in_chat(id, Some(gid.as_str()), ""))
                     .unwrap_or(false);
                 if already_archived {
+                    // The author's own copy (its pairwise session): a copy another member relayed earlier is verified now, and its
+                    // text replaced when it differs. No live event: an open chat shows the change at its next load.
+                    if let Some(mid) = group_message_local_id.as_deref() {
+                        self.verify_group_row(&gid, mid, Some(&text));
+                    }
                     self.ack_text_packet(&peer_fp, &message_id, group_message_local_id.as_deref());
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
                 }
-                // Kept only when it checks out: other members hand it on with
-                // the group history as the proof of who wrote this.
-                let author_proof = author_proof.filter(|p| {
-                    group_message_local_id.as_deref().map_or(false, |mid| self.group_author_proof_valid(&gid, mid, &sender_identity_id, &text, signed_sent_at_ms, Some(p.as_str())))
-                });
                 let archived_at = current_time_ms() as i64;
-                let archived_ok = self.archive_group_message_exp(&gid, &sender_identity_id, "received", text.as_bytes(), group_message_local_id.as_deref(), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, author_proof.as_deref(), expire_secs).is_ok();
+                let archived_ok = self.archive_group_message_exp(&gid, &sender_identity_id, "received", text.as_bytes(), group_message_local_id.as_deref(), reply_to_message_id.as_deref(), reply_to_preview.as_deref(), reply_to_sender_identity_id.as_deref(), sent_at_ms, None, expire_secs).is_ok();
                 if archived_ok {
                     self.note_sibling_push(archived_at);
                 }
@@ -429,25 +477,25 @@ impl P2PCore {
                     "expire_secs": expire_secs, "expire_at_ms": expire_secs.map(|s| first_expiry("received", s))
                 })
             }
-            MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof } => {
+            MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms } => {
                 // Messages can arrive out of order, so an Edit can arrive before the Text it targets. The target row is then absent from the archive, which is not the same as belonging to someone else. Such an Edit is buffered (see `pending_edits_deletes`). Otherwise `message_owned_by_sender` would find no target, reject the packet permanently, and the Text would never get the edit.
                 if self.edit_target_in_chat(&target_message_id, group_id.as_deref(), &peer_fp) {
                     self.apply_edit_or_delete_content(&peer_fp, &sender_identity_id, &message_id,
-                        MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof })
+                        MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms })
                 } else {
                     self.buffer_edit_or_delete(&target_message_id, &peer_fp, &sender_identity_id, &message_id,
-                        MessageContent::Edit { target_message_id: target_message_id.clone(), new_text, group_id, edited_at_ms, author_proof });
+                        MessageContent::Edit { target_message_id: target_message_id.clone(), new_text, group_id, edited_at_ms });
                     serde_json::json!({"type": "noop"})
                 }
             }
-            MessageContent::Delete { target_message_id, group_id, author_proof } => {
+            MessageContent::Delete { target_message_id, group_id } => {
                 // See the Edit arm above.
                 if self.edit_target_in_chat(&target_message_id, group_id.as_deref(), &peer_fp) {
                     self.apply_edit_or_delete_content(&peer_fp, &sender_identity_id, &message_id,
-                        MessageContent::Delete { target_message_id, group_id, author_proof })
+                        MessageContent::Delete { target_message_id, group_id })
                 } else {
                     self.buffer_edit_or_delete(&target_message_id, &peer_fp, &sender_identity_id, &message_id,
-                        MessageContent::Delete { target_message_id: target_message_id.clone(), group_id, author_proof });
+                        MessageContent::Delete { target_message_id: target_message_id.clone(), group_id });
                     serde_json::json!({"type": "noop"})
                 }
             }
@@ -573,13 +621,6 @@ impl P2PCore {
                 // one oversized row would end the paging for good.
                 let mut text_budget: usize = HISTORY_SYNC_MAX_TEXT_BYTES;
                 let mut first = true;
-                // Group rows go out with their author's signature. It is far
-                // larger than most texts, so it counts toward the budget.
-                if let Some(gid) = &group_id {
-                    for m in history.iter_mut() {
-                        m.author_proof = m.message_id.as_deref().and_then(|id| self.group_author_proof(gid, id));
-                    }
-                }
                 // Reactions: only the requester's and mine (the only ones it
                 // takes), and they count toward the budget too.
                 let own_id = self.my_identity_id().unwrap_or_default();
@@ -589,7 +630,7 @@ impl P2PCore {
                         (m, r)
                     })
                     .take_while(|(m, r)| {
-                        let cost = m.text.len() + m.author_proof.as_ref().map_or(0, |p| p.len())
+                        let cost = m.text.len()
                             + r.iter().map(|(who, emoji, _)| who.len() + emoji.len() + 16).sum::<usize>();
                         let is_first = std::mem::take(&mut first);
                         if cost > text_budget && !is_first {
@@ -609,7 +650,6 @@ impl P2PCore {
                         direction: m.direction, text: m.text, timestamp: m.timestamp,
                         sender_identity_id: m.sender_identity_id, message_id: m.message_id,
                         sent_at_ms: m.sent_at_ms, is_deleted: m.is_deleted, is_edited: m.is_edited,
-                        author_proof: m.author_proof,
                     })
                     .collect();
                 // `request_id` carries the REQUEST's own `message_id`, so the requester can match this reply to its `awaiting_confirmation` entry
@@ -702,13 +742,11 @@ impl P2PCore {
                                     m.sender_identity_id.clone()
                                 };
                                 let our_direction = if actual_sender == own_identity_id { "sent" } else { "received" };
-                                // A row the responder did not write itself is
-                                // taken only with its author's signature: the
-                                // responder could otherwise put any text under
-                                // any name, ours included.
+                                // Rows carry no signature (deniability). A row the responder wrote itself came over its own session and is
+                                // verified. Any other row is the responder's word: it is taken, marked "relayed by <responder>, unverified"
+                                // (`relayed_by`), until the author's own copy arrives (`verify_group_row`).
+                                let by_author = m.direction == "sent";
                                 let author = actual_sender.clone().unwrap_or_default();
-                                // A deleted row has no text: its author signed
-                                // the deletion instead.
                                 if m.is_deleted {
                                     m.text.clear();
                                 }
@@ -723,37 +761,34 @@ impl P2PCore {
                                     warn!("Group history row skipped: identity not bound to author (group={}, author={})", gid, crate::log_id(&author));
                                     return None;
                                 }
-                                let signed_at = if m.sent_at_ms != 0 { m.sent_at_ms } else { m.timestamp };
-                                // A row held already is not verified again (every member's answer brings the same rows): it is shown as
-                                // stored. Only a tombstone is checked, so a deletion the author signed replaces a stored original.
+                                // Our own rows come from our devices and our server archive, never on another member's word.
+                                if !by_author && our_direction == "sent" {
+                                    warn!("Group history row skipped: another member relayed a row as ours (group={})", gid);
+                                    return None;
+                                }
+                                let relayed_by = (!by_author).then(|| sender_identity_id.clone());
+                                // A held row: a relayed copy never changes it. The author's own copy deletes it, or verifies a relayed copy
+                                // (its text wins).
                                 if self.message_exists_in_chat(&mid, Some(gid.as_str()), "") {
-                                    let local = self.group_row_text(gid, &mid);
-                                    if m.is_deleted && local.as_ref().map_or(false, |(_, deleted, _)| !*deleted)
-                                        && self.group_author_proof_valid(gid, &mid, &author, GROUP_TOMBSTONE, signed_at, m.author_proof.as_deref())
-                                    {
-                                        self.apply_delete_to_archive(Some(gid.as_str()), "", &mid);
-                                        self.adopt_group_author_proof(gid, &mid, m.author_proof.as_deref());
+                                    if by_author {
+                                        let local = self.group_row_text(gid, &mid);
+                                        if m.is_deleted && local.as_ref().map_or(false, |(_, deleted, _)| !*deleted) {
+                                            self.apply_delete_to_archive(Some(gid.as_str()), "", &mid);
+                                        }
+                                        self.verify_group_row(gid, &mid, (!m.is_deleted).then_some(m.text.as_str()));
                                     }
                                     let (text, deleted, edited) = self.group_row_text(gid, &mid)?;
                                     return Some(serde_json::json!({
                                         "direction": our_direction, "text": text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms,
-                                        "sender_identity_id": actual_sender, "reactions": self.reactions_summary(&mid), "message_id": mid, "is_deleted": deleted, "is_edited": edited
+                                        "sender_identity_id": actual_sender, "reactions": self.reactions_summary(&mid), "message_id": mid, "is_deleted": deleted, "is_edited": edited,
+                                        "relayed_by": self.group_row_relayed_by(gid, &mid)
                                     }));
-                                }
-                                let signed_text = if m.is_deleted { GROUP_TOMBSTONE } else { m.text.as_str() };
-                                let signed = self.group_author_proof_valid(gid, &mid, &author, signed_text, signed_at, m.author_proof.as_deref());
-                                if !signed {
-                                    m.author_proof = None;
-                                    if m.direction != "sent" {
-                                        warn!("Group history row skipped: author signature missing or invalid (group={}, author={})", gid, crate::log_id(&author));
-                                        return None;
-                                    }
                                 }
                                 {
                                     // NOTE: `SyncedMessage` (see packet.rs) does not carry reply info yet. Old messages that arrive via history
                                     // sync are archived without a reply preview for now (a known, accepted scope limit).
                                     // Not shown when it is not on disk: it would vanish on reload.
-                                    if let Err(e) = self.archive_group_message(gid, &author, our_direction, m.text.as_bytes(), Some(&mid), None, None, None, m.sent_at_ms, m.author_proof.as_deref()) {
+                                    if let Err(e) = self.archive_group_message(gid, &author, our_direction, m.text.as_bytes(), Some(&mid), None, None, None, m.sent_at_ms, relayed_by.as_deref()) {
                                         error!("Could not archive group history row: {}", e);
                                         write_failed = true;
                                         return None;
@@ -765,14 +800,11 @@ impl P2PCore {
                                     // too. Otherwise a deleted message comes back on this device (e.g. a newly added secondary device, or an old
                                     // page we never had) as if it had never been deleted.
                                     self.apply_synced_message_flags(Some(gid), "", &m);
-                                    // The delete above cleared the proof.
-                                    if let (true, Some(mid)) = (m.is_deleted, m.message_id.as_deref()) {
-                                        self.adopt_group_author_proof(gid, mid, m.author_proof.as_deref());
-                                    }
                                 }
                                 Some(serde_json::json!({
                                     "direction": our_direction, "text": m.text, "timestamp": m.timestamp, "sent_at_ms": m.sent_at_ms,
-                                    "sender_identity_id": actual_sender, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited
+                                    "sender_identity_id": actual_sender, "reactions": m.message_id.as_deref().map(|id| self.reactions_summary(id)).unwrap_or_default(), "message_id": m.message_id, "is_deleted": m.is_deleted, "is_edited": m.is_edited,
+                                    "relayed_by": relayed_by
                                 }))
                             }).collect();
                             serde_json::json!({"type": "older_group_history", "group_id": gid, "messages": merged})
@@ -1638,7 +1670,6 @@ impl P2PCore {
                                 self.purge_attachment_if_exists(&target_message_id);
                                 if let Some(gid) = &group_id {
                                     self.apply_delete_to_archive(Some(gid), "", &target_message_id);
-                                    self.sign_own_group_tombstone(gid, &target_message_id);
                                     serde_json::json!({"type": "group_delete", "group_id": gid, "message_id": target_message_id})
                                 } else if let Some(ck) = &chat_key {
                                     self.apply_delete_to_archive(None, ck, &target_message_id);

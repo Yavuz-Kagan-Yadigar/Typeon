@@ -140,27 +140,43 @@ fn unpad(mut padded: Vec<u8>) -> Result<Vec<u8>, String> {
 // Identity blinding
 // ---------------------------------------------------------------------------
 
-/// Secret of the server mailbox for a session between two devices. Both ends
-/// derive the mailbox's proof key from it (`mailbox_proof_seeds`), and the
-/// mailbox id is made from that key (`server_proto::key_bound_mailbox_id`), so
-/// the server needs no other key.
+/// Secret of the server mailbox that `recipient_fp` reads for mail from
+/// `sender_fp` in one session: one box per device and direction. The recipient
+/// registers only this box (its inbound one); the sender deposits into it
+/// anonymously and never registers it, so the server cannot join the two ends of
+/// a pair through a shared box. Both ends can compute it. The box's proof key
+/// comes from it (`mailbox_proof_seeds`), the id from that key
+/// (`server_proto::key_bound_mailbox_id`), and the deposit secret from it too
+/// (`deposit_secret`).
 ///
 /// It comes from the session's `mailbox_seed` (`ratchet::DeviceRatchetState`),
 /// which is fixed at the hybrid X25519 + ML-KEM handshake. It does not change
 /// with the ratchet: a mailbox derived from the rotating root key would strand
 /// mail sealed two rotations earlier. A quantum attacker who knows both
 /// devices' public keys cannot derive it, so cannot register as a reader and
-/// fetch or ack the mail away. Both ends get the same secret because the
-/// fingerprints are sorted before use. The seal key still comes from the root
-/// key (`seal_envelope`). A new handshake moves the mailbox; mail sealed under
-/// the old session could not be opened by the new one anyway.
-pub fn session_mailbox_secret(mailbox_seed: &[u8], own_fp: &str, peer_fp: &str) -> Result<[u8; 32], String> {
+/// fetch or ack the mail away. The seal key still comes from the root key
+/// (`seal_envelope`). A new handshake moves the mailbox; mail sealed under the
+/// old session could not be opened by the new one anyway.
+pub fn session_inbox_secret(mailbox_seed: &[u8], recipient_fp: &str, sender_fp: &str) -> Result<[u8; 32], String> {
     if mailbox_seed.len() != 32 {
         return Err("Bad session mailbox seed".to_string());
     }
-    let (a, b) = if own_fp <= peer_fp { (own_fp, peer_fp) } else { (peer_fp, own_fp) };
-    let info = [&b"p2pmsg-v8-session-mailbox:"[..], a.as_bytes(), b"\0", b.as_bytes()].concat();
+    let info = [&b"p2pmsg-v9-session-inbox:"[..], recipient_fp.as_bytes(), b"\0", sender_fp.as_bytes()].concat();
     derive(mailbox_seed, &info)
+}
+
+/// The deposit secret of `mailbox`, made from the secret both the reader and the
+/// depositor hold: the `session_inbox_secret` of a session box, the pairing or link
+/// secret of a first-contact box. The reader registers its hash
+/// (`server_proto::deposit_verifier`), the depositor presents it with each `Deposit`.
+pub fn deposit_secret(box_secret: &[u8], mailbox: &str) -> Result<[u8; 32], String> {
+    derive(box_secret, &[&b"p2pmsg-v9-deposit:"[..], mailbox.as_bytes()].concat())
+}
+
+/// The cancel secret of one deposit (`ServerRequest::Cancel`), from the box's deposit
+/// secret and a per-message key, so the sender recomputes it and stores nothing new.
+pub fn cancel_secret(deposit_secret: &[u8], key: &str) -> Result<[u8; 32], String> {
+    derive(deposit_secret, &[&b"p2pmsg-v9-cancel:"[..], key.as_bytes()].concat())
 }
 
 /// First-contact mailbox of `device_fingerprint` for the holders of `secret`
@@ -174,7 +190,7 @@ pub fn first_contact_mailbox_id(secret: &[u8], device_fingerprint: &str) -> Stri
 
 /// Seeds (Ed25519, ML-DSA-87) of the key that signs `Register` for `mailbox`
 /// (`server_proto::MailboxProof`). `secret` is known only to the readers of the
-/// box: the `session_mailbox_secret` of a session box (both devices of the
+/// box: the `session_inbox_secret` of a session box (both devices of the
 /// pair), the pair key of a relay box, or, for a first-contact box, the reading
 /// device's own Ed25519 signing key. Whoever holds the code can compute the id
 /// but cannot make the proof. The seeds never open the box's envelopes.
@@ -428,16 +444,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_mailbox_is_the_same_at_both_ends_and_per_pair() {
+    fn session_inbox_is_per_direction_and_per_pair() {
         let (fa, fb) = ("a".repeat(64), "b".repeat(64));
-        let ab = session_mailbox_secret(&[1u8; 32], &fa, &fb).unwrap();
-        assert_eq!(ab, session_mailbox_secret(&[1u8; 32], &fb, &fa).unwrap(), "both sides must find the same box");
-        assert_ne!(ab, session_mailbox_secret(&[2u8; 32], &fa, &fb).unwrap(), "another session, another box");
-        assert_ne!(ab, session_mailbox_secret(&[1u8; 32], &fa, &"c".repeat(64)).unwrap());
+        let to_b = session_inbox_secret(&[1u8; 32], &fb, &fa).unwrap();
+        let to_a = session_inbox_secret(&[1u8; 32], &fa, &fb).unwrap();
+        assert_ne!(to_a, to_b, "each direction has its own box");
+        assert_eq!(to_b, session_inbox_secret(&[1u8; 32], &fb, &fa).unwrap(), "the sender finds the reader's box");
+        assert_ne!(to_b, session_inbox_secret(&[2u8; 32], &fb, &fa).unwrap(), "another session, another box");
+        assert_ne!(deposit_secret(&to_b, "mk_1").unwrap(), deposit_secret(&to_a, "mk_1").unwrap());
+        assert_ne!(cancel_secret(&to_b, "m1").unwrap(), cancel_secret(&to_b, "m2").unwrap());
         // Seeds of a key-bound id do not depend on the id itself.
-        assert_eq!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mk_0123").unwrap());
-        assert_ne!(mailbox_proof_seeds(&ab, "mk_").unwrap(), mailbox_proof_seeds(&ab, "mb_0123").unwrap());
-        assert!(session_mailbox_secret(&[1u8; 31], &fa, &fb).is_err());
+        assert_eq!(mailbox_proof_seeds(&to_b, "mk_").unwrap(), mailbox_proof_seeds(&to_b, "mk_0123").unwrap());
+        assert_ne!(mailbox_proof_seeds(&to_b, "mk_").unwrap(), mailbox_proof_seeds(&to_b, "mb_0123").unwrap());
+        assert!(session_inbox_secret(&[1u8; 31], &fa, &fb).is_err());
     }
 
     #[test]

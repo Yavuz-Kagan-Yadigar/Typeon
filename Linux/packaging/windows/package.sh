@@ -28,6 +28,15 @@ else
     cp "$ROOT/target/x86_64-pc-windows-gnullvm/release/typeon.exe" "$OUT/bin/"
 fi
 cp "$SYS/bin/ffmpeg.exe" "$OUT/bin/"   # video metadata strip (util.rs)
+# Tor bridges (core tor.rs looks next to typeon.exe). From tools/fetch-pt-binaries.sh; without them
+# Snowflake / obfs4 show "not available in this build".
+for pt in lyrebird.exe; do   # obfs4 + snowflake
+    if [ -f "$ROOT/../pt-bin/windows-x86_64/$pt" ]; then
+        cp "$ROOT/../pt-bin/windows-x86_64/$pt" "$OUT/bin/"
+    else
+        echo "warning: pt-bin/windows-x86_64/$pt missing (run tools/fetch-pt-binaries.sh)" >&2
+    fi
+done
 
 # GStreamer plugins the app uses: calls (call_media.rs), voice messages
 # (audio_win.rs) and GtkMediaFile playback (GstPlay inside GTK).

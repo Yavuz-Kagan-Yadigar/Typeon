@@ -1331,6 +1331,9 @@ impl P2PCore {
         self.server_blob_uploads.clear();
         self.server_deposited.clear();
         self.server_deposit_locations.clear();
+        self.anon_conns.clear();
+        self.lazy_deposits.clear();
+        self.unproven_fails.clear();
         self.deferred_incoming.clear();
         self.download_request_ids.clear();
 

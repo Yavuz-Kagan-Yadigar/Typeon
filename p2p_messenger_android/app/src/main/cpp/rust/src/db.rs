@@ -77,6 +77,8 @@ impl P2PCore {
             server_sweep_at: 0,
             server_deposited: HashMap::new(),
             server_deposit_locations: HashMap::new(),
+            anon_conns: HashMap::new(),
+            lazy_deposits: HashMap::new(),
             blob_rtt_sum: 0,
             blob_rtt_count: 0,
             archive_root_key: None,
@@ -142,6 +144,7 @@ impl P2PCore {
             handshake_failure_notified: HashMap::new(),
             last_handshake_redo: HashMap::new(),
             undecryptable_from: HashMap::new(),
+            unproven_fails: HashMap::new(),
             outstanding_history_requests: HashMap::new(),
             sibling_fetch_open: HashMap::new(),
             history_fetch_pages: HashMap::new(),
@@ -464,8 +467,9 @@ impl P2PCore {
         // Sender timestamp (`MessageContent::Edit.edited_at_ms`) of the last applied edit. `apply_edit_to_archive` uses it so an edit with an OLDER
         // timestamp cannot overwrite a NEWER one (0 = never edited, or an old packet with no ordering info).
         migrate("ALTER TABLE messages ADD COLUMN edit_ts INTEGER NOT NULL DEFAULT 0")?;
-        // See `group_author_statement`.
-        migrate("ALTER TABLE messages ADD COLUMN author_proof TEXT")?;
+        // Group rows taken from another member's history answer: that member's identity id until the author's own copy
+        // arrives (`ArchivedMessage.relayed_by`).
+        migrate("ALTER TABLE messages ADD COLUMN relayed_by TEXT")?;
         // Group rows: my identity id was in the sender's @mention list.
         migrate("ALTER TABLE messages ADD COLUMN mentions_me INTEGER NOT NULL DEFAULT 0")?;
         // Disappearing messages: the timer (seconds) and when this row goes (local clock, ms). See `Core::expire_due`.
@@ -474,7 +478,7 @@ impl P2PCore {
         migrate("CREATE INDEX IF NOT EXISTS idx_messages_expire ON messages(expire_at_ms) WHERE expire_at_ms IS NOT NULL")?;
         // one row per message id (per group; 1:1 rows share the scope
         // ''). Once, before the index: a deleted copy wins (the user's delete),
-        // then an edited one, one with an author proof, then the earliest.
+        // then an edited one, one from its author, then the earliest.
         // Reactions/seen point at the message_id text, which the kept row has.
         let has_unique: bool = conn.query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_msgid_unique'", [], |_| Ok(()),
@@ -484,7 +488,7 @@ impl P2PCore {
                 "DELETE FROM messages WHERE id IN (
                     SELECT id FROM (SELECT id, ROW_NUMBER() OVER (
                         PARTITION BY COALESCE(group_id, ''), message_id
-                        ORDER BY is_deleted DESC, is_edited DESC, (author_proof IS NOT NULL) DESC, id ASC) AS rn
+                        ORDER BY is_deleted DESC, is_edited DESC, (relayed_by IS NULL) DESC, id ASC) AS rn
                     FROM messages WHERE message_id IS NOT NULL AND message_id != '') WHERE rn > 1)",
                 [],
             ) {

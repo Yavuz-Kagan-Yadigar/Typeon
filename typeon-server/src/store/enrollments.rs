@@ -84,7 +84,7 @@ impl Store {
     /// reader rows go, and mail in boxes nobody reads any more goes with them.
     /// The row, its key and its quota counters stay, so the device comes back
     /// with `Rebind` (or its old PeerId), which refreshes `last_seen_at`.
-    /// Returns the mail rows removed; the caller recounts the depositors.
+    /// Returns the mail rows removed; the caller recounts the owners.
     pub fn sleep_idle_enrollments(&self, before: i64) -> usize {
         let sleepers = "SELECT enrollment_id FROM enrollments WHERE state = 'active' AND last_seen_at < ?1";
         let Ok(tx) = self.conn.unchecked_transaction() else { return 0 };
@@ -96,7 +96,6 @@ impl Store {
                     "DELETE FROM mail WHERE mailbox_id IN (SELECT mailbox_id FROM mailbox_readers WHERE owner IN ({sleepers}))
                        AND NOT EXISTS (SELECT 1 FROM mailbox_readers r
                                        WHERE r.mailbox_id = mail.mailbox_id AND r.owner NOT IN ({sleepers})
-                                         AND r.owner != mail.depositor
                                          AND r.owner IN (SELECT enrollment_id FROM enrollments WHERE state = 'active'))"
                 ),
                 params![before],

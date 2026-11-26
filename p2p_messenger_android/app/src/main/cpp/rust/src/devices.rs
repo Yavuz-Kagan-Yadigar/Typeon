@@ -744,8 +744,7 @@ impl P2PCore {
             // row, and the real owner's revoked device was taken back.
             // Capped per identity: each row is signed by the identity, so a
             // member could add rows for random fingerprints without end.
-            // With the time: `group_author_proof_valid` takes the device's
-            // proofs only for rows dated before it.
+            // With the time (when it was revoked).
             let key = format!("orv:{}:{}", revoke.identity_id, revoke.revoked_device_fingerprint);
             let held = self.db.as_ref().map_or(0, |c| c.query_row(
                 "SELECT COUNT(*) FROM app_meta WHERE k LIKE 'orv:' || ?1 || ':%'", params![revoke.identity_id], |r| r.get::<_, i64>(0),

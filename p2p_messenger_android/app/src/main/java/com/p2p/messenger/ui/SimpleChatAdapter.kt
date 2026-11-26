@@ -138,6 +138,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         var isEdited: Boolean = false,
         /** The row came from the contact's history answer, not from a live event. */
         val viaSync: Boolean = false,
+        /** Group chats only: display name of the member who relayed this row unverified (Rust `ArchivedMessage.relayed_by`). */
+        val relayedByName: String? = null,
         var isDeleted: Boolean = false,
         /** Group chats only. Shown when the message is not mine. */
         val senderName: String? = null,
@@ -1042,10 +1044,11 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
                 holder.textView.text = shownText
                 holder.textView.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
                 holder.textView.alpha = 1f
-                holder.editedLabel.visibility = if (item.isEdited || item.viaSync) View.VISIBLE else View.GONE
+                holder.editedLabel.visibility = if (item.isEdited || item.viaSync || item.relayedByName != null) View.VISIBLE else View.GONE
                 holder.editedLabel.text = listOfNotNull(
                     holder.itemView.context.getString(R.string.lbl_edited).takeIf { item.isEdited },
-                    holder.itemView.context.getString(R.string.lbl_synced).takeIf { item.viaSync }
+                    holder.itemView.context.getString(R.string.lbl_synced).takeIf { item.viaSync },
+                    item.relayedByName?.let { holder.itemView.context.getString(R.string.lbl_relayed_unverified, it) }
                 ).joinToString(" ")
                 // Links in the message text (http, https, www) are clickable. `Linkify.addLinks` sets its
                 // own `LinkMovementMethod` on the TextView, which consumes ACTION_DOWN, so the long-press

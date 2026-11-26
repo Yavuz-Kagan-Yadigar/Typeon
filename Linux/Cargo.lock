@@ -281,6 +281,7 @@ dependencies = [
  "tor-netdoc",
  "tor-persist",
  "tor-proto",
+ "tor-ptmgr",
  "tor-rtcompat",
  "tracing",
  "void",
@@ -4676,7 +4677,7 @@ dependencies = [
 
 [[package]]
 name = "p2p_messenger_core"
-version = "8.0.0"
+version = "9.0.0"
 dependencies = [
  "android_logger",
  "argon2",
@@ -6728,8 +6729,6 @@ dependencies = [
 [[package]]
 name = "tor-chanmgr"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0eabe776706c7062468bb7fdab05136c7a9db6325e9688e02d47a7b6d6dee9d"
 dependencies = [
  "async-trait",
  "derive_builder_fork_arti",
@@ -7026,6 +7025,7 @@ dependencies = [
  "tor-netdoc",
  "tor-persist",
  "tor-proto",
+ "tor-protover",
  "tor-relay-selection",
  "tor-rtcompat",
  "tor-units",
@@ -7482,6 +7482,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "tor-ptmgr"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0db49d2e29ae239a637fcaffb0b2c5f5ecdad9bc8de66fa8edef6580ce0d7282"
+dependencies = [
+ "async-trait",
+ "cfg-if",
+ "derive_builder_fork_arti",
+ "fs-mistrust",
+ "futures",
+ "itertools 0.13.0",
+ "oneshot-fused-workaround",
+ "serde",
+ "thiserror 1.0.69",
+ "tor-async-utils",
+ "tor-basic-utils",
+ "tor-chanmgr",
+ "tor-config",
+ "tor-error",
+ "tor-linkspec",
+ "tor-rtcompat",
+ "tor-socksproto",
+ "tracing",
+]
+
+[[package]]
 name = "tor-relay-selection"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7719,7 +7745,7 @@ dependencies = [
 
 [[package]]
 name = "typeon-linux"
-version = "8.0.0"
+version = "9.0.0"
 dependencies = [
  "argon2",
  "async-channel",

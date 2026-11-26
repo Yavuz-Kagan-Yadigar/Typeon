@@ -1,6 +1,6 @@
 [package]
 name = "typeon-server"
-version = "8.0.0"
+version = "9.0.0"
 edition = "2021"
 description = "Typeon — blind store-and-forward server (mailbox, encrypted archive, attachment blobs)"
 license = "GPL-3.0-or-later"
@@ -79,3 +79,4 @@ strip = true
 [patch.crates-io]
 tor-hsservice = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-hsservice" }
 tor-netdir = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-netdir" }
+tor-chanmgr = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-chanmgr" }

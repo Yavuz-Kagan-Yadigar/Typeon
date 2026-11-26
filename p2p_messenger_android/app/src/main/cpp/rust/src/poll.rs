@@ -39,6 +39,8 @@ impl P2PCore {
                 // A transfer needs circuits rebuilt when one breaks.
                 && self.active_downloads.is_empty()
                 && !self.blob_upload_can_run()
+                // An anonymous deposit connection is open (`server_client/anon.rs`, closed when idle).
+                && self.anon_conns.is_empty()
                 && now >= (self.tor_wake_at + RADIO_AWAKE_MS).saturating_sub(TOR_FULL_WAKE_MS);
             if dormant != self.tor_dormant {
                 if let Some(tor) = &self.tor {
@@ -1098,6 +1100,9 @@ impl P2PCore {
         // See `server_sweep`. Connection, registration, subscription and fetch upkeep. It runs its own interval check (the `reconnect_sweep` pattern).
         lock_watch::phase("server_sweep");
         self.server_sweep();
+        // Anonymous deposit connections: dial, answers, idle close. Nothing to do when none is open.
+        lock_watch::phase("anon_deposits");
+        self.drive_anon_conns();
 
         // UI events collect in `self.attachment_events` and are taken only at
         // the end: a panic in this turn no longer loses the ones gathered so
@@ -1206,6 +1211,9 @@ impl P2PCore {
                         let timeout = match envelope {
                             NetworkEnvelope::Handshake(_) | NetworkEnvelope::IdentityExchange(_) => {
                                 PENDING_HANDSHAKE_TIMEOUT_MS
+                            }
+                            NetworkEnvelope::Message(m) if self.lazy_deposits.contains_key(&m.header.message_id) => {
+                                LAZY_DEPOSIT_MAX_AGE_MS
                             }
                             NetworkEnvelope::Message(_) => PENDING_ENVELOPE_TIMEOUT_MS,
                         };
@@ -1348,22 +1356,42 @@ impl P2PCore {
         std::mem::take(&mut self.attachment_events)
     }
 
+    /// Is the carrier of a `Message` the device its header names (`sender_fp`)? Packets carry no signature, so this is what stops a
+    /// stranger acting under a contact's fingerprint before decryption can tell. `Some(true)`: proven (the PeerId known for the device,
+    /// or a server mailbox only it fills, see `server_item_sender`). `Some(false)`: another carrier. `None`: unknown (no PeerId known
+    /// for the device yet, or `raw` not given for a server item).
+    pub(crate) fn carrier_is_sender(&self, source: Option<PeerId>, raw: Option<&[u8]>, sender_fp: &str) -> Option<bool> {
+        let Some(pid) = source else {
+            return raw.and_then(|r| self.server_item_sender(r, sender_fp));
+        };
+        let mut known: Vec<PeerId> = [self.device_last_addr.get(sender_fp), self.device_onion_addr.get(sender_fp)]
+            .into_iter().flatten()
+            .filter_map(|a| a.parse::<Multiaddr>().ok().and_then(|m| extract_peer_id(&m)))
+            .collect();
+        known.extend(self.device_to_peer_id.get(sender_fp).copied());
+        if known.is_empty() {
+            return None;
+        }
+        Some(known.contains(&pid))
+    }
+
     /// See `early_packets`. Buffers a packet that arrives before the ratchet exists. Limited to `MAX_EARLY_PACKETS_PER_PEER` per peer (the oldest is dropped),
     /// so a hostile peer cannot consume unbounded memory.
-    pub(crate) fn buffer_early_packet(&mut self, sender_fp: String, source: Option<PeerId>, packet: MessagePacket) {
+    /// `carrier`: `carrier_is_sender` at arrival. Entries of a proven carrier (`Some(true)`) are evicted last; among the rest
+    /// the source holding the most entries goes first. A server item keeps the flag for `replay_early_packets`.
+    pub(crate) fn buffer_early_packet(&mut self, sender_fp: String, source: Option<PeerId>, carrier: Option<bool>, packet: MessagePacket) {
         let now = current_time_ms();
         // the header fingerprint is not verified yet, so the per-peer
         // caps alone let one peer fill memory under many names. Cap the total
         // too, evicting from the largest buffer.
         const MAX_EARLY_PACKET_BYTES_TOTAL: usize = 32 * 1024 * 1024;
-        let buf_bytes = |b: &std::collections::VecDeque<(u64, Option<PeerId>, MessagePacket)>| b.iter().map(|(_, _, p)| p.ciphertext.len()).sum::<usize>();
+        let buf_bytes = |b: &std::collections::VecDeque<(u64, Option<PeerId>, Option<bool>, MessagePacket)>| b.iter().map(|(_, _, _, p)| p.ciphertext.len()).sum::<usize>();
         let mut total = packet.ciphertext.len() + self.early_packets.values().map(buf_bytes).sum::<usize>();
         while total > MAX_EARLY_PACKET_BYTES_TOTAL {
             let Some(fp) = self.early_packets.iter().max_by_key(|(_, b)| buf_bytes(*b)).map(|(k, _)| k.clone()) else { break };
             let Some(b) = self.early_packets.get_mut(&fp) else { break };
-            let top = busiest_source(b.iter().map(|(_, s, _)| *s));
-            let i = b.iter().position(|(_, s, _)| *s == top).unwrap_or(0);
-            total -= b.remove(i).map_or(0, |p| p.2.ciphertext.len());
+            let i = early_evict_index(b.iter().map(|(_, s, c, _)| (*s, *c == Some(true))));
+            total -= b.remove(i).map_or(0, |p| p.3.ciphertext.len());
             if b.is_empty() {
                 self.early_packets.remove(&fp);
             }
@@ -1371,16 +1399,15 @@ impl P2PCore {
         let buf = self.early_packets.entry(sender_fp.clone()).or_default();
         // Count and bytes: one packet may be close to 1 MiB.
         const MAX_EARLY_PACKET_BYTES_PER_PEER: usize = 8 * 1024 * 1024;
-        let mut bytes = packet.ciphertext.len() + buf.iter().map(|(_, _, p)| p.ciphertext.len()).sum::<usize>();
+        let mut bytes = packet.ciphertext.len() + buf.iter().map(|(_, _, _, p)| p.ciphertext.len()).sum::<usize>();
         while !buf.is_empty() && (buf.len() >= MAX_EARLY_PACKETS_PER_PEER || bytes > MAX_EARLY_PACKET_BYTES_PER_PEER) {
             // Oldest packet of the source that holds the most entries: the
             // fingerprint in the header is not verified yet, so any peer could
             // name a contact's fingerprint and push that contact's packets out.
-            let top = busiest_source(buf.iter().map(|(_, s, _)| *s));
-            let i = buf.iter().position(|(_, s, _)| *s == top).unwrap_or(0);
-            bytes -= buf.remove(i).map_or(0, |p| p.2.ciphertext.len());
+            let i = early_evict_index(buf.iter().map(|(_, s, c, _)| (*s, *c == Some(true))));
+            bytes -= buf.remove(i).map_or(0, |p| p.3.ciphertext.len());
         }
-        buf.push_back((now, source, packet));
+        buf.push_back((now, source, carrier, packet));
         info!(
             "No ratchet yet (peer={}) — packet buffered, will replay after handshake ({} waiting)",
             crate::log_id(&sender_fp),
@@ -1396,8 +1423,10 @@ impl P2PCore {
             _ => return,
         };
         info!("Handshake done (peer={}) — replaying {} buffered packets", crate::log_id(&sender_fp), buffered.len());
-        for (_, source, packet) in buffered {
-            match self.receive_message(source, &packet) {
+        for (_, source, carrier, packet) in buffered {
+            // Direct: asked again, the device's PeerId may be known by now. Server: the mailbox verdict from arrival.
+            let carrier = if source.is_some() { self.carrier_is_sender(source, None, sender_fp) } else { carrier };
+            match self.receive_message(source, &packet, carrier) {
                 Ok(event) => self.attachment_events.push(event),
                 Err(e) => error!("Could not process buffered packet (peer={}): {}", crate::log_id(&sender_fp), e),
             }
@@ -1408,7 +1437,7 @@ impl P2PCore {
     pub(crate) fn prune_early_packets(&mut self) {
         let now = current_time_ms();
         self.early_packets.retain(|_, buf| {
-            buf.retain(|(t, _, _)| now.saturating_sub(*t) <= EARLY_PACKET_TTL_MS);
+            buf.retain(|(t, _, _, _)| now.saturating_sub(*t) <= EARLY_PACKET_TTL_MS);
             !buf.is_empty()
         });
         // See `early_handshakes`. If an IdentityExchange never arrives, the buffered handshake goes stale too.
@@ -1620,8 +1649,11 @@ impl P2PCore {
                 // `message_id` in clear, and it was already verified on the first pass. The Ack is sent only if the message really IS in the archive, so a message
                 // not yet delivered is never acknowledged by mistake.
                 // Only after a first pass that succeeded: a failed one may never have verified this header.
+                // Not for a carrier proven to be someone else: its first pass was a drop, not a decrypt.
                 if let Ok(NetworkEnvelope::Message(m)) = NetworkEnvelope::from_cbor(raw) {
-                    self.reack_if_already_handled(&m.header);
+                    if self.carrier_is_sender(source, Some(raw), &m.header.sender_device_fingerprint) != Some(false) {
+                        self.reack_if_already_handled(&m.header);
+                    }
                 }
                 return Ok(None);
             }
@@ -1725,22 +1757,29 @@ impl P2PCore {
                 // See `early_packets` and `EARLY_PACKET_TTL_MS`. If there is no ratchet yet (the message came before the handshake, since the network gives no ordering
                 // guarantee), the packet is NOT dropped. It is buffered and replayed when the handshake arrives. Only KNOWN devices are buffered (an unknown sender was
                 // already rejected, and this also keeps the buffer from filling without bound). `source` is buffered together with the packet (see the `early_packets`
-                // field note). The signature is not verified yet at this point, so the source is not recorded here. `receive_message` records it itself at replay time,
-                // after verification.
+                // field note). Nothing is verified yet at this point, so the source is not recorded here. `receive_message` records it itself at replay time,
+                // after decryption.
+                let carrier = self.carrier_is_sender(source, Some(raw), &sender_fp);
                 if !self.ratchets.contains_key(&sender_fp) {
-                    if let Some(sender) = self.known_remote_devices.get(&sender_fp).filter(|d| d.is_active).cloned() {
-                        // The signature first (the keys are known): the
-                        // fingerprint in the header is only a claim, and a
-                        // stranger with throw-away peer ids filled this
-                        // device's buffer and pushed the real packets out.
-                        let to_verify = packet_signing_input(m.header.raw(), &m.ciphertext, &self.get_active_own_device_fingerprint()?);
-                        verify_hybrid_signature(&to_verify, &m.signature_classical, &m.signature_pq, &sender)?;
-                        self.buffer_early_packet(sender_fp, source, m);
+                    if self.known_remote_devices.get(&sender_fp).map_or(false, |d| d.is_active) {
+                        // The packet has no signature and cannot be decrypted yet: the fingerprint in the header is only a claim, and a
+                        // stranger with throw-away peer ids could fill this device's buffer and push the real packets out. Refused only
+                        // from a carrier proven to be someone else (another PeerId, another device's session mailbox). An unproven one
+                        // (no PeerId known yet, a group or shown-code first-contact mailbox) is buffered, and `buffer_early_packet`
+                        // evicts it before proven entries. Refused server item: Ok, so it is acked and gone (a refetch cannot change
+                        // its mailbox, and holding it would refetch for minutes). Refused direct one: Err, so the dedup forgets it soon.
+                        if carrier == Some(false) {
+                            if source.is_none() {
+                                return Ok(None);
+                            }
+                            return Err("Early packet from a carrier that is not its sender device, not buffered".to_string());
+                        }
+                        self.buffer_early_packet(sender_fp, source, carrier, m);
                         return Ok(None);
                     }
                 }
-                // See the notes above. `receive_message` now records it itself, after the signature has been verified.
-                let text = self.receive_message(source, &m)?;
+                // See the notes above. `receive_message` records the source itself, after decryption.
+                let text = self.receive_message(source, &m, carrier)?;
                 Ok(Some(text))
             }
         }

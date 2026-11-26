@@ -41,7 +41,9 @@ mod connection;
 mod mailbox;
 mod archive;
 mod blobs;
+mod anon;
 pub(crate) use mailbox::*;
+pub(crate) use anon::AnonConn;
 use archive::*;
 
 /// Full scan interval, a safety net for when the server pushes nothing.
@@ -225,8 +227,9 @@ pub(crate) struct ServerRuntime {
     /// Held items passed over after the grace period: skipped, and the cursor moves past them as it does
     /// past an item that opened.
     pub passed: HashSet<(String, u64)>,
-    /// SHA-256 of each item handed to `incoming` this turn -> (mailbox, seq). Used by `server_item_failed`.
-    pub taken: HashMap<[u8; 32], (String, u64)>,
+    /// SHA-256 of each item handed to `incoming` this turn -> (mailbox, seq, what the box proves about its sender,
+    /// fixed when the batch was opened). Used by `server_item_failed` and `server_item_sender`.
+    pub taken: HashMap<[u8; 32], (String, u64, ItemCarrier)>,
     pub fetch_due_at: u64,
     pub hello_sent_at: u64,
     pub last_error: Option<String>,
@@ -291,6 +294,22 @@ enum MailboxKey {
     Session(Vec<Vec<u8>>, String),
 }
 
+/// The carrier of a fetched item, from the box it came from (`MailboxKey`), resolved at fetch time: a handshake
+/// processed earlier in the same batch must not change the verdict of a later item.
+#[derive(Clone)]
+pub(crate) enum ItemCarrier {
+    /// A session box: only this device fills it.
+    Session(String),
+    /// A first-contact box, made from this pairing secret.
+    FirstContact(zeroize::Zeroizing<Vec<u8>>),
+}
+
+impl std::fmt::Debug for ItemCarrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self { ItemCarrier::Session(_) => "Session", ItemCarrier::FirstContact(_) => "FirstContact" })
+    }
+}
+
 /// A server RPC in flight.
 #[derive(Debug, Clone)]
 pub(crate) enum ServerInflight {
@@ -313,6 +332,8 @@ pub(crate) enum ServerInflight {
         target_fp: String,
         first_attempt_at: u64,
         dedup_key: String,
+        /// Its `Cancel` secret (`server_seal::cancel_secret`), kept with its location once `Deposited`.
+        cancel_secret: CancelSecret,
         /// The user cancelled the message while this was in flight. Withdraw the server copy as soon as its
         /// `seq` is known.
         cancelled: bool,
@@ -320,9 +341,10 @@ pub(crate) enum ServerInflight {
     Fetch { server_id: String },
     /// `acks`: put back in `unacked` when the request fails.
     Ack { server_id: String, acks: Vec<(String, u64)> },
-    /// See `ServerRequest::Cancel`. The sender withdraws its own packet. No reply handling is needed. The
-    /// request is tracked only so an unexpected-reply warning is not logged.
-    Cancel { server_id: String },
+    /// See `ServerRequest::Cancel`. The sender withdraws its own packet (over the anonymous connection, like the
+    /// deposit). `key`: its `server_deposit_locations` entry, dropped on the server's answer and kept (retried at the
+    /// server sweep) when none came.
+    Cancel { server_id: String, key: String },
     /// `records`: `(record_id, rev)` carried by this batch. The queue can change while the request is in
     /// flight, so `Ok` removes only these entries.
     ArchivePut { server_id: String, records: Vec<(String, u64)> },
@@ -365,7 +387,7 @@ impl ServerInflight {
             | ServerInflight::Deposit { server_id, .. }
             | ServerInflight::Fetch { server_id }
             | ServerInflight::Ack { server_id, .. }
-            | ServerInflight::Cancel { server_id }
+            | ServerInflight::Cancel { server_id, .. }
             | ServerInflight::ArchivePut { server_id, .. }
             | ServerInflight::ArchiveFetch { server_id, .. }
             | ServerInflight::ArchiveProbe { server_id, .. }
@@ -971,6 +993,35 @@ impl P2PCore {
         serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
     }
 
+}
+
+/// A deposit's `Cancel` secret (`server_seal::cancel_secret`): zeroed on drop, never printed.
+#[derive(Clone)]
+pub(crate) struct CancelSecret(zeroize::Zeroizing<[u8; 32]>);
+
+impl CancelSecret {
+    pub(crate) fn new(secret: [u8; 32]) -> Self {
+        CancelSecret(zeroize::Zeroizing::new(secret))
+    }
+    pub(crate) fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CancelSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CancelSecret(..)")
+    }
+}
+
+/// Where a deposit landed (`P2PCore.server_deposit_locations`). `cancelling`: the user withdrew it and the server has
+/// not answered the `Cancel` yet. Kept until it does, and sent again at the server sweep.
+#[derive(Clone, Debug)]
+pub(crate) struct DepositLocation {
+    pub(crate) mailbox: String,
+    pub(crate) seq: u64,
+    pub(crate) cancel: CancelSecret,
+    pub(crate) cancelling: bool,
 }
 
 /// `server_deposit_locations` / `server_deposited` key: `"mailbox|message_id"` for a `Message` (one entry per target), anything else as it is.

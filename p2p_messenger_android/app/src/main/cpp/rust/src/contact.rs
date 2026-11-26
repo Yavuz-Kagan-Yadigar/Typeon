@@ -184,6 +184,7 @@ impl Contact {
         }
     }
 
+    #[cfg(test)]
     pub fn revoked_at(&self, fingerprint: &str) -> Option<u64> {
         self.find_device(fingerprint).and_then(|d| d.revoked_at)
     }

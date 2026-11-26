@@ -70,6 +70,9 @@ modules:
         # instead of pulling the newest matching crates into a release.
       - cargo build --release --locked --manifest-path Linux/Cargo.toml
       - install -Dm755 Linux/target/release/typeon /app/bin/typeon
+        # Tor bridge PTs (tools/fetch-pt-binaries.sh -> pt-bin/, gitignored). The core looks for them next
+        # to /app/bin/typeon. Missing: the build goes on, and Snowflake / obfs4 show "not available".
+      - 'for pt in lyrebird; do if [ -f pt-bin/linux-x86_64/$pt ]; then install -Dm755 pt-bin/linux-x86_64/$pt /app/bin/$pt; else echo "warning: pt-bin/linux-x86_64/$pt missing" >&2; fi; done'
       - install -Dm644 Linux/data/com.p2p.messenger.Typeon.desktop /app/share/applications/com.p2p.messenger.Typeon.desktop
       - install -Dm644 Linux/data/com.p2p.messenger.Typeon.metainfo.xml /app/share/metainfo/com.p2p.messenger.Typeon.metainfo.xml
       - install -Dm644 Linux/data/com.p2p.messenger.Typeon.svg /app/share/icons/hicolor/scalable/apps/com.p2p.messenger.Typeon.svg

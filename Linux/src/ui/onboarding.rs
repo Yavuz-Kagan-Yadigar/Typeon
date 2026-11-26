@@ -419,12 +419,14 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
 
     host.set_child(Some(&framed(&spinner_page("Starting the network…"))));
 
-    let (node_mode, tor_enabled, storage_limit) = {
+    let (node_mode, tor_enabled, storage_limit, tor_mode, tor_bridges) = {
         let prefs = app.prefs.borrow();
         (
             prefs.node_mode,
             prefs.tor_enabled,
             prefs.history_storage_limit_bytes,
+            prefs.tor_mode.clone(),
+            prefs.tor_bridges.clone(),
         )
     };
 
@@ -433,7 +435,11 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
     // Tor bootstrap makes this take a while; on the main thread it would show
     // as a frozen window.
     app::run_in_background(
-        move || core::start_network(node_mode, tor_enabled),
+        // Bridges first. Fails closed: a bridge mode that cannot be set never starts a direct connection.
+        move || {
+            core::set_tor_transport(&tor_mode, &tor_bridges).map_err(|e| format!("Tor bridges: {e}"))?;
+            core::start_network(node_mode, tor_enabled)
+        },
         move |result| {
             if let Err(error) = result {
                 app.toast(&format!("Network start failed: {}. Restart Typeon to try again.", error));

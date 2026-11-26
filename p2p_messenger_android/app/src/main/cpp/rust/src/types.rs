@@ -192,11 +192,10 @@ pub struct ArchivedMessage {
     /// screen was closed or in the background was lost for good.
     #[serde(default)]
     pub seen_by: String,
-    /// Group rows: the author's signature, see `group_author_statement`.
-    /// Carried in the server archive so a restored device can still hand
-    /// the row on with the group history.
+    /// Group rows: the identity id of the member whose history answer brought this row, which its author has not confirmed
+    /// over its own session yet ("relayed by X, unverified" in the UIs). `None`: the author's own copy. Kept in the server archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author_proof: Option<String>,
+    pub relayed_by: Option<String>,
     /// Group rows: this message @mentions me (local only, see `mentions_me`
     /// column).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

@@ -7,10 +7,13 @@ impl Store {
     // Mailbox
     // -----------------------------------------------------------------
 
-    /// Tests: every id comes with a proof made by one shared key.
+    /// Tests: every id comes with a proof made by one shared key, and the deposit verifier of `test_secret(id)`.
     #[cfg(test)]
     pub fn register_mailboxes(&self, owner: &[u8], add: &[String], drop: &[String], now: i64, max: u32) -> Result<Vec<String>, String> {
-        let proofs: Vec<(String, Vec<u8>)> = add.iter().map(|id| (id.clone(), b"test-key".to_vec())).collect();
+        let proofs: Vec<ProvedReader> = add
+            .iter()
+            .map(|id| (id.clone(), b"test-key".to_vec(), Some(server_proto::deposit_verifier(&test_secret(id)).to_vec())))
+            .collect();
         self.register_mailboxes_proved(owner, add, drop, &proofs, now, max).map(|(refused, _)| refused)
     }
 
@@ -18,14 +21,15 @@ impl Store {
     /// in use), and then the ids that need a proof but came without one. The other ids are registered. One refused id
     /// does not cost the batch.
     ///
-    /// `proofs`: (mailbox id, hash of the mailbox key) for each `MailboxProof` whose signature the caller verified. An
-    /// id the owner already reads needs none. A new reader row keeps its proof key (`MAX_READERS_PER_KEY`).
+    /// `proofs`: (mailbox id, hash of the mailbox key, deposit verifier) for each `MailboxProof` whose signature the
+    /// caller verified. An id the owner already reads needs none. A new reader row keeps its proof key
+    /// (`MAX_READERS_PER_KEY`) and its deposit verifier.
     pub fn register_mailboxes_proved(
         &self,
         owner: &[u8],
         add: &[String],
         drop: &[String],
-        proofs: &[(String, Vec<u8>)],
+        proofs: &[ProvedReader],
         now: i64,
         max: u32,
     ) -> Result<(Vec<String>, Vec<String>), String> {
@@ -41,8 +45,7 @@ impl Store {
         for id in add {
             // Already registered by this owner: skip the quota check, so the call stays idempotent. The lookup
             // filters by `owner`, because `mailbox_readers` holds one row per reader. A box another party registered
-            // does not count as registered here. Both sides of a ratchet box register it, so the quota applies on the
-            // second side as well.
+            // does not count as registered here.
             let exists: bool = self
                 .conn
                 .query_row(
@@ -61,8 +64,9 @@ impl Store {
             // A new reader needs a proof. There is at most `MAX_READERS_PER_KEY` readers per proof key, so one key cannot
             // fill another's slots.
             let mut reader_key: Option<&Vec<u8>> = None;
+            let mut verifier: Option<&Vec<u8>> = None;
             if !exists {
-                let Some((_, key_hash)) = proofs.iter().find(|(m, _)| m == id) else {
+                let Some((_, key_hash, deposit_verifier)) = proofs.iter().find(|(m, _, _)| m == id) else {
                     unproven.push(id.clone());
                     continue;
                 };
@@ -72,6 +76,7 @@ impl Store {
                     continue;
                 }
                 reader_key = Some(key_hash);
+                verifier = deposit_verifier.as_ref();
                 let readers: i64 = self
                     .conn
                     .query_row(
@@ -83,7 +88,10 @@ impl Store {
                 // The slots of this key are full. The newcomer holds the same secret, so it is one of those ends (a restored
                 // device under a new enrollment). The same-key reader seen longest ago makes room, but only once it has been
                 // idle for `READER_EVICT_IDLE_MS` (its own requests or its last Register). A reader in use is never displaced.
-                if readers >= MAX_READERS_PER_KEY {
+                // A key-bound (session or call relay) box has one reader: its sender holds the same key, and as a second
+                // reader that never acks it kept every row on the server until the TTL.
+                let cap = if id.starts_with(server_proto::KEY_BOUND_MAILBOX_PREFIX) { 1 } else { MAX_READERS_PER_KEY };
+                if readers >= cap {
                     let stale: Option<(Vec<u8>, i64)> = self
                         .conn
                         .query_row(
@@ -108,14 +116,13 @@ impl Store {
                     let _ = self.delete_fully_acked(id);
                 }
             }
-            // The record is now MULTI-READER (see the `mailbox_readers` schema note). Both sides of a ratchet box register
-            // it, and one registration does not overwrite the other. A reader keeps its key.
+            // One row per reader (see the `mailbox_readers` schema note). A reader keeps its key and verifier.
             self.conn
                 .execute(
-                    "INSERT INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at, key_hash)
-                     VALUES (?1, ?2, ?3, ?3, ?4)
+                    "INSERT INTO mailbox_readers (mailbox_id, owner, created_at, last_seen_at, key_hash, deposit_verifier)
+                     VALUES (?1, ?2, ?3, ?3, ?4, ?5)
                      ON CONFLICT(mailbox_id, owner) DO UPDATE SET last_seen_at = ?3",
-                    params![id, owner, now, reader_key],
+                    params![id, owner, now, reader_key, verifier],
                 )
                 .map_err(|e| e.to_string())?;
             if !exists {
@@ -143,20 +150,23 @@ impl Store {
         Ok((refused, unproven))
     }
 
-    /// A deposit only makes sense when someone other than the depositor reads the box on an active enrollment.
-    /// Otherwise the item can only expire.
-    pub fn mailbox_has_other_reader(&self, mailbox_id: &str, depositor: &[u8]) -> bool {
+    /// The reader a deposit to `mailbox` with this deposit secret is charged to: an active reader whose registered
+    /// verifier matches, one with quota room (`bytes_mail <= max_mail_bytes`) first, then the oldest. A co-reader
+    /// that registered first (anyone holding a group's first-contact code) so cannot fill its own quota to block the
+    /// box. `None` for an unknown box and for a wrong secret alike, through one query.
+    pub fn deposit_owner(&self, mailbox_id: &str, deposit_secret: &[u8], max_mail_bytes: u64) -> Option<Vec<u8>> {
+        let verifier = server_proto::deposit_verifier(deposit_secret);
         self.conn
             .query_row(
-                "SELECT 1 FROM mailbox_readers r JOIN enrollments e ON e.enrollment_id = r.owner
-                 WHERE r.mailbox_id = ?1 AND r.owner != ?2 AND e.state = 'active' LIMIT 1",
-                params![mailbox_id, depositor],
-                |_| Ok(true),
+                "SELECT r.owner FROM mailbox_readers r JOIN enrollments e ON e.enrollment_id = r.owner
+                 WHERE r.mailbox_id = ?1 AND r.deposit_verifier = ?2 AND e.state = 'active'
+                 ORDER BY e.bytes_mail > ?3, r.created_at LIMIT 1",
+                params![mailbox_id, verifier.as_slice(), max_mail_bytes.min(i64::MAX as u64) as i64],
+                |r| r.get(0),
             )
             .optional()
             .ok()
             .flatten()
-            .unwrap_or(false)
     }
 
     pub fn mailbox_is_registered(&self, mailbox_id: &str) -> bool {
@@ -168,68 +178,54 @@ impl Store {
             .unwrap_or(false)
     }
 
-    /// Row count for mailbox capacity: rows that NO reader has acknowledged yet. Rows that stay until the TTL because
-    /// another reader (for example a stranger that never acks) has not acknowledged them are not counted. Otherwise that
-    /// reader could fill the box and block all new deliveries.
-    /// ponytail: these rows still count toward the byte quota (`recount_mail_bytes`). Malicious readers can hold the
-    /// disk up to the quota for the TTL.
     #[cfg(test)]
     pub fn mailbox_item_count(&self, mailbox_id: &str) -> i64 {
+        self.mailbox_usage(mailbox_id).0
+    }
+
+    /// (rows, bytes) in one box that no reader has acknowledged yet: the box's capacity use. A row that only a silent
+    /// reader (a stranger on a first-contact box that never acks) still holds does not count, or that reader would fill
+    /// the box for everyone. Walks `idx_mail_box`, not the `sealed` blobs.
+    pub fn mailbox_usage(&self, mailbox_id: &str) -> (i64, i64) {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM mail m WHERE m.mailbox_id = ?1
+                "SELECT COUNT(*), COALESCE(SUM(m.byte_len), 0) FROM mail m INDEXED BY idx_mail_box WHERE m.mailbox_id = ?1
                    AND NOT EXISTS (SELECT 1 FROM mail_acks a
-                                   WHERE a.mailbox_id = m.mailbox_id AND a.owner != m.depositor
-                                     AND a.through_seq >= m.seq)",
+                                   WHERE a.mailbox_id = m.mailbox_id AND a.through_seq >= m.seq)",
                 params![mailbox_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0)
-    }
-
-    /// Same as `mailbox_item_count`, for one depositor's rows only. Capacity is per depositor: one sender (who cannot
-    /// read the box) filling it stops nobody else's mail.
-    pub fn depositor_item_count(&self, mailbox_id: &str, depositor: &[u8]) -> i64 {
-        self.depositor_usage(mailbox_id, depositor).0
-    }
-
-    /// (rows, bytes) of one depositor in one box that no other reader has acknowledged yet. A row that only a silent
-    /// reader still holds does not count, or that reader would fill the sender's capacity. Walks
-    /// `idx_mail_box_depositor`, not the `sealed` blobs.
-    pub fn depositor_usage(&self, mailbox_id: &str, depositor: &[u8]) -> (i64, i64) {
-        self.conn
-            .query_row(
-                "SELECT COUNT(*), COALESCE(SUM(m.byte_len), 0) FROM mail m WHERE m.mailbox_id = ?1 AND m.depositor = ?2
-                   AND NOT EXISTS (SELECT 1 FROM mail_acks a
-                                   WHERE a.mailbox_id = m.mailbox_id AND a.owner != m.depositor
-                                     AND a.through_seq >= m.seq)",
-                params![mailbox_id, depositor],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap_or((i64::MAX, i64::MAX))
     }
 
-    /// If the SAME bytes from the same depositor are already in this box, no new row is opened. The existing `seq` is
-    /// returned.
+    /// If the SAME bytes are already in this box, no new row is opened. The existing `seq` is returned.
     ///
     /// The client de-duplicates every envelope kind before it deposits (`deposit_dedup_key`). This check is the second
-    /// line of defence: an old or buggy client cannot fill its quota by re-depositing identical bytes.
+    /// line of defence: an old or buggy client cannot fill the box by re-depositing identical bytes.
     ///
     /// Dropping the repeat is safe: the recipient already de-duplicates by `message_id`, and an identical second copy
     /// carries no information.
     #[cfg(test)]
-    pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
-        self.deposit_written(mailbox_id, sealed, depositor, now, ttl_ms).map(|(seq, _)| seq)
+    pub fn deposit(&self, mailbox_id: &str, sealed: &[u8], owner: &[u8], now: i64, ttl_ms: i64) -> Result<u64, String> {
+        self.deposit_written(mailbox_id, sealed, owner, &[], now, ttl_ms).map(|(seq, _)| seq)
     }
 
-    /// `deposit`, plus whether a new row was written (`false` for a repeat). Only a new row is charged to the disk total.
-    pub fn deposit_written(&self, mailbox_id: &str, sealed: &[u8], depositor: &[u8], now: i64, ttl_ms: i64) -> Result<(u64, bool), String> {
-        // Matched by hash, from the index. Comparing `sealed` itself read every same-length blob of this depositor in the
-        // box on each deposit.
+    /// `deposit`, plus whether a new row was written (`false` for a repeat). Only a new row is charged, to `owner` (the
+    /// reader `deposit_owner` picked) and to the disk total.
+    pub fn deposit_written(
+        &self,
+        mailbox_id: &str,
+        sealed: &[u8],
+        owner: &[u8],
+        cancel_hash: &[u8],
+        now: i64,
+        ttl_ms: i64,
+    ) -> Result<(u64, bool), String> {
+        // Matched by hash, from the index.
         let hash = Sha256::digest(sealed);
         if let Ok(existing) = self.conn.query_row(
-            "SELECT seq FROM mail WHERE mailbox_id = ?1 AND depositor = ?2 AND sealed_hash = ?3 LIMIT 1",
-            params![mailbox_id, depositor, hash.as_slice()],
+            "SELECT seq FROM mail WHERE mailbox_id = ?1 AND sealed_hash = ?2 LIMIT 1",
+            params![mailbox_id, hash.as_slice()],
             |row| row.get::<_, i64>(0),
         ) {
             // Refresh the TTL. If the sender keeps re-sending, the recipient has not received it yet, so the copy must not
@@ -256,31 +252,25 @@ impl Store {
             .map_err(|e| e.to_string())?;
         self.conn
             .execute(
-                "INSERT INTO mail (seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, depositor, sealed_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![seq, mailbox_id, sealed, charge, now, now + ttl_ms, depositor, hash.as_slice()],
+                "INSERT INTO mail (seq, mailbox_id, sealed, byte_len, deposited_at_ms, expires_at_ms, owner, sealed_hash, cancel_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![seq, mailbox_id, sealed, charge, now, now + ttl_ms, owner, hash.as_slice(), cancel_hash],
             )
             .map_err(|e| e.to_string())?;
-        let seq = seq as u64;
-        // The quota is charged to the DEPOSITOR, not the box owner. A spam sender uses up its own quota. Nobody can fill
-        // a victim's box to deny it service.
+        // The quota is charged to the box's READER: the depositor is anonymous. Spam into a box costs its owner, so each
+        // box also has its own caps and deposit rate (`handlers.rs`), and only holders of the deposit secret can write.
         self.conn
             .execute(
                 "UPDATE enrollments SET bytes_mail = bytes_mail + ?1 WHERE enrollment_id = ?2",
-                params![charge, depositor],
+                params![charge, owner],
             )
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
-        Ok((seq, true))
+        Ok((seq as u64, true))
     }
 
     /// Fetches the items after the cursor. Stops before `max_bytes` or `max_items` is exceeded. The rest comes in the
-    /// next round (`more`).
-    ///
-    /// `requester`: the requester's enrollment id. Envelopes the requester ITSELF deposited are NOT returned. Both sides
-    /// of a ratchet box write and read it, so without this filter each side would download its own outgoing traffic. It
-    /// cannot decrypt that (the send and receive chains differ), and the log fills with "cannot decrypt" errors. Bandwidth
-    /// and CPU are wasted.
+    /// next round (`more`). Only a reader that registered a box gets its items.
     pub fn fetch(&self, requester: &[u8], cursors: &[(String, u64)], max_items: u32, max_bytes: u32) -> (Vec<MailItem>, bool) {
         let mut items = Vec::new();
         let mut total = 0usize;
@@ -288,8 +278,8 @@ impl Store {
 
         // Only a reader that REGISTERED the box can read it.
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m INDEXED BY idx_mail_reader
-             WHERE m.mailbox_id = ?1 AND m.seq > ?2 AND m.depositor != ?3
+            "SELECT m.seq, m.deposited_at_ms, m.sealed FROM mail m INDEXED BY idx_mail_box
+             WHERE m.mailbox_id = ?1 AND m.seq > ?2
                AND EXISTS (SELECT 1 FROM mailbox_readers r
                            WHERE r.mailbox_id = m.mailbox_id AND r.owner = ?3)
              ORDER BY m.seq",
@@ -324,12 +314,12 @@ impl Store {
         (items, more)
     }
 
-    /// Counts the items in `mailbox_id` that `reader` has not acknowledged (and did not deposit itself), capped at 2:
+    /// Counts the items in `mailbox_id` that `reader` has not acknowledged, capped at 2:
     /// the caller only asks "exactly one?" (see `ServerRequest::Push`), and runs this per deposit.
     pub fn unacked_for(&self, mailbox_id: &str, reader: &[u8]) -> i64 {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM mail m INDEXED BY idx_mail_reader WHERE m.mailbox_id = ?1 AND m.depositor != ?2
+                "SELECT COUNT(*) FROM (SELECT 1 FROM mail m INDEXED BY idx_mail_box WHERE m.mailbox_id = ?1
                    AND m.seq > COALESCE((SELECT a.through_seq FROM mail_acks a
                                          WHERE a.mailbox_id = ?1 AND a.owner = ?2), 0)
                    LIMIT 2)",
@@ -339,8 +329,8 @@ impl Store {
             .unwrap_or(i64::MAX)
     }
 
-    /// Cumulative ack: moves `acker`'s cursor in the box, then deletes what every active registered reader other than
-    /// the depositor has acknowledged (`delete_fully_acked`). The depositor's own ack never deletes its deposit.
+    /// Cumulative ack: moves `acker`'s cursor in the box, then deletes what every active registered reader has
+    /// acknowledged (`delete_fully_acked`).
     pub fn ack(&self, mailbox_id: &str, through_seq: u64, acker: &[u8]) -> Result<usize, String> {
         // Only a reader that REGISTERED the box can acknowledge.
         let is_reader = self
@@ -391,18 +381,17 @@ impl Store {
         Ok(deleted)
     }
 
-    /// Deletes the rows that every registered reader OTHER than the depositor has acknowledged (and at least one of them
-    /// really has). A reader that has not acknowledged (for example a stranger registered to the box) keeps the row until
-    /// the TTL, but cannot delete someone else's mail.
+    /// Deletes the rows that every active registered reader has acknowledged (and at least one really has). A reader
+    /// that has not acknowledged (for example a stranger registered to a first-contact box) keeps the row until the TTL,
+    /// but cannot delete someone else's mail.
     pub(super) fn delete_fully_acked(&self, mailbox_id: &str) -> Result<usize, String> {
         self.conn
             .execute(
                 "DELETE FROM mail WHERE mailbox_id = ?1
                    AND EXISTS (SELECT 1 FROM mail_acks a
-                               WHERE a.mailbox_id = mail.mailbox_id AND a.owner != mail.depositor
-                                 AND a.through_seq >= mail.seq)
+                               WHERE a.mailbox_id = mail.mailbox_id AND a.through_seq >= mail.seq)
                    AND NOT EXISTS (SELECT 1 FROM mailbox_readers r
-                                   WHERE r.mailbox_id = mail.mailbox_id AND r.owner != mail.depositor
+                                   WHERE r.mailbox_id = mail.mailbox_id
                                      AND EXISTS (SELECT 1 FROM enrollments e
                                                  WHERE e.enrollment_id = r.owner AND e.state = 'active')
                                      AND COALESCE((SELECT a.through_seq FROM mail_acks a
@@ -412,28 +401,16 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Deletes expired delivery items. A safety net on top of acks: a recipient that never comes back must not let the box
-    /// grow forever. See `ServerRequest::Cancel`: the sender withdraws its OWN undelivered packet. The `depositor = ?3`
-    /// condition is critical: you can delete only what you deposited, never someone else's.
-    pub fn cancel_own_deposits(&self, mailbox_id: &str, seqs: &[u64], depositor: &[u8]) -> usize {
-        let mut removed = 0usize;
-        // One commit for the whole request, not one fsync per `seq`.
-        let tx = self.conn.unchecked_transaction().ok();
-        for seq in seqs {
-            removed += self
-                .conn
-                .execute(
-                    "DELETE FROM mail WHERE mailbox_id = ?1 AND seq = ?2 AND depositor = ?3",
-                    params![mailbox_id, (*seq).min(i64::MAX as u64) as i64, depositor],
-                )
-                .unwrap_or(0);
-        }
-        if let Some(tx) = tx {
-            if tx.commit().is_err() {
-                return 0;
-            }
-        }
-        removed
+    /// See `ServerRequest::Cancel`: withdraws one undelivered item. Only the holder of the cancel secret, whose hash the
+    /// `Deposit` carried, can do it. An item stored without a cancel hash cannot be withdrawn.
+    pub fn cancel_deposit(&self, mailbox_id: &str, seq: u64, cancel_secret: &[u8]) -> usize {
+        let hash = server_proto::cancel_hash(cancel_secret);
+        self.conn
+            .execute(
+                "DELETE FROM mail WHERE mailbox_id = ?1 AND seq = ?2 AND cancel_hash = ?3",
+                params![mailbox_id, seq.min(i64::MAX as u64) as i64, hash.as_slice()],
+            )
+            .unwrap_or(0)
     }
 
     pub fn sweep_expired_mail(&self, now: i64) -> usize {
@@ -452,7 +429,7 @@ impl Store {
             "DELETE FROM mailbox_readers WHERE owner NOT IN (SELECT enrollment_id FROM enrollments WHERE state = 'active')",
             [],
         );
-        // Counted in the result, so the caller recounts the depositors' quota.
+        // Counted in the result, so the caller recounts the owners' quota.
         let mut removed = 0;
         for mailbox in &orphaned {
             removed += self.delete_fully_acked(mailbox).unwrap_or(0);
@@ -469,13 +446,17 @@ impl Store {
                 .unwrap_or(0)
     }
 
-    /// Subtracts the bytes of deleted delivery items from their depositors' quotas. Called after `ack` and
+    /// Recounts each owner's mail quota: the rows charged to it that it has not acked yet. Called after `ack` and
     /// `sweep_expired_mail`. Otherwise the quota only grows, and an active user would get locked out of the server within
-    /// a few months.
+    /// a few months. A row the owner acked no longer counts even while a co-reader that never acks keeps it on disk
+    /// (until the TTL; the disk budget still sees it).
     pub fn recount_mail_bytes(&self) {
         let _ = self.conn.execute_batch(
-            "UPDATE enrollments SET bytes_mail =
-                COALESCE((SELECT SUM(byte_len) FROM mail WHERE mail.depositor = enrollments.enrollment_id), 0);",
+            "UPDATE enrollments SET bytes_mail = COALESCE((
+                SELECT SUM(m.byte_len) FROM mail m INDEXED BY idx_mail_owner_seq
+                 WHERE m.owner = enrollments.enrollment_id
+                   AND m.seq > COALESCE((SELECT a.through_seq FROM mail_acks a
+                                         WHERE a.mailbox_id = m.mailbox_id AND a.owner = m.owner), 0)), 0);",
         );
     }
 
@@ -503,7 +484,7 @@ impl Store {
         }
         let _ = self.conn.execute(
             "DELETE FROM enrollments WHERE state = 'active' AND last_seen_at < ?1
-               AND NOT EXISTS (SELECT 1 FROM mail WHERE mail.depositor = enrollments.enrollment_id)
+               AND NOT EXISTS (SELECT 1 FROM mail WHERE mail.owner = enrollments.enrollment_id)
                AND NOT EXISTS (SELECT 1 FROM archive WHERE archive.owner = enrollments.enrollment_id)
                AND NOT EXISTS (SELECT 1 FROM blobs WHERE blobs.owner = enrollments.enrollment_id)
                AND NOT EXISTS (SELECT 1 FROM mailbox_readers WHERE mailbox_readers.owner = enrollments.enrollment_id)",

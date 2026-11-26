@@ -170,18 +170,37 @@ pub(crate) fn wait_for_network_activity(timeout_ms: u64) {
     if !core.attachment_events.is_empty() || !core.deferred_swarm_events.is_empty() {
         return;
     }
+    // An anonymous deposit connection to dial, or with events already taken out: the poll handles them now.
+    if core.anon_conns.values().any(|c| !c.dialed || !c.deferred.is_empty()) {
+        return;
+    }
     // clamped; Long.MAX_VALUE panicked in `tokio::time::sleep` (Instant overflow).
     let timeout_ms = timeout_ms.min(60_000);
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let started = std::time::Instant::now();
-    let event = match core.swarm.as_mut() {
-        Some(swarm) => RUNTIME.block_on(async {
-            tokio::select! {
-                ev = swarm.next() => ev,
-                _ = notified => None,
-                _ = tokio::time::sleep(timeout) => None,
-            }
-        }),
+    let core_ref: &mut P2PCore = &mut core;
+    let event = match core_ref.swarm.as_mut() {
+        Some(swarm) => {
+            // Anonymous deposit connections wake the wait too. Their event is kept for `drive_anon_conns`.
+            let anon = &mut core_ref.anon_conns;
+            let anon_event = futures::future::poll_fn(|cx| {
+                for conn in anon.values_mut() {
+                    if let std::task::Poll::Ready(Some(ev)) = conn.swarm.poll_next_unpin(cx) {
+                        conn.deferred.push(ev);
+                        return std::task::Poll::Ready(());
+                    }
+                }
+                std::task::Poll::Pending
+            });
+            RUNTIME.block_on(async {
+                tokio::select! {
+                    ev = swarm.next() => ev,
+                    _ = anon_event => None,
+                    _ = notified => None,
+                    _ = tokio::time::sleep(timeout) => None,
+                }
+            })
+        }
         None => {
             drop(core);
             RUNTIME.block_on(async {

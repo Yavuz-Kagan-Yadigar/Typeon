@@ -20,8 +20,10 @@ These are deliberate trade-offs, each explained further down:
   `identify` exchange shows a connected peer your device's addresses, and a
   peer on the same LAN is dialled directly. Use Tor for reachability across
   NAT, not for anonymity from your contacts.
-- **A store-and-forward server sees its users' social graph**: which enrolled
-  devices deposit into which mailboxes, and when. It never sees content.
+- **A store-and-forward server sees which enrolled device reads which
+  mailbox, and when mail arrives.** Deposits are anonymous, so it does not see
+  who writes to whom, but timing can hint at it (see "What it can see"). It
+  never sees content.
 - **The server history archive is not forward-secret.** A leaked archive key
   decrypts every record uploaded with it, and a server can serve an older
   revision of a record to a freshly linked device without it noticing.
@@ -65,7 +67,7 @@ time the app runs:
 
 | Purpose | Algorithm | Notes |
 |---|---|---|
-| Signing (proving "this message came from me") | Ed25519 **+** ML-DSA-87 | Both signatures are produced and checked on every signed packet |
+| Signing (keys, devices, handshakes, group changes) | Ed25519 **+** ML-DSA-87 | Both signatures are produced and checked on every signed packet. Chat messages are not signed (see section 4) |
 | Key exchange (deriving a shared secret) | X25519 **+** ML-KEM-1024 | Both secrets are mixed into every derived key |
 
 A person's public identity (`identity_id`) is the fingerprint of their first
@@ -198,9 +200,22 @@ Once two devices have paired, messages between them use a **Double Ratchet**
   would need to break the PQ scheme *repeatedly, at 30-minute intervals*, not
   just once at the start of a conversation, to read anything.
 - Message payloads are encrypted with ChaCha20-Poly1305 (authenticated
-  encryption) using the ratchet-derived key.
+  encryption) using the ratchet-derived key. The raw message header is the
+  associated data, so the tag covers every header field.
+- **Messages carry no signature (deniability).** The AEAD tag is the only
+  sender authentication of a message packet. It proves to the receiver that
+  the packet came from the other end of the session, but it proves nothing to
+  a third party: the receiver holds the same keys and could have made the
+  packet itself. The header's identity must match the identity stored for the
+  sending device, and a revoked device is refused. Until a packet decrypts its
+  header is only a claim, so a packet that arrives before the session exists
+  is buffered only when its carrier is the claimed device (the libp2p peer id
+  known for it, or the server mailbox only that device fills), and a packet
+  that fails to decrypt starts a session reset only under the same condition.
+  This also removed one ML-DSA signature and verification per packet.
 
-Every signed packet (handshakes, group changes, device-add authorizations)
+Every signed packet (handshakes, prekeys, group changes, device-add and
+revoke authorizations, founder hand-overs)
 is checked with `verify_hybrid_signature`, which — as of this audit —
 **requires both** the Ed25519 and ML-DSA components to be present and valid;
 previously either signature could be empty and verification would still
@@ -262,30 +277,22 @@ not just sent by whoever relayed it.
 message reaches each member over that member's own 1:1 session with the
 author, so a live message is authenticated by the session. Group *history* is
 different: a device that joins late, or was offline, asks another member for
-the rows it lacks, and that member could attribute any text to any name,
-including the asking user's own.
+the rows it lacks, and that member could attribute any text to any name.
 
-Since 2026-10-07 the author signs every group message and every edit with the
-device's hybrid signature (Ed25519 + ML-DSA-87) over the group id, the message
-id, the author's identity, the signing device and the text. The signature
-travels with the message, is stored by every member, and is handed on with
-history, with the sibling-device backfill and in the server archive. A row
-that the answering member did not write itself is taken only with a valid
-signature of a device known to belong to the claimed author.
+Group messages carry no author signature (deniability, the same reason as
+for 1:1 messages above). A history row that the answering member wrote itself
+arrived over its own session and is trusted. Any other row is stored with a
+"relayed by <member> · unverified" marker shown on the bubble. A relayed row
+never replaces a row the device already holds, and a member cannot relay a
+row under the asking user's own name. When the author's own copy arrives
+later (live, an edit or delete, the author's own history answer, or a sibling
+device's copy) the marker goes, and the author's text wins if it differs.
 
 Limits:
 
-- Messages from before this version carry no signature, so other members'
-  old rows no longer arrive through history sync.
-- A row whose author's devices the receiver has never learned (a member who
-  left before the receiver joined) cannot be checked and is skipped.
-- A deleted message has no text left to check. It is accepted unsigned, as an
-  empty mark, and only under the name of a current member.
-- The send time is not signed (each receiver stores its own), so a member can
-  present a genuine message with a different time.
-- An edit echoed to the author's own other devices carries no signature; that
-  device's copy of the edited row is not handed on to others.
-- The signature costs about 9.4 KB per message (hex text).
+- A relayed row is only as true as the member who relayed it. The marker
+  says so; nothing else checks it.
+- The send time of a relayed row is the relaying member's word.
 
 ---
 
@@ -369,7 +376,7 @@ spec explicitly calling for it.
   Mode description claimed this but it wasn't implemented). A relay only
   ever blind-forwards Noise-encrypted bytes between two addresses — it
   cannot decrypt transport traffic, let alone the separately-encrypted
-  (ratchet + hybrid-signed) application payload. Relay service is **open to
+  (ratchet-encrypted) application payload. Relay service is **open to
   anyone**, not just the relay operator's own contacts — a contacts-only
   policy can't solve the actual scenario that matters (two strangers on
   different networks pairing for the first time have no established
@@ -585,19 +592,42 @@ certificate.
 **What it can see, and can do.** The honest accounting:
 
 - Sizes, timing and volume of everything that passes through.
-- Which `PeerId` registers and polls which mailbox ids. A session mailbox is
-  shared by exactly two devices (its id is a HKDF of a static X25519 DH of both devices' long-term KEM keys plus the sorted fingerprints, so it is **stable** across ratchet rotations and the server cannot compute it), so those registrations **join into a pairwise
-  social graph of its own enrolled users**. Connecting over the server's
-  `.onion` hides network location; it does not hide this linkage, and, since the id no longer rotates, the pair stays linkable for as long as both devices are enrolled. Hiding it properly needs anonymous
-  per-mailbox credentials and a separate circuit per mailbox. That is not
-  implemented, and this document does not pretend otherwise.
+- Which `PeerId` registers and polls which mailbox ids. Each device registers
+  only its own **inbound** boxes: one per contact device and direction (HKDF of
+  the session's `mailbox_seed` over recipient and sender fingerprint). The
+  sender never registers the box it writes to, and it deposits **anonymously**:
+  a fresh throwaway libp2p identity per connection, its own Tor circuit, no
+  enrollment, authorised only by a per-box deposit secret whose hash the reader
+  registered. So the server sees "box X (read by enrollment B) got mail", not
+  who sent it. What still leaks:
+  - **Timing.** A deposit into B's box followed soon after by a deposit from B
+    into another box, or A's enrollment connection being active just before,
+    can link A and B statistically, more so on a server with few users.
+  - **One burst, one sender.** Deposits that share an anonymous connection
+    (everything queued for that server while it is open, up to 30 s idle) share
+    its PeerId and circuit, so the server knows they came from one device. The
+    next burst has a new identity. A group message fans out in one burst, so
+    the server learns the set of boxes one sender writes to: the group's
+    member devices, as box ids. One connection per box, or random delays, would
+    cost a Tor circuit (and radio time) each; we do not pay that.
+  - **Fetch-then-ack timing.** B fetches over its enrollment connection, then
+    deposits Acks/receipts into A's box over an anonymous one moments later.
+    Non-urgent packets (Ack, Seen, read state) wait for an open anonymous
+    connection or the next radio window, which blurs this a little, not much.
+  - **Boxes per reader.** The number of inbound boxes an enrollment reads is
+    about its number of contact devices; their activity profiles stay visible.
+  - **Call relay and attachments are not covered.** Call media relay frames go
+    over the caller's enrollment connection to the callee's relay box, and a
+    server-held attachment is uploaded by the sender's enrollment and fetched
+    over the recipient's main connection. Both link the two ends.
+  The deposit secret is no secret from the server (it sees it on each
+  deposit); it only keeps others who learn a box id from writing to it.
 - **Who made first contact with whom, by device fingerprint.** `Handshake` and
   `IdentityExchange` are stored unsealed and name their sender. The id of a
   first-contact mailbox is keyed with the nonce of the pairing code, so the
   operator cannot compute it from a fingerprint, and `Register` needs a
   signature by the mailbox key, so nobody else can read or occupy it. The
-  operator still has the pair as depositor and reader `PeerId` (previous
-  point).
+  operator sees the reader, not the depositor (previous point).
 - It can **serve an old revision of an archived message** to a device that
   restores its history from nothing: an edited or deleted message comes back
   in its earlier form. The seal proves which revision a record is, not that

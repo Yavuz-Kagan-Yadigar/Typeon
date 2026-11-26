@@ -22,6 +22,8 @@ class P2PService : Service() {
         const val NOTIFICATION_ID = 1
         const val PREFS_NAME = "p2p_settings"
         const val KEY_NODE_MODE = "node_mode_enabled"
+        const val KEY_TOR_MODE = "tor_mode"
+        const val KEY_TOR_BRIDGES = "tor_bridges"
         /** Byte limit for history and attachment storage in node mode (see Rust `history_storage_limit_bytes`). */
         const val KEY_HISTORY_STORAGE_LIMIT = "history_storage_limit_bytes"
         const val DEFAULT_HISTORY_STORAGE_LIMIT_BYTES = 2L * 1024 * 1024 * 1024
@@ -178,6 +180,19 @@ class P2PService : Service() {
         fun isNodeModeEnabled(context: Context): Boolean {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             return prefs.getBoolean(KEY_NODE_MODE, false)
+        }
+
+        /** Tor connection mode: "direct" (default), "snowflake" or "obfs4". Applied on the next process start. */
+        fun getTorMode(context: Context): String =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_TOR_MODE, "direct") ?: "direct"
+
+        fun getTorBridges(context: Context): String =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_TOR_BRIDGES, "") ?: ""
+
+        /** `commit`, not `apply`: the caller restarts the process right after. */
+        fun setTorTransport(context: Context, mode: String, bridges: String) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putString(KEY_TOR_MODE, mode).putString(KEY_TOR_BRIDGES, bridges).commit()
         }
 
         fun setNodeModeEnabled(context: Context, enabled: Boolean) {
@@ -870,6 +885,15 @@ class P2PService : Service() {
                 return
             }
             val nodeMode = isNodeModeEnabled(applicationContext)
+            // Bridges / PT before arti starts. Fails closed: a bridge mode that cannot be set never starts a
+            // direct Tor connection instead (a missing PT binary starts arti, which then cannot connect).
+            val torMode = getTorMode(applicationContext)
+            val torSet = P2PLib.setTorTransport(torMode, getTorBridges(applicationContext), applicationInfo.nativeLibraryDir)
+            if (torSet.startsWith("Error")) {
+                Log.w(TAG, "Tor mode $torMode not applied: $torSet")
+                retryStart { startNet() }
+                return
+            }
             // Tor is mandatory: the core refuses to start without it.
             if (P2PLib.startNetwork(nodeMode, true).startsWith("Error")) {
                 retryStart { startNet() }

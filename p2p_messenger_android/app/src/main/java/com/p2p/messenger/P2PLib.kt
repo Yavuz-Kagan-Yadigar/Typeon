@@ -46,6 +46,12 @@ object P2PLib {
      *  Tor status is monitored with `torStatus()`. Changing this setting requires restarting the network layer (a transport cannot be added to a live swarm). */
     external fun startNetwork(nodeMode: Boolean, torEnabled: Boolean): String
     external fun setNodeMode(enabled: Boolean)
+    /** Tor connection for the next `startNetwork`: mode "direct" / "snowflake" / "obfs4" (+ bridge lines). `ptDir` = nativeLibraryDir. "OK" or "Error: ...". */
+    external fun setTorTransport(mode: String, bridges: String, ptDir: String): String
+    /** "OK", or "Error: line N: ..." for the first bad obfs4 bridge line. */
+    external fun validateBridgeLines(text: String): String
+    /** The PT binary for [mode] ships in this APK (liblyrebird.so in [ptDir]: obfs4 + snowflake). */
+    external fun torTransportAvailable(mode: String, ptDir: String): Boolean
     /** The history and attachment storage limit slider (100 MB to 32 GB) in Settings. It applies only while node mode is on (see Rust
      *  `enforce_history_storage_limit`). Lowering the limit deletes the oldest files at once. */
     external fun setHistoryStorageLimitBytes(bytes: Long)

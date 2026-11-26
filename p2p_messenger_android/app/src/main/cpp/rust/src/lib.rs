@@ -262,9 +262,9 @@ struct P2PCore {
     /// without bound. It is also kept on disk (`persist_handshake_sigs`), so it survives a
     /// restart.
     recent_handshake_sigs: HashMap<String, Vec<(u64, Vec<u8>)>>,
-    /// See `EARLY_PACKET_TTL_MS`. Key: sender device_fingerprint. Value: (time buffered,
-    /// packet). Replayed in order by `replay_early_packets` once the handshake completes.
-    early_packets: HashMap<String, std::collections::VecDeque<(u64, Option<PeerId>, MessagePacket)>>,
+    /// See `EARLY_PACKET_TTL_MS`. Key: sender device_fingerprint. Value: (time buffered, source,
+    /// `carrier_is_sender` at arrival, packet). Replayed in order by `replay_early_packets` once the handshake completes.
+    early_packets: HashMap<String, std::collections::VecDeque<(u64, Option<PeerId>, Option<bool>, MessagePacket)>>,
     /// During pairing, A's `HandshakeInit`
     /// could reach B before B processed A's `IdentityExchange`, so A was not yet in
     /// `known_remote_devices`. `process_handshake_init` then dropped the packet as
@@ -447,11 +447,17 @@ struct P2PCore {
     /// window, which is below the server mailbox TTL). The count is capped at
     /// `MAX_SERVER_DEPOSIT_MEMORY` entries.
     server_deposited: HashMap<(String, String), u64>,
-    /// Where a packet landed on a server: `(server, message id)` -> `(mailbox, seq)`.
+    /// Where a packet landed on a server: `(server, "mailbox|message id")` -> its `DepositLocation`.
     /// `cancel_pending_message` uses it to withdraw the copy from the server too (see
     /// `ServerRequest::Cancel`). Without it, a cancelled message stayed on the server
     /// for 30 days while the recipient was offline.
-    server_deposit_locations: HashMap<(String, String), (String, u64)>,
+    server_deposit_locations: HashMap<(String, String), crate::server_client::DepositLocation>,
+    /// Anonymous deposit connections, one per server, open only while there is mail to
+    /// deposit (see `server_client/anon.rs`).
+    anon_conns: HashMap<String, server_client::AnonConn>,
+    /// `message_id` -> `mono_ms` it was first sent, for non-urgent packets (Ack, Seen, ReadStateSync, typing). They do
+    /// not open an anonymous connection on their own (see `lazy_deposit_held`).
+    lazy_deposits: HashMap<String, u64>,
     /// Total and count of blob round-trip times, to tell whether a transfer is limited by
     /// latency or by bandwidth (see `server_client` `BLOB_RTT_GROW_FACTOR`).
     blob_rtt_sum: u64,
@@ -698,6 +704,8 @@ struct P2PCore {
     last_handshake_redo: HashMap<String, (u64, Option<Vec<u8>>)>,
     /// Per device: (first failure in the current streak, count). See `note_undecryptable`.
     undecryptable_from: HashMap<String, (u64, u32)>,
+    /// PeerId -> (window start, failed decrypts) for carriers not tied to the device they name. See `unproven_fails_blocked`.
+    unproven_fails: HashMap<PeerId, (u64, u32)>,
     /// Sent `HistorySyncRequest` ids -> (1:1 target identity, group, send time). A
     /// `HistorySyncResponse` is processed only when it matches one of these. Otherwise any
     /// contact could write fake messages into the archive with an unrequested "answer", or cancel

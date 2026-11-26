@@ -65,7 +65,9 @@ pub const RELAY_PROTOCOL: &str = "/typeon/relay/1.0.0";
 ///    made per file (core `group_msg_tag`).
 /// 8: archive bucket ids are hashes of per-bucket purge secrets; `ArchivePurge`
 ///    carries the secrets (`archive_bucket_for_purge_secret`).
-pub const SERVER_PROTOCOL_VERSION: u16 = 8;
+/// 9: one inbound mailbox per device and direction; `Deposit` and `Cancel` are
+///    anonymous (no enrollment) and carry a deposit secret / cancel secret.
+pub const SERVER_PROTOCOL_VERSION: u16 = 9;
 
 /// Maximum payload of one `Deposit`. See the size-limit note at the top of the
 /// module: the codec's hard limit is 1 MiB, and this leaves room for CBOR framing.
@@ -182,9 +184,26 @@ pub enum ServerRequest {
 
     /// Deposits a sealed envelope in a mailbox.
     ///
-    /// Quota is charged to the depositor, not the mailbox owner. A spam sender uses
-    /// up its own quota, and nobody can fill a victim's mailbox to deny it service.
-    Deposit { mailbox: MailboxId, #[serde(with = "serde_bytes")] sealed: Vec<u8> },
+    /// Anonymous: needs no enrollment, and the client sends it on a separate
+    /// connection with a throwaway PeerId over its own Tor circuit, never on its
+    /// enrollment connection. The server so learns which box got mail, not who sent it.
+    ///
+    /// `deposit_secret`: the box's deposit secret (`server_seal::deposit_secret`). A
+    /// reader registered its hash (`deposit_verifier`) with the box; a wrong secret
+    /// and an unknown box get the same `UnknownMailbox`. The item is charged to that
+    /// reader's quota, and the box has its own caps and rate limit.
+    ///
+    /// `cancel_hash`: `cancel_hash(cancel_secret)`; whoever presents the secret can
+    /// withdraw the item (`Cancel`).
+    Deposit {
+        mailbox: MailboxId,
+        #[serde(with = "serde_bytes")]
+        deposit_secret: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        cancel_hash: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        sealed: Vec<u8>,
+    },
 
     /// Fetches from several mailboxes in one round trip.
     ///
@@ -210,20 +229,16 @@ pub enum ServerRequest {
     /// disk, DB error) would delete a message that is stored nowhere.
     Ack { acks: Vec<(MailboxId, u64)> },
 
-    /// Withdraws the sender's own undelivered packet.
-    ///
-    /// `Ack` cannot do this, because it requires `depositor != acker`. A sender
-    /// that could make the server delete a message before the recipient saw it
-    /// could abuse that. The reverse gap was real, though: a message sent by
-    /// mistake stayed on the server until its TTL if the recipient was offline, and
-    /// the sender had no way to remove it.
-    ///
-    /// This request closes that gap without enabling abuse. The server deletes
-    /// only rows where `depositor == requester`, so you can withdraw only what you
-    /// deposited. If the recipient already fetched the packet, it is no longer in
-    /// the mailbox and withdrawing it does nothing. Deleting for everyone then
-    /// uses the normal "delete" message.
-    Cancel { mailbox: MailboxId, seqs: Vec<u64> },
+    /// Withdraws one undelivered packet. Anonymous, like `Deposit`, on the same kind of
+    /// connection. The server deletes the row only when `cancel_hash(cancel_secret)`
+    /// matches the hash the `Deposit` carried, so only the depositor can withdraw it.
+    /// If the recipient already fetched and acked it, it is gone and this does nothing.
+    Cancel {
+        mailbox: MailboxId,
+        seq: u64,
+        #[serde(with = "serde_bytes")]
+        cancel_secret: Vec<u8>,
+    },
 
     // --- Archive (history) ---
     /// Loads archive records. `bucket` comes from `server_seal::server_archive_bucket`:
@@ -403,6 +418,10 @@ pub struct MailboxProof {
     pub sig: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub sig_pq: Vec<u8>,
+    /// `deposit_verifier` of the box's deposit secret, kept with this reader. Empty for
+    /// a box nobody deposits to (a call relay box): deposits to it are refused.
+    #[serde(with = "serde_bytes")]
+    pub deposit_verifier: Vec<u8>,
 }
 
 /// Proofs per `Register`. Each is about 7.3 KB, and the request cap is 1 MiB
@@ -420,7 +439,8 @@ pub enum ServerErrorCode {
     BadSignature,
     /// `ts_ms` is outside the `ENROLL_MAX_SKEW_MS` window.
     Stale,
-    /// No one on this server has registered this mailbox.
+    /// No one on this server has registered this mailbox, or the deposit secret is wrong
+    /// (one answer for both, so the server is no oracle for box ids).
     ///
     /// The client reads this as "this recipient is not on my server" and pauses
     /// deposits for that mailbox (with a doubling pause), so it does not spend a
@@ -708,6 +728,25 @@ pub fn key_bound_mailbox_id(key_hash: &[u8]) -> String {
     format!("{}{}", KEY_BOUND_MAILBOX_PREFIX, hex::encode(&key_hash[..key_hash.len().min(16)]))
 }
 
+/// Length of a deposit secret and of a cancel secret.
+pub const DEPOSIT_SECRET_LEN: usize = 32;
+
+fn tagged_hash(tag: &[u8], secret: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::new().chain_update(tag).chain_update(secret).finalize().into()
+}
+
+/// What a reader registers for a box (`MailboxProof.deposit_verifier`) and the server
+/// checks a `Deposit.deposit_secret` against.
+pub fn deposit_verifier(deposit_secret: &[u8]) -> [u8; 32] {
+    tagged_hash(b"p2pmsg-v9-deposit-verifier", deposit_secret)
+}
+
+/// What a `Deposit` carries (`cancel_hash`) and a `Cancel.cancel_secret` must hash to.
+pub fn cancel_hash(cancel_secret: &[u8]) -> [u8; 32] {
+    tagged_hash(b"p2pmsg-v9-cancel", cancel_secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +770,13 @@ mod tests {
         assert_ne!(base, register_signing_input("mb_b", b"eid", "peer"));
         assert_ne!(base, register_signing_input("mb_a", b"eid2", "peer"));
         assert_ne!(base, register_signing_input("mb_a", b"eid", "other"));
+    }
+
+    #[test]
+    fn deposit_and_cancel_hashes_are_separate() {
+        let s = [5u8; DEPOSIT_SECRET_LEN];
+        assert_ne!(deposit_verifier(&s), cancel_hash(&s));
+        assert_ne!(deposit_verifier(&s), deposit_verifier(&[6u8; DEPOSIT_SECRET_LEN]));
     }
 
     #[test]

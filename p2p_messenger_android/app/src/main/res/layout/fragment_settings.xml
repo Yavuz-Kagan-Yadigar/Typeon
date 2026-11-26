@@ -419,6 +419,16 @@
 
                 <View style="@style/Settings.Divider" />
 
+                <TextView style="@style/Settings.Title" android:text="@string/lbl_tor_connection" />
+                <TextView android:id="@+id/tor_mode_desc" style="@style/Settings.Desc" />
+                <Button
+                    android:id="@+id/btn_tor_mode"
+                    style="@style/Settings.Button"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/action_tor_mode" />
+
+                <View style="@style/Settings.Divider" />
+
                 <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/beta_updates_switch"
                     android:layout_width="match_parent"

@@ -139,6 +139,8 @@ struct Entry {
     reactions: String,
     /// Disappearing message: (timer seconds, when it goes on this device's clock in ms). See `disappear.rs`.
     expire: Option<(u32, u64)>,
+    /// Group row another member relayed, not yet confirmed by its author: that member's identity id (`ArchivedMessage.relayed_by`).
+    relayed_by: Option<String>,
 }
 
 /// The widgets of one rendered bubble that later events may need to touch.

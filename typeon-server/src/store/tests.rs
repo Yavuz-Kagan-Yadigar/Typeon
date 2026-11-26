@@ -62,7 +62,7 @@ fn an_idle_enrollment_sleeps_and_rebinds_without_an_invite() {
     s.conn.execute("UPDATE enrollments SET bytes_archive = 7 WHERE enrollment_id = ?1", params![a]).unwrap();
     s.touch_enrollment(&b, 1_000);
     assert_eq!(s.count_active_enrollments(500), 1);
-    assert_eq!(s.sleep_idle_enrollments(500), 2, "mail only a sleeper or its depositor reads goes");
+    assert_eq!(s.sleep_idle_enrollments(500), 1, "mail only a sleeper reads goes");
     let row = s.enrollment_by_id(&a).expect("the row stays");
     assert_eq!(row.state, EnrollmentState::Active);
     assert_eq!(row.bytes_archive, 7, "quota counters stay");
@@ -82,22 +82,6 @@ fn mail_seq_counts_per_mailbox_and_never_resets() {
     assert_eq!(s.deposit("mb_1", b"z", b"e", 1, 1000).unwrap(), 2);
     s.conn.execute("DELETE FROM mail", []).unwrap();
     assert_eq!(s.deposit("mb_1", b"w", b"e", 1, 1000).unwrap(), 3, "an emptied box keeps counting");
-}
-
-#[test]
-fn old_global_mail_seq_migrates_above_old_cursors() {
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE mail (seq INTEGER PRIMARY KEY AUTOINCREMENT, mailbox_id TEXT NOT NULL, sealed BLOB NOT NULL,
-                 byte_len INTEGER NOT NULL, deposited_at_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL, depositor BLOB NOT NULL);
-             INSERT INTO mail VALUES (41, 'mb_1', x'00', 1, 1, 9999, x'01');",
-    )
-    .unwrap();
-    let s = Store { conn };
-    s.init_schema().unwrap();
-    assert_eq!(s.deposit("mb_2", b"y", b"e", 1, 1000).unwrap(), 42);
-    assert_eq!(s.deposit("mb_1", b"y", b"e", 1, 1000).unwrap(), 42);
-    assert_eq!(s.depositor_item_count("mb_1", b"\x01"), 1, "the old row survives");
 }
 
 #[test]
@@ -126,14 +110,11 @@ fn deposit_fetch_cursor_never_repeats_or_skips() {
 #[test]
 fn unacked_counts_only_what_the_reader_has_not_acked() {
     let s = Store::open_in_memory().unwrap();
-    let a = enroll(&s, b"aaaa", "peerA");
     let b = enroll(&s, b"bbbb", "peerB");
-    s.register_mailboxes(&a, &["mb_1".into()], &[], 0, 10).unwrap();
     s.register_mailboxes(&b, &["mb_1".into()], &[], 0, 10).unwrap();
-    let s1 = s.deposit("mb_1", b"one", &a, 1, 1000).unwrap();
+    let s1 = s.deposit("mb_1", b"one", &b, 1, 1000).unwrap();
     assert_eq!(s.unacked_for("mb_1", &b), 1, "only the new item: safe to push inline");
-    assert_eq!(s.unacked_for("mb_1", &a), 0, "own deposits never count");
-    s.deposit("mb_1", b"two", &a, 2, 1000).unwrap();
+    s.deposit("mb_1", b"two", &b, 2, 1000).unwrap();
     assert_eq!(s.unacked_for("mb_1", &b), 2, "an older item is pending: Notify only");
     s.ack("mb_1", s1, &b).unwrap();
     assert_eq!(s.unacked_for("mb_1", &b), 1);
@@ -160,28 +141,6 @@ fn fetch_respects_byte_and_item_caps() {
 }
 
 #[test]
-fn fetch_does_not_return_the_requesters_own_deposits() {
-    // Both sides of a ratchet box write to it and read from it. Without a filter, each side downloads its own
-    // outgoing traffic and cannot decrypt it.
-    let s = Store::open_in_memory().unwrap();
-    let a = enroll(&s, b"aaaa", "peerA");
-    let b = enroll(&s, b"bbbb", "peerB");
-    // Both sides of a ratchet box register it. See `mailbox_readers`.
-    register(&s, &a, "mb_1");
-    register(&s, &b, "mb_1");
-    s.deposit("mb_1", b"a-dan", &a, 1, 1000).unwrap();
-    s.deposit("mb_1", b"b-den", &b, 2, 1000).unwrap();
-
-    let (for_a, _) = s.fetch(&a, &[("mb_1".into(), 0)], 10, 4096);
-    assert_eq!(for_a.len(), 1);
-    assert_eq!(for_a[0].sealed, b"b-den", "A must see only what B left");
-
-    let (for_b, _) = s.fetch(&b, &[("mb_1".into(), 0)], 10, 4096);
-    assert_eq!(for_b.len(), 1);
-    assert_eq!(for_b[0].sealed, b"a-dan");
-}
-
-#[test]
 fn a_new_reader_needs_a_proof() {
     // A session box: its id is derived from the one key both ends derive.
     let s = Store::open_in_memory().unwrap();
@@ -191,13 +150,14 @@ fn a_new_reader_needs_a_proof() {
     let key = [1u8; 32].to_vec();
     let mb = server_proto::key_bound_mailbox_id(&key);
     let id = vec![mb.clone()];
-    let proof = |key: &[u8]| vec![(mb.clone(), key.to_vec())];
+    let proof = |key: &[u8]| vec![(mb.clone(), key.to_vec(), None)];
     // No proof: not registered, reported as unproven.
     assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &[], 0, 10).unwrap(), (vec![], id.clone()));
     assert!(!s.mailbox_is_registered(&mb));
     assert_eq!(s.register_mailboxes_proved(&owner, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
-    // The same key is taken (second end of a session).
-    assert_eq!(s.register_mailboxes_proved(&peer, &id, &[], &proof(&key), 0, 10).unwrap(), (vec![], vec![]));
+    // The same key from another enrollment (the sender derives it too): one reader per key-bound box, refused while
+    // the reader is in use.
+    assert_eq!(s.register_mailboxes_proved(&peer, &id, &[], &proof(&key), 0, 10).unwrap(), (id.clone(), vec![]));
     // Whoever knows only the id proves it with a key of its own: refused.
     assert_eq!(s.register_mailboxes_proved(&squatter, &id, &[], &proof(&[2u8; 32]), 0, 10).unwrap(), (id.clone(), vec![]));
     let rows = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&squatter], |r| r.get::<_, i64>(0)).unwrap();
@@ -216,7 +176,7 @@ fn a_squatter_key_neither_locks_out_nor_deletes_for_the_real_reader() {
     let device = enroll(&s, b"cccc", "peerC");
     let sender = enroll(&s, b"dddd", "peerD");
     let id = vec!["mb_1".to_string()];
-    let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec())];
+    let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec(), None)];
     for sq in [&sq1, &sq2] {
         assert_eq!(s.register_mailboxes_proved(sq, &id, &[], &proof(b"squat"), 0, 10).unwrap(), (vec![], vec![]));
     }
@@ -242,7 +202,7 @@ fn a_key_takes_no_third_reader() {
     register(&s, &a, "mb_1");
     let id = vec!["mb_1".to_string()];
     // Another key takes its own slots, not the slots of "test-key".
-    let other = vec![("mb_1".to_string(), b"other-key".to_vec())];
+    let other = vec![("mb_1".to_string(), b"other-key".to_vec(), None)];
     assert!(s.register_mailboxes_proved(&d, &id, &[], &other, 0, 100).unwrap().0.is_empty());
     // The same key from a new enrollment (restored device) takes the place of the reader seen longest ago, once
     // that one has been idle long enough.
@@ -253,24 +213,9 @@ fn a_key_takes_no_third_reader() {
     s.touch_enrollment(&a, 10);
     assert_eq!(s.register_mailboxes(&c, &id, &[], week + 5, 100).unwrap(), id, "a was seen at 10");
     assert!(s.register_mailboxes(&c, &id, &[], week + 10, 100).unwrap().is_empty());
-    assert!(s.mailbox_has_other_reader("mb_1", &a), "b and c read it");
+    assert!(s.deposit_owner("mb_1", &test_secret("mb_1"), u64::MAX).is_some_and(|o| o != a), "b and c read it");
     let aa = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE owner = ?1", params![&a], |r| r.get::<_, i64>(0)).unwrap();
     assert_eq!(aa, 0, "a was the stalest reader");
-}
-
-#[test]
-fn depositor_cannot_delete_its_own_message() {
-    // Otherwise a sender could delete a message before the recipient saw it.
-    let s = Store::open_in_memory().unwrap();
-    let sender = enroll(&s, b"send", "peerS");
-    let recipient = enroll(&s, b"recv", "peerR");
-    register(&s, &recipient, "mb_1");
-    let seq = s.deposit("mb_1", b"hello", &sender, 1, 1000).unwrap();
-
-    assert_eq!(s.ack("mb_1", seq, &sender).unwrap(), 0, "the depositor must not delete");
-    assert_eq!(s.mailbox_item_count("mb_1"), 1);
-    assert_eq!(s.ack("mb_1", seq, &recipient).unwrap(), 1, "recipient must be able to delete");
-    assert_eq!(s.mailbox_item_count("mb_1"), 0);
 }
 
 #[test]
@@ -290,8 +235,7 @@ fn ack_is_cumulative_and_idempotent() {
     assert_eq!(s.ack("mb_1", last, &recipient).unwrap(), 0);
 }
 
-/// See `Store::deposit`. A repeated deposit of identical bytes by the same depositor stores one copy only, so it cannot
-/// fill the depositor's quota.
+/// See `Store::deposit`. A repeated deposit of identical bytes stores one copy only, so it cannot fill the owner's quota.
 #[test]
 fn identical_redeposit_is_collapsed_and_does_not_grow_quota() {
     let s = Store::open_in_memory().unwrap();
@@ -299,19 +243,20 @@ fn identical_redeposit_is_collapsed_and_does_not_grow_quota() {
     let recipient = enroll(&s, b"recv", "peerR");
     register(&s, &recipient, "mb_1");
 
-    let first = s.deposit("mb_1", b"ayni-el-sikisma", &sender, 1, 1000).unwrap();
+    let first = s.deposit("mb_1", b"ayni-el-sikisma", &recipient, 1, 1000).unwrap();
     for i in 2..50 {
-        let again = s.deposit("mb_1", b"ayni-el-sikisma", &sender, i, 1000).unwrap();
+        let again = s.deposit("mb_1", b"ayni-el-sikisma", &recipient, i, 1000).unwrap();
         assert_eq!(again, first, "same envelope must map to the same seq");
     }
     assert_eq!(s.mailbox_item_count("mb_1"), 1);
 
     // The quota must grow by only ONE copy.
-    let e = s.enrollment_by_peer("peerS").unwrap();
+    let e = s.enrollment_by_peer("peerR").unwrap();
     assert_eq!(e.bytes_mail as usize, mail_row_bytes("mb_1", b"ayni-el-sikisma"));
+    assert_eq!(s.enrollment_by_id(&sender).unwrap().bytes_mail, 0, "the sender pays nothing");
 
     // Different bytes still get separate rows.
-    s.deposit("mb_1", b"baska-zarf", &sender, 60, 1000).unwrap();
+    s.deposit("mb_1", b"baska-zarf", &recipient, 60, 1000).unwrap();
     assert_eq!(s.mailbox_item_count("mb_1"), 2);
 }
 
@@ -334,19 +279,6 @@ fn unregistered_reader_can_neither_fetch_nor_ack() {
     let (mine, _) = s.fetch(&victim, &[("mb_1".into(), 0)], 10, 4096);
     assert_eq!(mine.len(), 1, "real recipient must still be able to read");
     assert_eq!(s.ack("mb_1", seq, &victim).unwrap(), 1);
-}
-
-#[test]
-fn a_full_box_is_counted_per_depositor() {
-    let s = Store::open_in_memory().unwrap();
-    let spam = enroll(&s, b"spam", "peerX");
-    let real = enroll(&s, b"real", "peerR");
-    let reader = enroll(&s, b"read", "peerD");
-    register(&s, &reader, "mb_1");
-    s.deposit("mb_1", b"a", &spam, 1, 1000).unwrap();
-    s.deposit("mb_1", b"b", &spam, 1, 1000).unwrap();
-    assert_eq!(s.depositor_item_count("mb_1", &spam), 2);
-    assert_eq!(s.depositor_item_count("mb_1", &real), 0, "spam does not count against another sender");
 }
 
 /// A first-contact box id is derived from the fingerprint, so any enrolled party can register as a reader of it. That
@@ -374,12 +306,11 @@ fn a_lurking_reader_can_neither_delete_nor_fill_anothers_mail() {
     let seq2 = s.deposit("mb_fp", b"handshake-2", &sender, 2, 1000).unwrap();
     // A third reader of the same key is refused: two per key, both in use.
     let third = enroll(&s, b"sile", "peerQ");
-    let same_key = vec![("mb_fp".to_string(), b"test-key".to_vec())];
+    let same_key = vec![("mb_fp".to_string(), b"test-key".to_vec(), None)];
     assert_eq!(s.register_mailboxes_proved(&third, &["mb_fp".to_string()], &[], &same_key, 0, 100).unwrap().0.len(), 1);
     // The lurker is the silent reader here: it has not acked seq2.
     assert_eq!(s.ack("mb_fp", seq2, &victim).unwrap(), 0, "not deleted while a silent reader exists");
-    assert_eq!(s.depositor_item_count("mb_fp", &sender), 0, "a row the recipient acked does not count toward capacity");
-    assert_eq!(s.depositor_usage("mb_fp", &sender).1, 0, "nor toward the per-box bytes");
+    assert_eq!(s.mailbox_usage("mb_fp"), (0, 0), "a row the recipient acked counts neither toward capacity nor bytes");
     assert_eq!(s.ack("mb_fp", seq2, &lurker).unwrap(), 1);
 }
 
@@ -394,25 +325,6 @@ fn orphaned_reader_does_not_block_deletion() {
     register(&s, b"gone", "mb_1");
     let seq = s.deposit("mb_1", b"x", &sender, 1, 1000).unwrap();
     assert_eq!(s.ack("mb_1", seq, &reader).unwrap(), 1);
-}
-
-/// A ratchet box has TWO registered readers, and one does not overwrite the other's registration.
-#[test]
-fn a_ratchet_mailbox_supports_two_registered_readers() {
-    let s = Store::open_in_memory().unwrap();
-    let a = enroll(&s, b"aaaa", "peerA");
-    let b = enroll(&s, b"bbbb", "peerB");
-    register(&s, &a, "mb_rt");
-    register(&s, &b, "mb_rt");
-    s.deposit("mb_rt", b"a->b", &a, 1, 1000).unwrap();
-    s.deposit("mb_rt", b"b->a", &b, 2, 1000).unwrap();
-
-    let (for_a, _) = s.fetch(&a, &[("mb_rt".into(), 0)], 10, 4096);
-    assert_eq!(for_a.len(), 1);
-    assert_eq!(for_a[0].sealed, b"b->a");
-    let (for_b, _) = s.fetch(&b, &[("mb_rt".into(), 0)], 10, 4096);
-    assert_eq!(for_b.len(), 1);
-    assert_eq!(for_b[0].sealed, b"a->b");
 }
 
 /// The stride must be stored with the blob, or `serve_chunk` would read from the wrong offsets.
@@ -444,27 +356,56 @@ fn total_stored_bytes_counts_every_kind() {
     assert_eq!(s.total_stored_bytes(), 177 + (mail_row_bytes("mb_1", &[]) + ARCHIVE_ROW_OVERHEAD) as i64);
 }
 
-/// The sender must be able to withdraw its OWN undelivered packet, and only its own.
+/// Only the holder of a deposit's cancel secret can withdraw it (`ServerRequest::Cancel`).
 #[test]
-fn sender_can_cancel_only_its_own_undelivered_deposit() {
+fn a_deposit_is_withdrawn_only_with_its_cancel_secret() {
     let s = Store::open_in_memory().unwrap();
-    let sender = enroll(&s, b"send", "peerS");
-    let other = enroll(&s, b"othr", "peerO");
     let recipient = enroll(&s, b"recv", "peerR");
     register(&s, &recipient, "mb_1");
-    let mine = s.deposit("mb_1", b"benim", &sender, 1, 1000).unwrap();
-    let theirs = s.deposit("mb_1", b"baskasinin", &other, 2, 1000).unwrap();
-
-    // Cannot delete someone else's packet.
-    assert_eq!(s.cancel_own_deposits("mb_1", &[theirs], &sender), 0);
+    let (mine, theirs) = ([1u8; 32], [2u8; 32]);
+    let m = s.deposit_written("mb_1", b"benim", &recipient, &server_proto::cancel_hash(&mine), 1, 1000).unwrap().0;
+    let t = s.deposit_written("mb_1", b"baskasinin", &recipient, &server_proto::cancel_hash(&theirs), 2, 1000).unwrap().0;
+    assert_eq!(s.cancel_deposit("mb_1", t, &mine), 0, "my secret does not withdraw another item");
+    assert_eq!(s.cancel_deposit("mb_1", m, &theirs), 0);
+    assert_eq!(s.cancel_deposit("mb_2", m, &mine), 0, "the box is part of the match");
     assert_eq!(s.mailbox_item_count("mb_1"), 2);
-    // Can withdraw my own.
-    assert_eq!(s.cancel_own_deposits("mb_1", &[mine], &sender), 1);
-    assert_eq!(s.mailbox_item_count("mb_1"), 1);
-    // The recipient still sees the other one.
+    assert_eq!(s.cancel_deposit("mb_1", m, &mine), 1);
     let (left, _) = s.fetch(&recipient, &[("mb_1".into(), 0)], 10, 4096);
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].sealed, b"baskasinin");
+    // An item stored without a cancel hash cannot be withdrawn at all.
+    let bare = s.deposit("mb_1", b"bare", &recipient, 3, 1000).unwrap();
+    assert_eq!(s.cancel_deposit("mb_1", bare, &[]), 0);
+}
+
+/// The anonymous path: the reader registers its inbound box with a deposit verifier; a depositor with the secret
+/// finds the reader (who is charged), one without it gets the same `None` as for an unknown box.
+#[test]
+fn an_anonymous_deposit_needs_the_deposit_secret_and_is_charged_to_the_reader() {
+    let s = Store::open_in_memory().unwrap();
+    let reader = enroll(&s, b"read", "peerR");
+    let secret = [9u8; 32];
+    let proof = vec![("mb_in".to_string(), b"key".to_vec(), Some(server_proto::deposit_verifier(&secret).to_vec()))];
+    assert_eq!(s.register_mailboxes_proved(&reader, &["mb_in".to_string()], &[], &proof, 0, 10).unwrap(), (vec![], vec![]));
+    assert_eq!(s.deposit_owner("mb_in", &secret, u64::MAX), Some(reader.clone()));
+    assert_eq!(s.deposit_owner("mb_in", &[8u8; 32], u64::MAX), None, "a wrong secret");
+    assert_eq!(s.deposit_owner("mb_other", &secret, u64::MAX), None, "an unknown box: the same answer");
+    // A reader registered without a verifier (a call relay box) takes no deposits.
+    let relay = vec![("mb_relay".to_string(), b"key".to_vec(), None)];
+    s.register_mailboxes_proved(&reader, &["mb_relay".to_string()], &[], &relay, 0, 10).unwrap();
+    assert_eq!(s.deposit_owner("mb_relay", &secret, u64::MAX), None);
+    let seq = s.deposit_written("mb_in", b"hello", &reader, &server_proto::cancel_hash(&[1u8; 32]), 1, 1000).unwrap().0;
+    let (items, _) = s.fetch(&reader, &[("mb_in".into(), 0)], 10, 4096);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].seq, seq);
+    assert_eq!(s.enrollment_by_id(&reader).unwrap().bytes_mail, mail_row_bytes("mb_in", b"hello") as i64, "the reader pays");
+    assert_eq!(s.mailbox_usage("mb_in"), (1, mail_row_bytes("mb_in", b"hello") as i64));
+    s.ack("mb_in", seq, &reader).unwrap();
+    s.recount_mail_bytes();
+    assert_eq!(s.enrollment_by_id(&reader).unwrap().bytes_mail, 0, "delivered mail is taken off the reader's quota");
+    // A revoked reader takes no deposits.
+    s.revoke_enrollment(&reader).unwrap();
+    assert_eq!(s.deposit_owner("mb_in", &secret, u64::MAX), None);
 }
 
 /// Operator decision: a BLOCK differs from a revoke. If the key is blocked, a fresh invite must not work either.
@@ -544,7 +485,7 @@ fn old_schema_gets_missing_column_or_stays_unstamped() {
         assert_eq!(version(&s), SCHEMA_VERSION);
     }
     {
-        // `ALTER TABLE mail ADD COLUMN` fails for a reason other than a duplicate column (a view cannot take one).
+        // Schema init fails on the mail table for a reason other than a duplicate column (a view is not a table).
         let s = open();
         s.conn
             .execute_batch("DROP INDEX IF EXISTS idx_mail_hash; DROP TABLE mail; CREATE VIEW mail AS SELECT 1 AS seq; PRAGMA user_version = 3;")
@@ -561,7 +502,7 @@ fn old_schema_gets_missing_column_or_stays_unstamped() {
 fn two_keys_on_one_box_each_take_two_readers() {
     let s = Store::open_in_memory().unwrap();
     let id = vec!["mb_1".to_string()];
-    let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec())];
+    let proof = |key: &[u8]| vec![("mb_1".to_string(), key.to_vec(), None)];
     let owners: Vec<Vec<u8>> = (0..6u8).map(|i| enroll(&s, &[b'a' + i; 4], &format!("peer{i}"))).collect();
     for (i, key) in [&b"key-1"[..], &b"key-2"[..]].into_iter().enumerate() {
         for o in &owners[i * 3..i * 3 + 2] {
@@ -793,11 +734,12 @@ fn mail_bytes_are_recounted_after_delivery() {
     let sender = enroll(&s, b"send", "peerS");
     let recipient = enroll(&s, b"recv", "peerR");
     register(&s, &recipient, "mb_1");
-    let seq = s.deposit("mb_1", &vec![b'x'; 500], &sender, 1, 1000).unwrap();
-    assert_eq!(s.enrollment_by_peer("peerS").unwrap().bytes_mail, mail_row_bytes("mb_1", &[0; 500]) as i64);
+    let seq = s.deposit("mb_1", &vec![b'x'; 500], &recipient, 1, 1000).unwrap();
+    assert_eq!(s.enrollment_by_peer("peerR").unwrap().bytes_mail, mail_row_bytes("mb_1", &[0; 500]) as i64);
+    assert_eq!(s.enrollment_by_id(&sender).unwrap().bytes_mail, 0);
     s.ack("mb_1", seq, &recipient).unwrap();
     s.recount_mail_bytes();
-    assert_eq!(s.enrollment_by_peer("peerS").unwrap().bytes_mail, 0);
+    assert_eq!(s.enrollment_by_peer("peerR").unwrap().bytes_mail, 0);
 }
 
 #[test]
@@ -873,14 +815,84 @@ fn a_pruned_box_counter_restarts_above_old_cursors() {
 #[test]
 fn ack_many_keeps_the_highest_seq_and_a_repeat_is_not_written() {
     let s = Store::open_in_memory().unwrap();
-    let sender = enroll(&s, b"send", "peerS");
     let reader = enroll(&s, b"read", "peerR");
     register(&s, &reader, "mb_1");
-    let (one, new) = s.deposit_written("mb_1", b"one", &sender, 1, 1000).unwrap();
+    let (one, new) = s.deposit_written("mb_1", b"one", &reader, &[], 1, 1000).unwrap();
     assert!(new);
-    assert_eq!(s.deposit_written("mb_1", b"one", &sender, 2, 1000).unwrap(), (one, false), "a repeat writes nothing");
-    let two = s.deposit("mb_1", b"two", &sender, 3, 1000).unwrap();
+    assert_eq!(s.deposit_written("mb_1", b"one", &reader, &[], 2, 1000).unwrap(), (one, false), "a repeat writes nothing");
+    let two = s.deposit("mb_1", b"two", &reader, 3, 1000).unwrap();
     let acks = vec![("mb_1".to_string(), two), ("mb_1".to_string(), one)];
     assert_eq!(s.ack_many(&acks, &reader).unwrap(), 2, "the lower seq after the higher one does not undo it");
-    assert_eq!(s.depositor_usage("mb_1", &sender), (0, 0));
+    assert_eq!(s.mailbox_usage("mb_1"), (0, 0));
+}
+
+/// A row stops counting against its owner once the owner acked it, even while a co-reader that never acks keeps it on
+/// disk. A key-bound (session) box takes one reader: the sender, who derives the same key, cannot join as a second.
+#[test]
+fn an_acked_row_leaves_the_owners_quota_and_a_session_box_has_one_reader() {
+    let s = Store::open_in_memory().unwrap();
+    let owner = enroll(&s, b"ownr", "peerO");
+    let squat = enroll(&s, b"sqat", "peerS");
+    // First-contact box: a co-reader with its own key gets in, and never acks.
+    register(&s, &owner, "mb_fc");
+    let other = vec![("mb_fc".to_string(), b"squat-key".to_vec(), Some(server_proto::deposit_verifier(&test_secret("mb_fc")).to_vec()))];
+    assert!(s.register_mailboxes_proved(&squat, &["mb_fc".to_string()], &[], &other, 1, 10).unwrap().0.is_empty());
+    let seq = s.deposit("mb_fc", b"hello", &owner, 2, 1000).unwrap();
+    s.recount_mail_bytes();
+    assert_eq!(s.enrollment_by_id(&owner).unwrap().bytes_mail, mail_row_bytes("mb_fc", b"hello") as i64);
+    s.ack("mb_fc", seq, &owner).unwrap();
+    s.recount_mail_bytes();
+    assert_eq!(s.enrollment_by_id(&owner).unwrap().bytes_mail, 0, "acked by its owner: off the quota");
+    assert_eq!(s.mailbox_usage("mb_fc").0, 0);
+    // Key-bound box: one reader.
+    let key = [7u8; 32];
+    let id = vec![server_proto::key_bound_mailbox_id(&key)];
+    let proof = vec![(id[0].clone(), key.to_vec(), None)];
+    assert!(s.register_mailboxes_proved(&owner, &id, &[], &proof, 0, 10).unwrap().0.is_empty());
+    assert_eq!(s.register_mailboxes_proved(&squat, &id, &[], &proof, 1, 10).unwrap().0, id, "the sender is refused");
+    // The restore path still works: the same key under a new enrollment replaces a reader idle long enough.
+    s.touch_enrollment(&owner, 0);
+    let restored = enroll(&s, b"rest", "peerN");
+    assert!(s.register_mailboxes_proved(&restored, &id, &[], &proof, READER_EVICT_IDLE_MS, 10).unwrap().0.is_empty());
+    let readers = s.conn.query_row("SELECT COUNT(*) FROM mailbox_readers WHERE mailbox_id = ?1", params![id[0]], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(readers, 1);
+}
+
+/// The reader charged for a deposit is one with quota room: a co-reader that registered first and filled its own
+/// quota does not block the box.
+#[test]
+fn the_deposit_goes_to_a_reader_with_quota_room() {
+    let s = Store::open_in_memory().unwrap();
+    let squat = enroll(&s, b"sqat", "peerS");
+    let owner = enroll(&s, b"ownr", "peerO");
+    let verifier = Some(server_proto::deposit_verifier(&test_secret("mb_fc")).to_vec());
+    let id = vec!["mb_fc".to_string()];
+    s.register_mailboxes_proved(&squat, &id, &[], &[(id[0].clone(), b"k1".to_vec(), verifier.clone())], 0, 10).unwrap();
+    s.register_mailboxes_proved(&owner, &id, &[], &[(id[0].clone(), b"k2".to_vec(), verifier)], 1, 10).unwrap();
+    assert_eq!(s.deposit_owner("mb_fc", &test_secret("mb_fc"), 100), Some(squat.clone()), "oldest while it has room");
+    s.conn.execute("UPDATE enrollments SET bytes_mail = 101 WHERE enrollment_id = ?1", params![squat]).unwrap();
+    assert_eq!(s.deposit_owner("mb_fc", &test_secret("mb_fc"), 100), Some(owner), "full: the next reader");
+}
+
+/// A pre-anonymous-deposit DB still stamped 0 is told by its `mail.depositor` column: the old mail tables go, and the
+/// quota counters charged for them are recounted.
+#[test]
+fn a_legacy_mail_table_is_dropped_even_at_user_version_zero() {
+    let s = Store { conn: Connection::open_in_memory().unwrap() };
+    s.conn
+        .execute_batch(
+            "CREATE TABLE mail (id INTEGER PRIMARY KEY, seq INTEGER, mailbox_id TEXT, sealed BLOB, byte_len INTEGER,
+                                deposited_at_ms INTEGER, expires_at_ms INTEGER, depositor BLOB, sealed_hash BLOB);
+             INSERT INTO mail VALUES (1, 1, 'mb_1', x'00', 500, 0, 0, x'01', NULL);
+             CREATE TABLE enrollments (enrollment_id BLOB PRIMARY KEY, enroll_pk BLOB NOT NULL, enroll_pk_pq BLOB NOT NULL DEFAULT x'',
+                                peer_id TEXT NOT NULL, state TEXT NOT NULL, enrolled_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+                                bytes_mail INTEGER NOT NULL DEFAULT 0, bytes_archive INTEGER NOT NULL DEFAULT 0, bytes_blob INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO enrollments VALUES (x'01', x'00', x'', 'p', 'active', 0, 0, 500, 0, 0);
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+    s.init_schema().unwrap();
+    let depositor = s.conn.query_row("SELECT COUNT(*) FROM pragma_table_info('mail') WHERE name = 'depositor'", [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(depositor, 0, "the old table is gone");
+    assert_eq!(s.conn.query_row("SELECT bytes_mail FROM enrollments", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
 }

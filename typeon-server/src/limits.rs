@@ -43,15 +43,7 @@ impl ServerCore {
     pub(super) fn check_rate(&mut self, peer: PeerId, chunk: bool, cost: u32) -> bool {
         let limit = self.config.limits.requests_per_minute;
         let now = mono_ms();
-        let entry = self.conns.entry(peer).or_insert(ConnState {
-            challenge: None,
-            window_start: now,
-            requests_in_window: 0,
-            chunks_in_window: 0,
-            connected_at: now,
-            enroll_verifies: (0, 0),
-            register_verifies: (0, 0),
-        });
+        let entry = self.conns.entry(peer).or_insert_with(|| ConnState::new(now));
         if now.saturating_sub(entry.window_start) > RATE_WINDOW_MS {
             entry.window_start = now;
             entry.requests_in_window = 0;
@@ -69,15 +61,7 @@ impl ServerCore {
     /// per-peer share, not the pool.
     pub(super) fn verify_budget(&mut self, peer: PeerId, pool: VerifyPool, checks: u32) -> bool {
         let now = mono_ms();
-        let conn = self.conns.entry(peer).or_insert(ConnState {
-            challenge: None,
-            window_start: now,
-            requests_in_window: 0,
-            chunks_in_window: 0,
-            connected_at: now,
-            enroll_verifies: (0, 0),
-            register_verifies: (0, 0),
-        });
+        let conn = self.conns.entry(peer).or_insert_with(|| ConnState::new(now));
         match pool {
             VerifyPool::Register => charge_verify(&mut conn.register_verifies, &mut self.register_verify_window, now, checks, REGISTER_VERIFIES_PER_PEER, REGISTER_VERIFIES_PER_MINUTE),
             VerifyPool::Enroll => charge_verify(&mut conn.enroll_verifies, &mut self.verify_window, now, checks, ENROLL_VERIFIES_PER_PEER, ENROLL_VERIFIES_PER_MINUTE),
@@ -119,7 +103,6 @@ pub(super) fn request_cost(req: &ServerRequest) -> u32 {
         ServerRequest::ArchiveProbe { buckets } => return 1u32.saturating_add(buckets.len() as u32),
         ServerRequest::Register { add, drop, proofs } => add.len() + drop.len() + 64 * proofs.len(),
         ServerRequest::Fetch { cursors: list, .. } | ServerRequest::Ack { acks: list } => list.len(),
-        ServerRequest::Cancel { seqs, .. } => seqs.len(),
         // Bytes count too. The codec caps a request at 1 MiB, so 16 extra units per full request keeps count-only
         // cheating (few big records) priced.
         ServerRequest::ArchivePut { records, .. } => {
@@ -129,6 +112,37 @@ pub(super) fn request_cost(req: &ServerRequest) -> u32 {
         _ => 0,
     };
     1u32.saturating_add(u32::try_from(n / 8).unwrap_or(u32::MAX))
+}
+
+/// One deposit against a box's window (start `mono_ms`, bytes written, deposits), with `share` = 1 for the box's
+/// window and `PEER_SHARE_OF_BOX_WINDOW` for one connection's part of it. Every deposit counts, repeats too
+/// (`DEPOSITS_PER_BOX_WINDOW`). The bytes are what one box takes per window, acknowledged or not: acks free the quota
+/// within seconds, so without this a sender could make a reader download junk without end. The caller adds the bytes
+/// once a row is really written.
+pub(super) fn box_window_admit(win: &mut (u64, u64, u32), now: u64, bytes: u64, share: u64) -> Result<(), ServerErrorCode> {
+    if now.saturating_sub(win.0) > DEPOSIT_WINDOW_MS {
+        *win = (now, 0, 0);
+    }
+    win.2 = win.2.saturating_add(1);
+    if win.2 as u64 > DEPOSITS_PER_BOX_WINDOW as u64 / share {
+        return Err(ServerErrorCode::RateLimited);
+    }
+    if win.1 + bytes > DEPOSIT_BYTES_PER_BOX_WINDOW / share {
+        return Err(ServerErrorCode::QuotaExceeded);
+    }
+    Ok(())
+}
+
+/// Takes one token from the global anonymous bucket (`ANON_BUCKET_CAP`), refilled by the time since the last call.
+pub(super) fn anon_bucket_take(bucket: &mut (u64, f64), now: u64) -> bool {
+    let (at, tokens) = bucket;
+    *tokens = (*tokens + now.saturating_sub(*at) as f64 * ANON_REFILL_PER_MS).min(ANON_BUCKET_CAP);
+    *at = now;
+    if *tokens < 1.0 {
+        return false;
+    }
+    *tokens -= 1.0;
+    true
 }
 
 /// Constant-time byte comparison. The challenge is a per-connection secret.

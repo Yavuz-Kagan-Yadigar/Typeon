@@ -1616,14 +1616,12 @@ impl P2PCore {
         let echo_reply_prev = reply_to_preview.clone();
         let echo_reply_sender = reply_to_sender_identity_id.clone();
         // See packet.rs `MessageContent::Text.sent_at_ms`.
-        let author_proof = self.sign_group_author(group_id, &local_id, plaintext)?;
         let content = MessageContent::Text {
             group_id: Some(group_id.to_string()),
             text: plaintext.to_string(),
             group_message_local_id: Some(local_id.clone()),
             sent_at_ms,
             reply_to_message_id, reply_to_preview, reply_to_sender_identity_id,
-            author_proof: Some(author_proof.clone()),
             mentions: filter_mentions(&group, Some(&own_identity_id), mentions),
             expire_secs,
         };
@@ -1637,7 +1635,7 @@ impl P2PCore {
             _ => (None, None, None),
         };
         // Not sent when our own copy cannot be kept (see the 1:1 twin).
-        self.archive_group_message_exp(group_id, &own_identity_id, "sent", plaintext.as_bytes(), Some(&local_id), reply_to_id, reply_to_prev, reply_to_sender, sent_at_ms, Some(&author_proof), expire_secs)
+        self.archive_group_message_exp(group_id, &own_identity_id, "sent", plaintext.as_bytes(), Some(&local_id), reply_to_id, reply_to_prev, reply_to_sender, sent_at_ms, None, expire_secs)
             .map_err(|e| format!("Could not save message: {}", e))?;
         let others = group.other_members(&own_identity_id);
         let mut published = others.is_empty();

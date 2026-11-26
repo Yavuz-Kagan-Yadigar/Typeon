@@ -26,7 +26,9 @@ impl P2PCore {
             }
         }
         for (peer_fp, state) in &self.ratchets {
-            let Some((mailbox, secret)) = self.session_mailbox(peer_fp) else { continue };
+            // Only the box this device reads: the peer's mail to us. Our mail to the peer goes to ITS inbound box,
+            // which we never register.
+            let Some((mailbox, secret)) = self.session_mailbox(peer_fp, true) else { continue };
             // Rotation window: the other side may still seal with the OLD root key if it has not applied our last
             // rotation yet.
             let mut keys = vec![state.root_handle_now()];
@@ -36,27 +38,29 @@ impl P2PCore {
         idx
     }
 
-    /// The server mailbox of the session with `peer_fp`, and its proof secret. It is stable for the session,
-    /// derived from the ratchet's `mailbox_seed` (fixed at the hybrid handshake, see
-    /// `server_seal::session_mailbox_secret`), not from the rotating root key. The id is made from the proof key
-    /// (`key_bound_mailbox_id`). No session, no mailbox.
-    /// PROTOCOL BREAK: older clients use a different id.
-    pub(super) fn session_mailbox(&self, peer_fp: &str) -> Option<(String, [u8; 32])> {
+    /// A server mailbox of the session with `peer_fp`, and its secret (proof key and deposit secret come from it).
+    /// `inbound`: the box this device reads (the peer deposits there); otherwise the peer's inbound box, where this
+    /// device deposits. Stable for the session: derived from the ratchet's `mailbox_seed` (fixed at the hybrid
+    /// handshake, see `server_seal::session_inbox_secret`), not from the rotating root key. The id is made from the
+    /// proof key (`key_bound_mailbox_id`). No session, no mailbox.
+    /// PROTOCOL BREAK: older clients used one shared box per pair.
+    pub(super) fn session_mailbox(&self, peer_fp: &str, inbound: bool) -> Option<(String, [u8; 32])> {
         let own_fp = self.own_mailbox_topic_fp.as_ref()?;
         let seed = &self.ratchets.get(peer_fp)?.mailbox_seed;
+        let (recipient, sender) = if inbound { (own_fp.as_str(), peer_fp) } else { (peer_fp, own_fp.as_str()) };
         // Memoized: one HKDF and one id derivation per session on every sweep, fetch answer and push. Keyed by the
-        // seed and both fingerprints, so a new session misses.
+        // seed and both fingerprints in direction order, so a new session misses.
         let tag: [u8; 32] = Sha256::new()
             .chain_update(seed)
-            .chain_update(own_fp.as_bytes())
+            .chain_update(recipient.as_bytes())
             .chain_update([0u8])
-            .chain_update(peer_fp.as_bytes())
+            .chain_update(sender.as_bytes())
             .finalize()
             .into();
         if let Some(hit) = SESSION_MAILBOX_MEMO.lock().ok()?.get_or_insert_with(HashMap::new).get(&tag) {
             return Some(hit.clone());
         }
-        let secret = server_seal::session_mailbox_secret(seed, own_fp, peer_fp).ok()?;
+        let secret = server_seal::session_inbox_secret(seed, recipient, sender).ok()?;
         let id = key_bound_mailbox_id(&secret)?;
         let mut memo = SESSION_MAILBOX_MEMO.lock().ok()?;
         let memo = memo.get_or_insert_with(HashMap::new);
@@ -72,8 +76,15 @@ impl P2PCore {
         Some((id, secret))
     }
 
-    /// The `MailboxProof` of `mailbox` for this enrollment at `server_id`.
-    pub(super) fn mailbox_proof(secret: &[u8], mailbox: &str, enrollment_id: &[u8], server_id: &str) -> Option<server_proto::MailboxProof> {
+    /// The `MailboxProof` of `mailbox` for this enrollment at `server_id`. `deposit_secret`: the box's, if anyone
+    /// deposits to it (not a call relay box).
+    pub(super) fn mailbox_proof(
+        secret: &[u8],
+        mailbox: &str,
+        enrollment_id: &[u8],
+        server_id: &str,
+        deposit_secret: Option<&[u8; 32]>,
+    ) -> Option<server_proto::MailboxProof> {
         let (signing, signing_pq) = mailbox_proof_keys(secret, mailbox)?;
         let input = server_proto::register_signing_input(mailbox, enrollment_id, server_id);
         let sig_pq: MlDsaSignature<MlDsa87> = signing_pq.sign(&input);
@@ -83,7 +94,18 @@ impl P2PCore {
             pk_pq: signing_pq.verifying_key().encode().to_vec(),
             sig: signing.sign(&input).to_bytes().to_vec(),
             sig_pq: sig_pq.encode().to_vec(),
+            deposit_verifier: deposit_secret.map_or_else(Vec::new, |d| server_proto::deposit_verifier(d).to_vec()),
         })
+    }
+
+    /// The deposit secret of one of this device's boxes (`own_server_mailboxes` entry): from the session's inbound
+    /// secret, or from the pairing secret of a first-contact box (which the sender holds too).
+    pub(super) fn own_deposit_secret(mailbox: &str, proof_secret: &[u8], key: &MailboxKey) -> Option<[u8; 32]> {
+        let base = match key {
+            MailboxKey::FirstContact(secret) => secret.as_slice(),
+            MailboxKey::Session(..) => proof_secret,
+        };
+        server_seal::deposit_secret(base, mailbox).ok()
     }
 
     /// `Register` for `add`, with a proof for each ID of `prove` (at most `typeon_crypto::server_proto::MAX_REGISTER_PROOFS`; the server asks
@@ -93,12 +115,22 @@ impl P2PCore {
         let proofs: Vec<server_proto::MailboxProof> = match &enrollment_id {
             // Mailbox secrets are fetched only when there is something to prove.
             Some(eid) if !prove.is_empty() => {
-                let mut secrets: HashMap<String, Vec<u8>> =
-                    self.own_server_mailboxes().into_iter().map(|(id, (secret, _))| (id, secret)).collect();
-                secrets.extend(crate::call::relay_listen_keys().into_iter().filter_map(|k| Some((key_bound_mailbox_id(&k)?, k))));
+                // id -> (proof secret, deposit secret). A call relay box takes no deposits.
+                let mut secrets: HashMap<String, (Vec<u8>, Option<[u8; 32]>)> = self
+                    .own_server_mailboxes()
+                    .into_iter()
+                    .map(|(id, (secret, key))| {
+                        let deposit = Self::own_deposit_secret(&id, &secret, &key);
+                        (id, (secret, deposit))
+                    })
+                    .collect();
+                secrets.extend(crate::call::relay_listen_keys().into_iter().filter_map(|k| Some((key_bound_mailbox_id(&k)?, (k, None)))));
                 prove.iter()
                     .take(server_proto::MAX_REGISTER_PROOFS)
-                    .filter_map(|id| Self::mailbox_proof(secrets.get(id)?, id, eid, server_id))
+                    .filter_map(|id| {
+                        let (secret, deposit) = secrets.get(id)?;
+                        Self::mailbox_proof(secret, id, eid, server_id, deposit.as_ref())
+                    })
                     .collect()
             }
             _ => Vec::new(),
@@ -122,6 +154,9 @@ impl P2PCore {
 
     /// Tries to deposit the envelope to every server that is routing and connected.
     ///
+    /// The deposit goes over the server's anonymous connection (`anon.rs`), never the enrollment one, into the
+    /// TARGET's inbound box, with that box's deposit secret.
+    ///
     /// `true` means it was deposited to at least one server (the RPC is queued). The caller (`try_publish_raw`)
     /// counts that as sent. The end-to-end guarantee is still the peer's `Ack`.
     pub(crate) fn try_server_deposit(
@@ -135,6 +170,11 @@ impl P2PCore {
         if self.servers.is_empty() {
             return false;
         }
+        // Checked before the seal: a held packet is retried each queue turn.
+        let lazy_hold = self.lazy_deposit_held(envelope);
+        if lazy_hold && self.anon_conns.is_empty() {
+            return false;
+        }
         // A first-contact topic names only the public fingerprint. Its mailbox ID needs the pairing secret we hold
         // for the target. With no secret there is no server path (the direct path still applies).
         //
@@ -142,27 +182,35 @@ impl P2PCore {
         // sealed with that secret and, when the target's device record is known, to its KEM keys. The server sees
         // no first-contact identity metadata. A session mailbox is sealed with the session's root key. Otherwise the
         // header's `sender_device_fingerprint` would be readable on the server.
+        // The deposit secret comes from the secret the box is made from: the pairing secret, or the session secret
+        // of the target's inbound box.
         let sealed = if topic.starts_with("p2p_msg_") {
             let Some(secret) = self.first_contact_secret_for(target_fp) else { return false };
             let mailbox = server_seal::first_contact_mailbox_id(&secret, target_fp);
             let kem = self.known_remote_devices.get(target_fp)
                 .filter(|d| d.kem_pubkey_x25519.len() == 32 && d.kem_pubkey_mlkem.len() == 1568)
                 .map(|d| (d.kem_pubkey_x25519.as_slice(), d.kem_pubkey_mlkem.as_slice()));
-            server_seal::seal_first_contact(&secret, &mailbox, kem, bytes).map(|s| (mailbox, s))
+            let deposit = server_seal::deposit_secret(&secret, &mailbox);
+            let sealed = server_seal::seal_first_contact(&secret, &mailbox, kem, bytes);
+            deposit.and_then(|d| sealed.map(|s| (mailbox, d, s)))
         } else {
             // Only a `Message` goes to a session topic (see `try_publish_raw_via`).
             let NetworkEnvelope::Message(m) = envelope else { return false };
-            let Some((mailbox, _)) = self.session_mailbox(target_fp) else { return false };
+            let Some((mailbox, box_secret)) = self.session_mailbox(target_fp, false) else { return false };
             let root = self.ratchets.get(target_fp).map(|r| match &r.prev_root_key {
                 Some(prev) if m.header.rotation_kyber_ciphertext.is_some() => prev.clone(),
                 _ => r.root_handle_now(),
             });
             match root {
-                Some(root_key) => server_seal::seal_envelope(&root_key, &mailbox, &m.header.sender_device_fingerprint, bytes).map(|s| (mailbox, s)),
+                Some(root_key) => {
+                    let deposit = server_seal::deposit_secret(&box_secret, &mailbox);
+                    let sealed = server_seal::seal_envelope(&root_key, &mailbox, &m.header.sender_device_fingerprint, bytes);
+                    deposit.and_then(|d| sealed.map(|s| (mailbox, d, s)))
+                }
                 None => Err("no ratchet session key".to_string()),
             }
         };
-        let (mailbox, sealed) = match sealed {
+        let (mailbox, deposit_secret, sealed) = match sealed {
             Ok(v) => v,
             Err(e) => {
                 warn!("Could not seal envelope, skipping server: {}", e);
@@ -221,6 +269,10 @@ impl P2PCore {
             NetworkEnvelope::Message(_) => format!("{}|{}", mailbox, deposit_dedup_key(envelope, bytes)),
             _ => deposit_dedup_key(envelope, bytes),
         };
+        // Withdraws this copy (`cancel_server_deposit`). Per box and message, so the server cannot match copies across
+        // boxes by it.
+        let Ok(cancel_secret) = server_seal::cancel_secret(&deposit_secret, &dedup_key) else { return false };
+        let cancel_secret = CancelSecret::new(cancel_secret);
         let mut any = false;
         for server_id in candidates {
             // Already on this server's disk: re-deposit (see `P2PCore.server_deposited`). We still count it as
@@ -229,8 +281,15 @@ impl P2PCore {
                 any = true;
                 continue;
             }
-            let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { continue };
-            let req = ServerRequest::Deposit { mailbox: mailbox.clone(), sealed: sealed.clone() };
+            if lazy_hold && !self.anon_conns.contains_key(&server_id) {
+                continue;
+            }
+            let req = ServerRequest::Deposit {
+                mailbox: mailbox.clone(),
+                deposit_secret: deposit_secret.to_vec(),
+                cancel_hash: server_proto::cancel_hash(cancel_secret.bytes()).to_vec(),
+                sealed: sealed.clone(),
+            };
             // The envelope TYPE goes into the log. Without it, a loop of the same two envelopes being deposited
             // forever cannot be traced. On a real device this happened, and the type had to be guessed (handshake?
             // IdentityExchange? DeviceAddNotice?).
@@ -240,28 +299,46 @@ impl P2PCore {
                 sealed.len(),
                 envelope_kind(envelope)
             );
-            if let Some(id) = self.send_server_request(peer_id, req) {
+            let inflight = ServerInflight::Deposit {
+                server_id: server_id.clone(),
+                mailbox: mailbox.clone(),
+                envelope: envelope.clone(),
+                target_fp: target_fp.to_string(),
+                first_attempt_at,
+                dedup_key: dedup_key.clone(),
+                cancel_secret: cancel_secret.clone(),
+                cancelled: false,
+            };
+            if self.anon_send(&server_id, req, inflight) {
                 // Mark NOW, before the reply. The reply over Tor takes seconds, and in that window
                 // `awaiting_confirmation` deposited the same envelope again (measured on a device: the same message_id
                 // twice, 5.7 s apart). If the deposit fails, `handle_server_failure` reverts the mark. The mark is now
                 // independent of the envelope type (see `deposit_dedup_key`).
                 self.note_server_deposit(&server_id, &dedup_key);
-                self.server_inflight.insert(
-                    id,
-                    ServerInflight::Deposit {
-                        server_id,
-                        mailbox: mailbox.clone(),
-                        envelope: envelope.clone(),
-                        target_fp: target_fp.to_string(),
-                        first_attempt_at,
-                        dedup_key: dedup_key.clone(),
-                        cancelled: false,
-                    },
-                );
                 any = true;
             }
         }
         any
+    }
+
+    /// See `lazy_deposit_held`. Bounded: past 1024 entries, those older than any hold are dropped.
+    pub(crate) fn note_lazy_deposit(&mut self, message_id: &str) {
+        let now = mono_ms();
+        if self.lazy_deposits.len() >= 1024 {
+            self.lazy_deposits.retain(|_, t| now.saturating_sub(*t) < crate::LAZY_DEPOSIT_MAX_AGE_MS);
+        }
+        self.lazy_deposits.entry(message_id.to_string()).or_insert(now);
+    }
+
+    /// Battery: a non-urgent packet (`note_lazy_deposit`: Seen, ReadStateSync, typing) sent while the app is in
+    /// radio-saver mode does not open an anonymous connection (a Tor circuit) at once. It goes to a server whose
+    /// anonymous connection is open anyway (an urgent deposit's burst: messages, acks, handshakes, call signals, edits,
+    /// deletes), or at most `LAZY_DEPOSIT_HOLD_MS` later. With the screen in use nothing is held. No timer: the pending
+    /// queue tries it again on its own turns.
+    pub(crate) fn lazy_deposit_held(&self, envelope: &NetworkEnvelope) -> bool {
+        let NetworkEnvelope::Message(m) = envelope else { return false };
+        let Some(&first) = self.lazy_deposits.get(&m.header.message_id) else { return false };
+        self.radio_saver() && mono_ms().saturating_sub(first) < crate::LAZY_DEPOSIT_HOLD_MS
     }
 
     /// See `P2PCore.server_deposited`. Records a successful deposit and bounds the map.
@@ -307,30 +384,58 @@ impl P2PCore {
     /// When a user cancels a pending message, the server copy is also WITHDRAWN.
     /// Before, cancel cleared only the local queue. If the packet had been deposited, it stayed on the server for
     /// up to 14 days (the mailbox TTL) while the recipient was offline and was eventually delivered. So "I changed my mind" had no effect.
-    /// The server deletes only the row where `depositor == us`, so this path cannot be used to delete someone else's mail.
+    /// The server deletes the row only for the cancel secret its `Deposit` committed to, so nobody else can delete it.
     pub(crate) fn cancel_server_deposit(&mut self, message_id: &str) {
         // No location yet for a Deposit still in flight: flag it, and the `Deposited` arm withdraws it.
-        for inflight in self.server_inflight.values_mut() {
+        for inflight in self.anon_inflight_mut() {
             if let ServerInflight::Deposit { envelope: NetworkEnvelope::Message(m), cancelled, .. } = inflight {
                 if m.header.message_id == message_id {
                     *cancelled = true;
                 }
             }
         }
-        // Keyed `(server, "mailbox|message_id")`: one entry per target.
-        let targets: Vec<(String, String, String, u64)> = self
+        // Keyed `(server, "mailbox|message_id")`: one entry per target. The entry stays until the server answers
+        // (`ServerInflight::Cancel`), so a cancel lost with its connection is sent again (`resend_cancels`).
+        let targets: Vec<(String, String)> = self
+            .server_deposit_locations
+            .iter_mut()
+            .filter(|((_, key), _)| location_message_id(key) == message_id)
+            .map(|(k, loc)| {
+                loc.cancelling = true;
+                k.clone()
+            })
+            .collect();
+        for (server_id, key) in targets {
+            self.send_cancel(&server_id, &key);
+        }
+    }
+
+    /// `ServerRequest::Cancel` for the location `key` (`server_deposit_locations`) over the anonymous connection, like
+    /// the deposit it withdraws. Not twice at once.
+    pub(super) fn send_cancel(&mut self, server_id: &str, key: &str) {
+        let k = (server_id.to_string(), key.to_string());
+        let Some(loc) = self.server_deposit_locations.get(&k) else { return };
+        let req = ServerRequest::Cancel { mailbox: loc.mailbox.clone(), seq: loc.seq, cancel_secret: loc.cancel.bytes().to_vec() };
+        let busy = self.anon_inflight_mut().any(|i| matches!(i, ServerInflight::Cancel { server_id: s, key: kk } if *s == k.0 && *kk == k.1));
+        if !busy {
+            self.anon_send(server_id, req, ServerInflight::Cancel { server_id: k.0, key: k.1 });
+        }
+    }
+
+    /// Cancels the server never answered: sent again, at the server sweep, to a server ready for deposits.
+    pub(super) fn resend_cancels(&mut self) {
+        let now = mono_ms();
+        let due: Vec<(String, String)> = self
             .server_deposit_locations
             .iter()
-            .filter(|((_, key), _)| location_message_id(key) == message_id)
-            .map(|((sid, key), (mailbox, seq))| (sid.clone(), key.clone(), mailbox.clone(), *seq))
+            .filter(|((sid, _), loc)| {
+                loc.cancelling
+                    && self.server_rt.get(sid).map_or(false, |r| r.connected && r.enrolled && now >= r.deposit_backoff_until)
+            })
+            .map(|(k, _)| k.clone())
             .collect();
-        for (server_id, key, mailbox, seq) in targets {
-            self.server_deposit_locations.remove(&(server_id.clone(), key));
-            let Some(peer_id) = self.server_rt.get(&server_id).and_then(|r| r.peer_id) else { continue };
-            let req = ServerRequest::Cancel { mailbox, seqs: vec![seq] };
-            if let Some(id) = self.send_server_request(peer_id, req) {
-                self.server_inflight.insert(id, ServerInflight::Cancel { server_id });
-            }
+        for (sid, key) in due {
+            self.send_cancel(&sid, &key);
         }
     }
 
@@ -512,13 +617,31 @@ impl P2PCore {
         }
     }
 
+    /// Was the fetched item `raw` (as handed to `incoming` this turn) taken from a mailbox only `sender_fp` fills? A session
+    /// mailbox is sealed with the session root key and the sender's fingerprint, so its other end is proven. A first-contact
+    /// mailbox counts only when its secret is the pairing code we hold for that device (`pn:`/`pk:`), not a code shown to anyone
+    /// or a group secret every member has: such a mailbox proves nothing either way (`None`). `None` too: not an item of this turn.
+    pub(crate) fn server_item_sender(&self, raw: &[u8], sender_fp: &str) -> Option<bool> {
+        let digest: [u8; 32] = Sha256::digest(raw).into();
+        let carrier = self.server_rt.values().find_map(|rt| rt.taken.get(&digest).map(|(_, _, c)| c))?;
+        Some(match carrier {
+            ItemCarrier::Session(peer_fp) => peer_fp == sender_fp,
+            ItemCarrier::FirstContact(secret) => {
+                if !self.stored_pairing_secrets(sender_fp).contains(&**secret) {
+                    return None;
+                }
+                true
+            }
+        })
+    }
+
     /// `process_incoming_envelope` failed on a fetched item (`raw`, as handed to `incoming`). Its mailbox's cursor
     /// goes back before it, so this turn's Ack does not let the server delete it. It is fetched again
     /// (`hold_server_item`). `poll_events` calls this for each `Err` of a packet with no source peer.
     pub(crate) fn server_item_failed(&mut self, raw: &[u8]) {
         let digest: [u8; 32] = Sha256::digest(raw).into();
         let found = self.server_rt.iter_mut().find_map(|(sid, rt)| rt.taken.remove(&digest).map(|t| (sid.clone(), t)));
-        let Some((server_id, (mailbox, seq))) = found else { return };
+        let Some((server_id, (mailbox, seq, _))) = found else { return };
         let now = mono_ms();
         if !self.hold_server_item(&server_id, &mailbox, seq, now) {
             return;

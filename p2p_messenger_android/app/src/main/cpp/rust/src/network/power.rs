@@ -136,6 +136,10 @@ impl P2PCore {
             // while the core only waits for the storage keys: that wait ends with a call from
             // the app, not with work here, and must not hold the CPU.
             || (!self.deferred_incoming.is_empty() && self.storage_keys_ready())
+            // An anonymous deposit being dialed or answered: bounded by the dial and request timeouts, and its
+            // connection closes when idle (`server_client/anon.rs`). Asleep mid-dial, the message would wait for the
+            // next wake.
+            || self.anon_busy()
             || self.call.is_some()
     }
 

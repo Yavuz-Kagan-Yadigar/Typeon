@@ -312,6 +312,7 @@ class SettingsFragment : Fragment() {
 
         // Tor is mandatory (the core starts no network without it): no switch, only its status.
         torStatusView = view.findViewById(R.id.tor_status)
+        setupTorMode(view)
         val betaSwitch = view.findViewById<SwitchMaterial>(R.id.beta_updates_switch)
         updateStatusView = view.findViewById(R.id.update_status)
         view.findViewById<Button>(R.id.btn_check_updates).setOnClickListener {

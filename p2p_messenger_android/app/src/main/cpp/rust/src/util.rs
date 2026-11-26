@@ -268,23 +268,6 @@ pub(crate) fn handshake_signing_input(x25519_pub: &[u8], kyber_pub: &[u8], kyber
     out
 }
 
-/// Signed bytes of a `MessagePacket`. They include the RECIPIENT device, so a packet sent to M could not also verify at B.
-/// Without that binding, three such replays made B drop its healthy session with A (`note_undecryptable`).
-/// Versions before this one signed only the header and ciphertext, and the two cannot exchange messages. This is a deliberate protocol break.
-///
-/// Tagged and length-framed, like `handshake_signing_input`.
-///
-/// `header` is the raw header bytes as sent (`SignedHeader::raw`), not a re-encoding. Older versions do not verify.
-pub(crate) fn packet_signing_input(header: &[u8], ciphertext: &[u8], recipient_fp: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(32 + header.len() + ciphertext.len() + recipient_fp.len());
-    out.extend_from_slice(b"p2pmsg-v0.6-packet");
-    for field in [header, ciphertext, recipient_fp.as_bytes()] {
-        out.extend_from_slice(&(field.len() as u32).to_be_bytes());
-        out.extend_from_slice(field);
-    }
-    out
-}
-
 /// ChaCha20-Poly1305 with a fresh random nonce: (ciphertext, nonce). The one
 /// place local rows are sealed (history, skipped keys, ratchet state, file keys).
 pub(crate) fn seal_with(key: &[u8; 32], plaintext: &[u8]) -> Option<(Vec<u8>, [u8; 12])> {
@@ -326,18 +309,8 @@ mod founder_floor_tests {
         assert_ne!(id, super::P2PCore::group_id_for_founder("bb", "0123456789abcdef"));
     }
 
-    /// A packet signed for one recipient must not verify for another.
     #[test]
-    fn packet_signature_covers_the_recipient() {
-        let header = crate::packet::MessagePacketHeader {
-            sender_identity_id: "i".into(), sender_device_fingerprint: "d".into(), message_id: "m".into(),
-            ratchet_pubkey: vec![1], message_number: 0, prev_chain_length: 0, rotation_kyber_ciphertext: None,
-            sent_at_ms: 0,
-        };
-        let header = crate::packet::SignedHeader::new(header).unwrap();
-        let to_b = super::packet_signing_input(header.raw(), b"ct", "bbbb");
-        let to_c = super::packet_signing_input(header.raw(), b"ct", "cccc");
-        assert_ne!(to_b, to_c);
+    fn seal_with_uses_a_fresh_nonce() {
         let (sealed, nonce) = super::seal_with(&[7u8; 32], b"x").unwrap();
         assert!(sealed != b"x" && nonce != [0u8; 12]);
     }
@@ -446,10 +419,6 @@ pub(crate) fn clamp_received_times(content: &mut MessageContent, now: u64) {
 /// first, to say so: the export call itself returns no reason.
 pub const RECOVERY_PASSPHRASE_MIN_CHARS: usize = 12;
 
-/// Signed in place of the text when the author deletes a group message, so a
-/// deletion is not the signature of an empty text.
-pub(crate) const GROUP_TOMBSTONE: &str = "\u{0}typeon-group-deleted";
-
 /// The pending packet id an incoming payload answers (a history answer or an
 /// Ack), so a rotation it carries does not resend that packet.
 pub(crate) fn answered_pending_id(payload: &[u8]) -> Option<String> {
@@ -478,18 +447,6 @@ pub(crate) fn group_row_id(content: &MessageContent) -> Option<&str> {
     }
 }
 
-/// What the author of a group message signs (`sign_group_author`). Length
-/// prefixes keep two different field splits from giving the same bytes.
-/// The send time is not in it: receivers store their own.
-pub(crate) fn group_author_statement(group_id: &str, message_id: &str, author_identity_id: &str, device_fp: &str, text: &str) -> Vec<u8> {
-    let mut out = b"typeon-group-author-v1".to_vec();
-    for part in [group_id, message_id, author_identity_id, device_fp, text] {
-        out.extend_from_slice(&(part.len() as u64).to_le_bytes());
-        out.extend_from_slice(part.as_bytes());
-    }
-    out
-}
-
 /// Fixed-window counter: counts and allows unless `cap` was reached in the
 /// current `RATE_LIMIT_WINDOW_MS` window.
 pub(crate) fn window_allow(slot: &mut (u64, u32), cap: u32) -> bool {
@@ -513,6 +470,35 @@ pub(crate) fn busiest_source(sources: impl Iterator<Item = Option<PeerId>>) -> O
         *counts.entry(s).or_default() += 1;
     }
     counts.into_iter().max_by_key(|(_, n)| *n).map(|(s, _)| s)
+}
+
+/// Index of the early-packet entry to evict, from (source, carrier proven) in arrival order: the oldest entry of the
+/// busiest source among the unproven ones (`busiest_source`); the oldest of all only when every entry is proven.
+pub(crate) fn early_evict_index(entries: impl Iterator<Item = (Option<PeerId>, bool)> + Clone) -> usize {
+    let top = busiest_source(entries.clone().filter(|(_, proven)| !proven).map(|(s, _)| s));
+    entries.enumerate().find(|(_, (s, proven))| !proven && *s == top).map_or(0, |(i, _)| i)
+}
+
+#[cfg(test)]
+mod early_evict_tests {
+    use super::*;
+
+    #[test]
+    fn proven_entries_go_last() {
+        let (real, spam) = (PeerId::random(), PeerId::random());
+        // The real sender holds the most entries but is proven: the spammer's oldest goes.
+        let e = [(Some(real), true), (Some(spam), false), (Some(real), true), (Some(real), true), (Some(spam), false)];
+        assert_eq!(early_evict_index(e.iter().copied()), 1);
+        // Unproven only: the busiest source's oldest entry.
+        let e = [(None, false), (Some(spam), false), (Some(real), false), (Some(spam), false)];
+        assert_eq!(early_evict_index(e.iter().copied()), 1);
+        // Unproven server items only: the oldest of them.
+        let e = [(Some(real), true), (None, false), (None, false)];
+        assert_eq!(early_evict_index(e.iter().copied()), 1);
+        // All proven: the oldest.
+        let e = [(Some(real), true), (Some(real), true)];
+        assert_eq!(early_evict_index(e.iter().copied()), 0);
+    }
 }
 
 /// Changes whenever a first-contact secret row (`pn:`/`pk:`/`pt:`, the shown

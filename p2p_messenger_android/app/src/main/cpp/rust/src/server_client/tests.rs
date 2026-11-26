@@ -135,3 +135,27 @@ fn a_mailbox_that_keeps_failing_loses_its_grace_until_a_hold_clears() {
     core.commit_server_fetches();
     assert!(core.hold_server_item("s", "mb", 5, t0 + 3 * SERVER_HOLD_GRACE_MS));
 }
+
+/// A non-urgent packet is held from the server path (no own anonymous circuit) only in radio-saver mode and only for
+/// `LAZY_DEPOSIT_HOLD_MS`. With the screen in use, and for other packets, nothing is held.
+#[test]
+fn a_lazy_deposit_is_held_only_within_its_bound() {
+    use crate::packet::{MessagePacket, MessagePacketHeader};
+    let mut core = P2PCore::new();
+    let packet = |id: &str| NetworkEnvelope::Message(MessagePacket {
+        header: crate::packet::SignedHeader::new(MessagePacketHeader {
+            sender_identity_id: String::new(), sender_device_fingerprint: String::new(), message_id: id.into(),
+            ratchet_pubkey: Vec::new(), message_number: 0, prev_chain_length: 0, rotation_kyber_ciphertext: None, sent_at_ms: 0,
+        }).unwrap(),
+        ciphertext: Vec::new(),
+    });
+    core.note_lazy_deposit("seen");
+    assert!(!core.lazy_deposit_held(&packet("seen")), "screen in use: nothing is held");
+    core.power_save = true;
+    core.radio_window_open = false;
+    assert!(core.radio_saver());
+    assert!(core.lazy_deposit_held(&packet("seen")), "saver: held within its bound");
+    assert!(!core.lazy_deposit_held(&packet("text")), "an urgent packet is never held");
+    core.lazy_deposits.insert("old".into(), mono_ms().saturating_sub(crate::LAZY_DEPOSIT_HOLD_MS));
+    assert!(!core.lazy_deposit_held(&packet("old")), "past its hold it goes");
+}

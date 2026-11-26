@@ -264,7 +264,7 @@ Seen {                           // `MessageContent::Seen`; the reader is the pa
   group_message_local_id: string?,  // set for group messages
 }
 ```
-It is sent encrypted and signed like other `MessagePacket`s; no separate channel is
+It is sent encrypted like other `MessagePacket`s; no separate channel is
 invented. **Which device it was read on is not shown in the interface.** However,
 every `MessagePacketHeader` carries `sender_device_fingerprint` in the clear (see
 section 3.3), so a `Seen` packet reveals which device saw it at the network/server
@@ -455,21 +455,31 @@ MessagePacket {
     message_number: u32,
     prev_chain_length: u32,
     rotation_kyber_ciphertext: bytes?, // set while a KEM rotation is announced
-    sent_at_ms: u64,                 // signed send time
-  },                                 // the header travels as raw CBOR bytes; the signature covers those bytes
-  ciphertext: bytes,               // AEAD (ChaCha20-Poly1305), header bytes as associated data
-  signature_classical: bytes,      // Ed25519 and
-  signature_pq: bytes,             // ML-DSA-87, over header bytes ‖ ciphertext ‖ recipient device fingerprint
+    sent_at_ms: u64,                 // send time
+  },                                 // the header travels as raw CBOR bytes
+  ciphertext: bytes,               // AEAD (ChaCha20-Poly1305), the raw header bytes as associated data
 }
 ```
 
-- **Why the signature?** Encryption provides confidentiality but alone does not
-  cryptographically prove *who sent* the message (KEM is symmetric). The signature
-  guarantees that relays/nodes or an attacker cannot modify the packet, and that the
-  sender really holds the claimed device fingerprint.
+- **No signature (deniability).** A message packet carries no signature. The
+  ratchet AEAD authenticates it: its tag covers the ciphertext and every header
+  byte, and only the two ends of the device-pair session hold the chain keys. The
+  receiver therefore knows the packet came from the session's other end, but it
+  cannot prove that to anyone else: it could have made the same packet itself.
+  The header's `sender_identity_id` must still match the identity stored for the
+  sending device, and a revoked device is refused.
 - A node/relay carries this packet blindly: it cannot decrypt `ciphertext`; if it
-  changes the `signature`, verification fails on the receiving side and the packet
-  is rejected.
+  changes any byte of the header or ciphertext, the tag fails on the receiving side
+  and the packet is rejected. A packet made for one session does not open in
+  another, so a packet replayed to a different recipient fails too.
+- Until a packet opens, its header is only a claim. A packet that arrives before the
+  session exists is buffered only when its carrier is the claimed device: over a
+  direct connection, the libp2p peer id known for that device (or any peer id when
+  none is known yet, with the busiest carrier evicted first); from a server, only a
+  mailbox that device alone fills. Any other early packet is refused and not
+  acknowledged, so the sender's retry delivers it after the handshake. An
+  undecryptable packet counts toward a session reset only when its carrier is proven
+  to be the claimed device.
 - **v0.2 multi-device rule**: the sending side sends a separate `MessagePacket` to
   **every Active device** of the recipient Identity (each one encrypted with its own
   device-pair `DeviceRatchetState`, see section 1.7.1). The receiving side does not
@@ -520,10 +530,24 @@ For this there is a separate **server** option (see `typeon-server/` at the repo
 root). The one-sentence difference from a relay: the server writes the envelope to DISK.
 
 ```
-Deposit { mailbox_id, sealed }   -> server stores the envelope
+Deposit { mailbox_id, deposit_secret, cancel_hash, sealed }  -> server stores the envelope (anonymous)
 Fetch   { cursors }              -> recipient fetches everything after its cursor on return
 Ack     { mailbox_id, seq }      -> processed, can be deleted
+Cancel  { mailbox_id, seq, cancel_secret }  -> sender withdraws an undelivered copy (anonymous)
 ```
+
+- Mailboxes are per device and direction: for each session, a device reads one
+  inbound box (HKDF of the session's `mailbox_seed` over recipient and sender
+  fingerprint) and registers only that one. A sender deposits into the peer's
+  inbound box and never registers it.
+- `Deposit` and `Cancel` carry no enrollment. The client sends them over a separate,
+  short-lived connection per server, with a fresh libp2p identity and its own Tor
+  circuit, opened only when there is something to deposit and closed after 30 s
+  idle. The box's deposit secret (derived from the box secret both ends hold) is the
+  authorisation; the reader registered its hash with the box. A wrong secret and an
+  unknown box get the same `UnknownMailbox`. Mail is charged to the reader's quota;
+  each box has its own item, byte and deposit-rate caps. The server so sees who reads
+  which box, not who writes to it (timing leaks remain, see `SECURITY.md`).
 
 - `mailbox_id` is derived from the same HKDF topic string the client computes
   (`p2pmsg-v0.1-gossip-topic`; the name is historical, there is no gossipsub any more),
@@ -633,8 +657,8 @@ GroupUpdate {
 
 - If `signed_by == founder_identity_id` does not hold, the receiving side rejects the
   `GroupUpdate`. This stops someone who is not the founder from sending a fake
-  membership change (signature verification uses the existing Dilithium+Ed25519
-  signature mechanism, section 3.3). It is also separately verified that
+  membership change (verified with the hybrid ML-DSA-87 + Ed25519 signature that
+  handshakes, prekeys and device add/revoke also use). It is also separately verified that
   `signed_by_device` is a known/Active device of the founder (section 2.2).
 
 ### 5.3 Member removal and forward secrecy
@@ -665,6 +689,23 @@ When a member is removed from the group:
   message traffic as part of that Identity.
 - If a member revokes one of their own devices (section 1.6), the group follows the
   current state automatically — group messages are no longer sent to that device.
+
+### 5.6 Group messages and relayed history (deniability)
+
+- A group message is a pairwise `MessagePacket` to each member device (section 3.3).
+  It carries no author signature: the author's own copy is authenticated only by the
+  device-pair session it arrives on, so no member can prove to an outsider who wrote it.
+  Edits and deletes follow the same rule.
+- A member's history answer (`HistorySyncResponse`) can carry rows written by other
+  members. Such a row is the responder's word: it is stored with a "relayed by
+  <responder>, unverified" marker (`relayed_by`), shown on the bubble. A row the
+  responder wrote itself is its own copy and has no marker. A relayed row never
+  replaces a row already held, and another member cannot relay a row as ours.
+- When the author's own copy arrives later (live text, edit, delete, its own history
+  answer, or a sibling device's copy), the marker is cleared. If its text differs,
+  the author's copy replaces the relayed text.
+- Rows from our own devices (sibling sync) and from our own server archive are our
+  own data and keep whatever marker they had.
 
 ---
 

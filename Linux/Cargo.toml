@@ -1,6 +1,6 @@
 [package]
 name = "typeon-linux"
-version = "8.0.0"
+version = "9.0.0"
 edition = "2021"
 description = "Typeon — native Linux desktop client (secondary device)"
 license = "GPL-3.0-or-later"
@@ -122,6 +122,7 @@ debug-assertions = false
 [patch.crates-io]
 tor-hsservice = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-hsservice" }
 tor-netdir = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-netdir" }
+tor-chanmgr = { path = "../p2p_messenger_android/app/src/main/cpp/rust/vendor/tor-chanmgr" }
 # jpegxl-src 0.12.0 with the MSVC settings keyed on the target, not the build host
 # (a Windows host building the gnullvm target otherwise asks CMake for ClangCL).
 jpegxl-src = { path = "patched/jpegxl-src" }

@@ -201,6 +201,7 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     }
     connectivity.add(&node);
     page.add(&connectivity);
+    page.add(&tor_bridges_group(app));
 
     let storage = adw::PreferencesGroup::builder()
         .title("Storage")
@@ -563,6 +564,114 @@ const BUILT_IN_FONTS: [(&str, Option<&str>); 5] = [
 ];
 
 thread_local!(static REBUILDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
+/// Tor connection mode: Direct, Snowflake or pasted obfs4 bridges. Read at network start only, so a change
+/// applies after a restart (same as the Tor switch). A mode whose PT binary is not shipped cannot be picked.
+fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
+    const MODES: [(&str, &str); 3] = [("direct", "Direct"), ("snowflake", "Snowflake"), ("obfs4", "Bridges (obfs4)")];
+    let group = adw::PreferencesGroup::builder()
+        .title("Tor connection")
+        .description("Use Snowflake or bridges where Tor is blocked. They use more battery and data than Direct.")
+        .build();
+    let labels: Vec<String> = MODES
+        .iter()
+        .map(|(mode, label)| {
+            if core::tor_transport_available(mode) { label.to_string() } else { format!("{label} (not available in this build)") }
+        })
+        .collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let combo = adw::ComboRow::builder().title("Mode").build();
+    combo.set_model(Some(&gtk::StringList::new(&labels)));
+    let (current, stored_bridges) = {
+        let prefs = app.prefs.borrow();
+        (prefs.tor_mode.clone(), prefs.tor_bridges.clone())
+    };
+    let current_index = MODES.iter().position(|(m, _)| *m == current).unwrap_or(0) as u32;
+    combo.set_selected(current_index);
+    group.add(&combo);
+
+    let buffer = gtk::TextBuffer::new(None);
+    buffer.set_text(&stored_bridges);
+    let text = gtk::TextView::builder()
+        .buffer(&buffer)
+        .monospace(true)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(6)
+        .bottom_margin(6)
+        .left_margin(6)
+        .right_margin(6)
+        .build();
+    let scroll = gtk::ScrolledWindow::builder().child(&text).min_content_height(110).build();
+    scroll.add_css_class("card");
+    let error = gtk::Label::builder().xalign(0.0).wrap(true).visible(false).build();
+    error.add_css_class("error");
+    let save = gtk::Button::builder().label("Save bridges").halign(gtk::Align::End).build();
+    save.add_css_class("suggested-action");
+    let hint = gtk::Label::builder().label("Paste obfs4 bridge lines, one per line.").xalign(0.0).build();
+    hint.add_css_class("dim-label");
+    let editor = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).build();
+    editor.append(&hint);
+    editor.append(&scroll);
+    editor.append(&error);
+    editor.append(&save);
+    editor.set_visible(current == "obfs4");
+    group.add(&editor);
+
+    let store = {
+        let app = app.clone();
+        move |mode: &str, bridges: Option<String>| {
+            let mut prefs = app.prefs.borrow_mut();
+            if prefs.tor_mode == mode && !bridges.as_ref().is_some_and(|b| *b != prefs.tor_bridges) {
+                return;
+            }
+            prefs.tor_mode = mode.to_string();
+            if let Some(b) = bridges {
+                prefs.tor_bridges = b;
+            }
+            prefs.save();
+            drop(prefs);
+            app.toast("Tor connection applies after a restart.");
+        }
+    };
+    {
+        let (app, editor, store) = (app.clone(), editor.clone(), store.clone());
+        let reverting = Rc::new(Cell::new(false));
+        combo.connect_selected_notify(move |row| {
+            if reverting.replace(false) {
+                return;
+            }
+            let (mode, label) = MODES[(row.selected() as usize).min(MODES.len() - 1)];
+            if !core::tor_transport_available(mode) {
+                app.toast(&format!("{label} is not available in this build."));
+                let back = MODES.iter().position(|(m, _)| *m == app.prefs.borrow().tor_mode).unwrap_or(0) as u32;
+                if back != row.selected() {
+                    reverting.set(true);
+                    row.set_selected(back);
+                }
+                return;
+            }
+            editor.set_visible(mode == "obfs4");
+            // obfs4 is stored by "Save bridges", once the lines are checked.
+            if mode != "obfs4" {
+                store(mode, None);
+            }
+        });
+    }
+    save.connect_clicked(move |_| {
+        let lines = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_string();
+        match core::validate_bridge_lines(&lines) {
+            Ok(()) => {
+                error.set_visible(false);
+                store("obfs4", Some(lines));
+            }
+            Err(e) => {
+                error.set_label(&format!("Invalid bridge: {e}"));
+                error.set_visible(true);
+            }
+        }
+    });
+    group
+}
 
 /// Rebuild the font selector model (built-in fonts + custom fonts +
 /// "Import a font" at the top).

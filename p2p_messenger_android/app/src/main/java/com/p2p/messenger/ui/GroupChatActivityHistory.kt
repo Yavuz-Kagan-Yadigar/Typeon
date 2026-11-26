@@ -212,8 +212,10 @@ internal fun GroupChatActivity.itemFromGroupHistoryJson(obj: JSONObject): Simple
     val replyToMessageId = if (obj.isNull("reply_to_message_id")) null else obj.optString("reply_to_message_id").ifEmpty { null }
     val replyToPreview = if (obj.isNull("reply_to_preview")) null else obj.optString("reply_to_preview").ifEmpty { null }
     val replyToSenderIdentityId = if (obj.isNull("reply_to_sender_identity_id")) null else obj.optString("reply_to_sender_identity_id").ifEmpty { null }
+    val relayedBy = if (obj.isNull("relayed_by")) null else obj.optString("relayed_by").ifEmpty { null }
     return SimpleChatAdapter.Item(
         messageId = messageId ?: UUID.randomUUID().toString(),
+        relayedByName = relayedBy?.let { resolveContactByIdentity(it)?.displayName ?: it.take(8) },
         text = obj.optString("text"),
         isMine = isMine,
         status = if (!isMine) SimpleChatAdapter.Status.SENT else when (if (obj.isNull("status")) "sent" else obj.optString("status", "sent")) {

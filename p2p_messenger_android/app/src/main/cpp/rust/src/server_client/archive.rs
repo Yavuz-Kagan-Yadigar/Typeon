@@ -745,7 +745,7 @@ impl P2PCore {
                     archived.reply_to_preview.as_deref(),
                     archived.reply_to_sender_identity_id.as_deref(),
                     archived.sent_at_ms,
-                    archived.author_proof.as_deref(),
+                    archived.relayed_by.as_deref(),
                 )
             } else {
                 // The server archive is keyed by IDENTITY (`conv_key` = identity_id), but the local archive is keyed by DEVICE

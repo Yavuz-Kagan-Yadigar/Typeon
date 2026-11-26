@@ -972,7 +972,7 @@ impl P2PCore {
                     reply_to_preview: m.reply_to_preview,
                     reply_to_sender_identity_id: None,
                     sent_at_ms: m.sent_at_ms,
-                    author_proof: None,
+                    relayed_by: None,
                     file: None,
                     reactions,
                 }));
@@ -992,7 +992,6 @@ impl P2PCore {
             for m in self.load_group_message_history_q(gid, rows_max, Some(hi), Some(since - 1), false, false) {
                 if m.is_deleted { continue; }
                 let Some(mid) = m.message_id.clone().filter(|id| !id.is_empty()) else { continue };
-                let author_proof = self.group_author_proof(gid, &mid);
                 let reactions = self.reaction_rows(&mid);
                 all.push((m.timestamp.min(i64::MAX as u64) as i64, SiblingHistoryEntry {
                     conversation_identity_id: None,
@@ -1005,7 +1004,7 @@ impl P2PCore {
                     reply_to_preview: m.reply_to_preview,
                     reply_to_sender_identity_id: m.reply_to_sender_identity_id,
                     sent_at_ms: m.sent_at_ms,
-                    author_proof,
+                    relayed_by: m.relayed_by,
                     file: None,
                     reactions,
                 }));
@@ -1018,7 +1017,7 @@ impl P2PCore {
         let cost = |e: &SiblingHistoryEntry| match e.file.as_deref() {
             Some(MessageContent::FileOffer { caption, chunk_hashes, preview_jpeg, .. }) =>
                 512 + caption.len() + chunk_hashes.len() + preview_jpeg.as_ref().map_or(0, |p| p.len()),
-            _ => e.text.len() + e.author_proof.as_ref().map_or(0, |p| p.len()),
+            _ => e.text.len(),
         };
         let mut covered = cut.map_or(now.max(since), |c| c.max(since + 1));
         let mut stopped = false;
@@ -1191,7 +1190,7 @@ impl P2PCore {
                         reply_to_preview: m.reply_to_preview,
                         reply_to_sender_identity_id: None,
                         sent_at_ms: m.sent_at_ms,
-                        author_proof: None,
+                        relayed_by: None,
                         file: None,
                         reactions: self.reaction_rows(&mid),
                     });
@@ -1237,8 +1236,7 @@ impl P2PCore {
                     if too_old(&m) { break; }
                     if m.is_deleted { continue; }
                     let mid = match &m.message_id { Some(id) if !id.is_empty() => id.clone(), _ => continue };
-                    let author_proof = self.group_author_proof(&gid, &mid);
-                    let cost = m.text.len() + author_proof.as_ref().map_or(0, |p| p.len());
+                    let cost = m.text.len();
                     // see the 1:1 loop above.
                     if cost > text_budget {
                         if !unscoped && !entries.is_empty() { return (entries, true); }
@@ -1256,7 +1254,7 @@ impl P2PCore {
                         reply_to_preview: m.reply_to_preview,
                         reply_to_sender_identity_id: m.reply_to_sender_identity_id,
                         sent_at_ms: m.sent_at_ms,
-                        author_proof,
+                        relayed_by: m.relayed_by,
                         file: None,
                         reactions: self.reaction_rows(&mid),
                     });
@@ -1325,7 +1323,7 @@ impl P2PCore {
                 reply_to_preview: None,
                 reply_to_sender_identity_id: None,
                 sent_at_ms: at.max(0) as u64,
-                author_proof: None,
+                relayed_by: None,
                 file: None,
                 reactions,
             });
@@ -1401,7 +1399,7 @@ impl P2PCore {
                 reply_to_preview: reply_to_preview.clone(),
                 reply_to_sender_identity_id: reply_to_sender_identity_id.clone(),
                 sent_at_ms: created_at.max(0) as u64,
-                author_proof: None,
+                relayed_by: None,
                 file: Some(Box::new(MessageContent::FileOffer {
                     group_id: group_id.map(str::to_string),
                     file_id,
@@ -1539,6 +1537,10 @@ impl P2PCore {
                 if !user_fetch && e.sent_at_ms < self.history_floor(&gid) { continue; }
                 let sender = e.sender_identity_id.clone().unwrap_or_else(|| own_id.clone());
                 if file_present(self) || (file.is_none() && self.message_exists_in_chat(&e.message_id, Some(gid.as_str()), "")) {
+                    // Our sibling holds the author's own copy: a relayed row here is verified too.
+                    if file.is_none() && e.relayed_by.is_none() {
+                        self.verify_group_row(&gid, &e.message_id, (!e.text.is_empty()).then_some(e.text.as_str()));
+                    }
                     (true, false)
                 } else if let Some(f) = file {
                     let w = self.apply_sibling_file(peer_fp, &sender, Some(&gid), None, &e.direction, e.sent_at_ms, *f);
@@ -1547,7 +1549,7 @@ impl P2PCore {
                     (false, false) // reactions of a row this device lacks
                 } else {
                     let w = self.archive_group_message(&gid, &sender, &e.direction, e.text.as_bytes(), Some(&e.message_id),
-                        e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.reply_to_sender_identity_id.as_deref(), e.sent_at_ms, e.author_proof.as_deref()).is_ok();
+                        e.reply_to_message_id.as_deref(), e.reply_to_preview.as_deref(), e.reply_to_sender_identity_id.as_deref(), e.sent_at_ms, e.relayed_by.as_deref()).is_ok();
                     (w, w)
                 }
             } else if let Some(id) = e.conversation_identity_id.clone() {

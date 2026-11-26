@@ -206,9 +206,6 @@ impl P2PCore {
                 None => {
                     self.delete_pending_sibling_op(row_id);
                     self.apply_delete_to_archive(group_id, chat_key, target_message_id);
-                    if let Some(gid) = group_id {
-                        self.sign_own_group_tombstone(gid, target_message_id);
-                    }
                     match group_id {
                         Some(gid) => serde_json::json!({"type": "group_delete", "group_id": gid, "message_id": target_message_id}),
                         None => serde_json::json!({"type": "delete", "peer": chat_key, "message_id": target_message_id}),
@@ -377,7 +374,7 @@ impl P2PCore {
                     // A newly received or sent message cannot have reactions or seen info yet. See `ArchivedMessage.reactions` / `seen_by`.
                     reactions: String::new(),
                     seen_by: String::new(),
-                    author_proof: None,
+                    relayed_by: None,
                     mentions_me: false,
                     expire_secs: None,
                     expire_at_ms: None,
@@ -549,99 +546,48 @@ impl P2PCore {
             .map(|d| d.identity_id.clone())
     }
 
-    /// Signs a group message as its author, with this device's hybrid key (Ed25519 and ML-DSA-87, like every other signature here). The result travels with the
-    /// message and is stored by every member: `"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`.
-    // ponytail: hex text, about 9.4 KB per message (the ML-DSA signature is 4.6 KB raw). Make the field bytes if the size of group packets and history pages matters.
-    pub(crate) fn sign_group_author(&self, group_id: &str, message_id: &str, text: &str) -> Result<String, String> {
-        let own_fp = self.get_active_own_device_fingerprint()?;
-        let own_identity_id = self.my_identity_id().ok_or("No identity")?;
-        let keys = self.own_device_keys.get(&own_fp).ok_or("Missing own keys")?;
-        let statement = group_author_statement(group_id, message_id, &own_identity_id, &own_fp, text);
-        let sig_c: Ed25519Signature = keys.sign_sk_ed25519.sign(&statement);
-        let sig_pq: MlDsaSignature<MlDsa87> = keys.sign_sk_mldsa.sign(&statement);
-        Ok(format!("{}:{}:{}", own_fp, hex::encode(sig_c.to_bytes()), hex::encode(sig_pq.encode().to_vec())))
-    }
-
-    /// Whether `proof` is a hybrid signature by a device of
-    /// `author_identity_id` over exactly this group message. Both halves must
-    /// verify. A revoked device counts only for rows dated before its
-    /// `revoked_at`: its old messages stay valid.
-    pub(crate) fn group_author_proof_valid(&self, group_id: &str, message_id: &str, author_identity_id: &str, text: &str, sent_at_ms: u64, proof: Option<&str>) -> bool {
-        let mut parts = proof.unwrap_or("").splitn(3, ':');
-        let (Some(device_fp), Some(sig_c), Some(sig_pq)) = (parts.next(), parts.next(), parts.next()) else { return false };
-        // a revoked device's proof only for a row dated before its revoke.
-        // A group member that is not a contact keeps its revokes in `orv:`.
-        let revoked_at = self.contacts.values()
-            .filter(|c| c.trusted_identity_id == author_identity_id)
-            .find_map(|c| c.revoked_at(device_fp))
-            .or_else(|| self.non_contact_revoke(author_identity_id, device_fp).flatten());
-        if revoked_at.map_or(false, |r| sent_at_ms == 0 || sent_at_ms >= r) {
-            return false;
-        }
-        let (Ok(sig_c), Ok(sig_pq)) = (hex::decode(sig_c), hex::decode(sig_pq)) else { return false };
-        // Own devices (this one and the siblings) or a known device of the author.
-        let device = self.own_devices.get(device_fp).or_else(|| self.known_remote_devices.get(device_fp));
-        let Some(device) = device.filter(|d| d.identity_id == author_identity_id) else { return false };
-        // Another identity's revoked device with no time known to date its
-        // proofs against: none counts.
-        if !device.is_active && revoked_at.is_none() && !self.own_devices.contains_key(device_fp) {
-            return false;
-        }
-        verify_hybrid_signature(
-            &group_author_statement(group_id, message_id, author_identity_id, device_fp, text),
-            &sig_c, &sig_pq, device,
-        ).is_ok()
-    }
-
-    /// The stored proof of a group row, to hand on with history.
-    /// Scoped to the group: ids are the sender's choice and may repeat in another one.
-    pub(crate) fn group_author_proof(&self, group_id: &str, message_id: &str) -> Option<String> {
+    /// Group row: the member whose history answer brought it (`relayed_by`, unverified). `None`: the author's own copy (its pairwise
+    /// session), our own devices or our server archive.
+    pub(crate) fn group_row_relayed_by(&self, group_id: &str, message_id: &str) -> Option<String> {
         self.db.as_ref()?.query_row(
-            "SELECT author_proof FROM messages WHERE message_id = ?1 AND group_id = ?2",
+            "SELECT relayed_by FROM messages WHERE message_id = ?1 AND group_id = ?2",
             params![message_id, group_id], |r| r.get::<_, Option<String>>(0),
         ).ok().flatten()
     }
 
-    /// After an edit: stores `proof` when it signs the row as it is stored
-    /// NOW (the edit may have been stale and not applied). `apply_edit_to_archive`
-    /// cleared the old proof, so a row without a matching one is not handed on.
-    pub(crate) fn adopt_group_author_proof(&mut self, group_id: &str, message_id: &str, proof: Option<&str>) {
-        let Some(proof) = proof else { return };
-        let Some(key) = self.history_key else { return };
-        let row: Option<(Option<String>, Vec<u8>, Vec<u8>, bool, i64)> = self.db.as_ref().and_then(|c| c.query_row(
-            "SELECT sender_identity_id, encrypted_blob, nonce, COALESCE(is_deleted, 0), COALESCE(NULLIF(sent_at_ms, 0), timestamp) FROM messages WHERE message_id = ?1 AND group_id = ?2",
-            params![message_id, group_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        ).ok());
-        let Some((Some(author), blob, nonce, deleted, sent_at)) = row else { return };
-        if nonce.len() != 12 { return }
-        use chacha20poly1305::aead::{Aead, KeyInit};
-        use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-        let Ok(cipher) = ChaCha20Poly1305::new_from_slice(&key) else { return };
-        let Ok(plain) = cipher.decrypt(Nonce::from_slice(&nonce), blob.as_slice()) else { return };
-        let Ok(text) = String::from_utf8(plain) else { return };
-        // A deleted row is signed as a deletion, not as an empty text.
-        let text = if deleted { GROUP_TOMBSTONE.to_string() } else { text };
-        if !self.group_author_proof_valid(group_id, message_id, &author, &text, sent_at.max(0) as u64, Some(proof)) {
+    /// The author's own copy of a group row arrived. A relayed row is verified now: `author_text` (when given) replaces its text
+    /// if it differs, since the author's copy wins. A relayed row already deleted or edited only loses its marker: a late
+    /// original copy must not undelete it or undo the edit. A row that is not relayed is left as it is.
+    pub(crate) fn verify_group_row(&mut self, group_id: &str, message_id: &str, author_text: Option<&str>) {
+        if self.group_row_relayed_by(group_id, message_id).is_none() {
             return;
         }
+        let Some(key) = self.history_key else { return };
+        let replace = author_text.filter(|t| self.group_row_text(group_id, message_id)
+            .map_or(true, |(stored, deleted, edited)| !deleted && !edited && stored != *t));
+        let sealed = match replace {
+            Some(t) => match seal_with(&key, t.as_bytes()) {
+                Some(v) => Some(v),
+                None => return,
+            },
+            None => None,
+        };
         let Some(conn) = &self.db else { return };
-        if let Err(e) = conn.execute(
-            "UPDATE messages SET author_proof = ?1 WHERE message_id = ?2 AND group_id = ?3",
-            params![proof, message_id, group_id],
-        ) {
-            warn!("author_proof could not be stored ({}): {}", message_id, e);
+        let done = match &sealed {
+            Some((blob, nonce)) => conn.execute(
+                "UPDATE messages SET encrypted_blob = ?1, nonce = ?2, relayed_by = NULL WHERE message_id = ?3 AND group_id = ?4",
+                params![blob, nonce.to_vec(), message_id, group_id],
+            ),
+            None => conn.execute(
+                "UPDATE messages SET relayed_by = NULL WHERE message_id = ?1 AND group_id = ?2",
+                params![message_id, group_id],
+            ),
+        };
+        if let Err(e) = done {
+            warn!("Relayed group row could not be verified ({}): {}", message_id, e);
             return;
         }
         self.requeue_archive_row(Some(group_id), "", message_id);
-    }
-
-    /// A sibling deleted our group message: this device signs the deletion
-    /// too, so the row it hands on with history is taken.
-    pub(crate) fn sign_own_group_tombstone(&mut self, group_id: &str, message_id: &str) {
-        match self.sign_group_author(group_id, message_id, GROUP_TOMBSTONE) {
-            Ok(proof) => self.adopt_group_author_proof(group_id, message_id, Some(&proof)),
-            Err(e) => warn!("Group tombstone could not be signed ({}): {}", message_id, e),
-        }
     }
 
     /// Adds a group message to the local archive: the group counterpart of `archive_message`. `peer_device_fingerprint` is deliberately written as an empty string
@@ -652,12 +598,13 @@ impl P2PCore {
     /// keyed by `group_id`.
     /// `reply_to_message_id` / `reply_to_preview` / `reply_to_sender_identity_id`: same note as `archive_message`. The group counterpart also carries the
     /// replied-to message's sender `identity_id` (see the packet.rs `reply_to_sender_identity_id` note).
-    pub(crate) fn archive_group_message(&mut self, group_id: &str, sender_identity_id: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sent_at_ms: u64, author_proof: Option<&str>) -> Result<(), String> {
-        self.archive_group_message_exp(group_id, sender_identity_id, direction, plaintext, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, author_proof, None)
+    pub(crate) fn archive_group_message(&mut self, group_id: &str, sender_identity_id: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sent_at_ms: u64, relayed_by: Option<&str>) -> Result<(), String> {
+        self.archive_group_message_exp(group_id, sender_identity_id, direction, plaintext, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, relayed_by, None)
     }
 
-    /// Group twin of `archive_message_exp`.
-    pub(crate) fn archive_group_message_exp(&mut self, group_id: &str, sender_identity_id: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sent_at_ms: u64, author_proof: Option<&str>, expire_secs: Option<u32>) -> Result<(), String> {
+    /// Group twin of `archive_message_exp`. `relayed_by`: see `group_row_relayed_by`. A row already held (INSERT OR IGNORE) is never
+    /// overwritten, so a relayed copy cannot replace an author-verified one.
+    pub(crate) fn archive_group_message_exp(&mut self, group_id: &str, sender_identity_id: &str, direction: &str, plaintext: &[u8], message_id: Option<&str>, reply_to_message_id: Option<&str>, reply_to_preview: Option<&str>, reply_to_sender_identity_id: Option<&str>, sent_at_ms: u64, relayed_by: Option<&str>, expire_secs: Option<u32>) -> Result<(), String> {
         // The sender's clock: not later than ours, or its messages sort into
         // the future (and land in an archive bucket nobody probes).
         let sent_at_ms = sent_at_ms.min(current_time_ms());
@@ -675,9 +622,9 @@ impl P2PCore {
         let sent_col: Option<i64> = if sent_at_ms > 0 { Some(sent_at_ms as i64) } else { None };
         // see `archive_message`.
         let inserted = conn.execute(
-            "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, group_id, sender_identity_id, message_id, status, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, author_proof, expire_secs, expire_at_ms)
+            "INSERT OR IGNORE INTO messages (peer_device_fingerprint, direction, encrypted_blob, nonce, timestamp, group_id, sender_identity_id, message_id, status, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_at_ms, relayed_by, expire_secs, expire_at_ms)
              VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![direction, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64, group_id, sender_identity_id, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_col, author_proof,
+            params![direction, encrypted, nonce_bytes.to_vec(), current_time_ms() as i64, group_id, sender_identity_id, message_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, sent_col, relayed_by,
                 expire_secs, expire_secs.map(|s| first_expiry(direction, s))],
         ).map_err(|e| e.to_string())?;
         if inserted == 0 {
@@ -703,7 +650,7 @@ impl P2PCore {
                 // A newly received or sent message cannot have reactions or seen info yet. See `ArchivedMessage.reactions` / `seen_by`.
                 reactions: String::new(),
                 seen_by: String::new(),
-                author_proof: author_proof.map(|p| p.to_string()),
+                relayed_by: relayed_by.map(|p| p.to_string()),
                 mentions_me: false,
                 expire_secs: None,
                 expire_at_ms: None,
@@ -912,7 +859,7 @@ impl P2PCore {
             return serde_json::json!({"type": "noop"});
         }
         match content {
-            MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms, author_proof } => {
+            MessageContent::Edit { target_message_id, new_text, group_id, edited_at_ms } => {
                 // Without this check, any paired contact/group member could
                 // edit an arbitrary message (including one they never sent)
                 // just by knowing/guessing its id — see
@@ -928,8 +875,9 @@ impl P2PCore {
                         None => return serde_json::json!({"type": "noop"}),
                         Some(a) => applied = a,
                     }
+                    // The author edited it over its own session: a relayed copy is verified now.
                     if let (Some(gid), true) = (group_id.as_deref(), applied) {
-                        self.adopt_group_author_proof(gid, &target_message_id, author_proof.as_deref());
+                        self.verify_group_row(gid, &target_message_id, None);
                     }
                 }
                 self.send_ack(peer_fp, packet_message_id);
@@ -946,7 +894,7 @@ impl P2PCore {
                     }
                 }
             }
-            MessageContent::Delete { target_message_id, group_id, author_proof } => {
+            MessageContent::Delete { target_message_id, group_id } => {
                 // Same ownership rule as Edit (see `message_owned_by_sender`)
                 // — otherwise any paired contact could delete an unrelated
                 // message/attachment just by guessing/knowing its id.
@@ -985,7 +933,7 @@ impl P2PCore {
                 if owns_message {
                     self.apply_delete_to_archive(group_id.as_deref(), &chat_key, &target_message_id);
                     if let Some(gid) = group_id.as_deref() {
-                        self.adopt_group_author_proof(gid, &target_message_id, author_proof.as_deref());
+                        self.verify_group_row(gid, &target_message_id, None);
                     }
                 }
                 self.send_ack(peer_fp, packet_message_id);
@@ -1047,7 +995,7 @@ impl P2PCore {
         let new_edit_ts = std::cmp::max(edited_at_ms, stored_edit_ts) as i64;
         let updated = match group_id {
             Some(gid) => conn.execute(
-                "UPDATE messages SET encrypted_blob = ?1, nonce = ?2, is_edited = 1, edit_ts = ?3, author_proof = NULL WHERE message_id = ?4 AND group_id = ?5",
+                "UPDATE messages SET encrypted_blob = ?1, nonce = ?2, is_edited = 1, edit_ts = ?3 WHERE message_id = ?4 AND group_id = ?5",
                 params![encrypted, nonce_bytes.to_vec(), new_edit_ts, target_message_id, gid],
             ),
             None => conn.execute(
@@ -1142,7 +1090,7 @@ impl P2PCore {
             // point are not lost.
             reactions: self.reactions_summary(target_message_id),
             seen_by: self.seen_by_json(target_message_id),
-            author_proof: group_id.and_then(|gid| self.group_author_proof(gid, target_message_id)),
+            relayed_by: group_id.and_then(|gid| self.group_row_relayed_by(gid, target_message_id)),
             mentions_me: false,
             expire_secs: None,
             expire_at_ms: None,
@@ -1170,7 +1118,7 @@ impl P2PCore {
         if let Some((blob, nonce)) = self.history_key.and_then(|k| seal_with(&k, b"")) {
             let _ = match group_id {
                 Some(gid) => conn.execute(
-                    "UPDATE messages SET encrypted_blob = ?1, nonce = ?2, reply_to_preview = NULL, author_proof = NULL WHERE message_id = ?3 AND group_id = ?4",
+                    "UPDATE messages SET encrypted_blob = ?1, nonce = ?2, reply_to_preview = NULL WHERE message_id = ?3 AND group_id = ?4",
                     params![blob, nonce.to_vec(), target_message_id, gid],
                 ),
                 None => conn.execute(
@@ -1387,7 +1335,7 @@ impl P2PCore {
                             via_sync: via_sync != 0,
                             reactions: reactions_for_row,
                             seen_by: seen_by_for_row,
-                            author_proof: None,
+                            relayed_by: None,
                             mentions_me: false,
                             expire_secs,
                             expire_at_ms: expire_at_ms.map(|v| v.max(0) as u64),
@@ -1530,7 +1478,7 @@ impl P2PCore {
         let t = if sent_clock { "COALESCE(NULLIF(sent_at_ms,0), timestamp)" } else { "timestamp" };
         let e = expiry_filter(with_marks);
         let mut stmt = match conn.prepare(&format!(
-            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), mentions_me, status, expire_secs, expire_at_ms FROM messages
+            "SELECT direction, encrypted_blob, nonce, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, COALESCE(NULLIF(sent_at_ms,0), timestamp), mentions_me, status, expire_secs, expire_at_ms, relayed_by FROM messages
              WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4 {e}
                AND {t} >= COALESCE((SELECT {t} FROM messages
                     WHERE group_id = ?1 AND {t} < ?3 AND {t} > ?4 {e}
@@ -1559,6 +1507,7 @@ impl P2PCore {
                 row.get::<_, Option<String>>(13)?,
                 row.get::<_, Option<u32>>(14)?,
                 row.get::<_, Option<i64>>(15)?,
+                row.get::<_, Option<String>>(16)?,
             ))
         });
 
@@ -1566,7 +1515,7 @@ impl P2PCore {
         let (mut page_budget, mut page_cut) = (PAGE_MAX_BYTES, None);
         if let Ok(rows) = rows {
             for row in rows.flatten() {
-                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, eff_sent, mentions_me, row_status, expire_secs, expire_at_ms) = row;
+                let (direction, encrypted_blob, nonce_bytes, timestamp, message_id, sender_identity_id, reply_to_message_id, reply_to_preview, reply_to_sender_identity_id, is_deleted, is_edited, eff_sent, mentions_me, row_status, expire_secs, expire_at_ms, relayed_by) = row;
                 // bounded in bytes, not rows only (500 texts near 1 MiB
                 // each went into one JNI string); never mid-millisecond.
                 if page_bytes_full(&mut page_budget, &mut page_cut, if sent_clock { eff_sent } else { timestamp }, encrypted_blob.len()) {
@@ -1600,7 +1549,7 @@ impl P2PCore {
                             via_sync: false,
                             reactions: reactions_for_row,
                             seen_by: seen_by_for_row,
-                            author_proof: None,
+                            relayed_by,
                             mentions_me: mentions_me != 0,
                             expire_secs,
                             expire_at_ms: expire_at_ms.map(|v| v.max(0) as u64),

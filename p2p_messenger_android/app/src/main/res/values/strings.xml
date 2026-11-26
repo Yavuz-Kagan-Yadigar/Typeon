@@ -119,6 +119,16 @@
     <string name="tor_status_bootstrapping">Tor: connecting…</string>
     <string name="tor_status_ready">Tor: ready — .onion address is live</string>
     <string name="tor_status_failed">Tor: failed (see log)</string>
+    <string name="lbl_tor_connection">Tor connection</string>
+    <string name="action_tor_mode">Change</string>
+    <string name="tor_mode_direct">Direct</string>
+    <string name="tor_mode_snowflake">Snowflake</string>
+    <string name="tor_mode_obfs4">Bridges (obfs4)</string>
+    <string name="tor_mode_unavailable">Not available in this build</string>
+    <string name="tor_mode_not_yet_android">Not working on Android yet; use bridges (obfs4)</string>
+    <string name="hint_tor_bridges">Paste obfs4 bridge lines, one per line</string>
+    <string name="msg_tor_mode_restart">Use bridges where Tor is blocked. They use more battery than Direct. The app restarts to apply a change.</string>
+    <string name="msg_tor_bridges_invalid">Invalid bridge: %1$s</string>
     <string name="tor_restart_needed">Restart the app for this change to take effect</string>
     <string name="action_tor_reconnect">Reconnect Tor / network</string>
     <string name="title_tor_reconnect">Reconnect network?</string>
@@ -200,6 +210,7 @@
 
     <string name="lbl_edited">(edited)</string>
     <string name="lbl_synced">(from history sync)</string>
+    <string name="lbl_relayed_unverified">Relayed by %1$s · unverified</string>
     <string name="lbl_you">You</string>
     <string name="lbl_today">Today</string>
     <string name="lbl_yesterday">Yesterday</string>

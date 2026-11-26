@@ -8,6 +8,11 @@ use super::*;
 /// until confirmed. Handshake and IdentityExchange use `PENDING_HANDSHAKE_TIMEOUT_MS`.
 pub(crate) const PENDING_ENVELOPE_TIMEOUT_MS: u64 = 20_000;
 
+/// See `lazy_deposit_held`: the longest a non-urgent packet waits, in radio-saver mode, for an anonymous connection.
+pub(crate) const LAZY_DEPOSIT_HOLD_MS: u64 = 30_000;
+/// A held packet's queue lifetime is longer by the hold, or it was dropped before it went.
+pub(crate) const LAZY_DEPOSIT_MAX_AGE_MS: u64 = LAZY_DEPOSIT_HOLD_MS + PENDING_ENVELOPE_TIMEOUT_MS;
+
 /// One entry of `pending_envelopes`.
 pub(crate) struct QueuedEnvelope {
     pub(crate) target: String,
@@ -384,6 +389,10 @@ pub(crate) const HISTORY_STORAGE_SWEEP_INTERVAL_MS: u64 = 30_000;
 /// after 120 s (a slow Tor circuit, a queued `HandshakeInit`, or a backlog pulled from the server), the buffer was emptied and messages were dropped
 /// for that round. The memory bound does not change: the real limit is the count, `MAX_EARLY_PACKETS_PER_PEER`, not the time.
 pub(crate) const EARLY_PACKET_TTL_MS: u64 = MAX_UNCONFIRMED_AGE_MS;
+/// See `P2PCore::unproven_fails_blocked`: failed decrypts allowed per unproven direct carrier per window, and the map bound.
+pub(crate) const UNPROVEN_FAIL_MAX: u32 = 8;
+pub(crate) const UNPROVEN_FAIL_WINDOW_MS: u64 = 60_000;
+pub(crate) const UNPROVEN_FAIL_PEERS: usize = 256;
 /// see `P2PCore.unknown_group_held`: how long, for how many groups, and how
 /// many packets per group content for a group we do not hold is kept.
 pub(crate) const UNKNOWN_GROUP_HOLD_TTL_MS: u64 = 30 * 60_000;

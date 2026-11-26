@@ -589,7 +589,7 @@ pub struct MessagePacketHeader {
     /// chain step with no rotation.
     #[serde(with = "serde_bytes")]
     pub rotation_kyber_ciphertext: Option<Vec<u8>>,
-    /// The sender's clock when the packet was made. It is signed with the header, so a
+    /// The sender's clock when the packet was made. The AEAD binds it with the header, so a
     /// receiver can tell a replayed old packet from one its session should decrypt
     /// (see `note_undecryptable` in session.rs).
     pub sent_at_ms: u64,
@@ -612,8 +612,7 @@ pub fn disappear_secs(v: Option<u32>) -> Option<u32> {
 }
 
 /// A `MessagePacketHeader` together with the exact CBOR bytes it travels as. The
-/// packet signature and the ratchet AEAD (associated data) cover these bytes and
-/// never a re-encoding. A receiver therefore checks what the sender actually made,
+/// ratchet AEAD (associated data) covers these bytes and never a re-encoding. A receiver therefore checks what the sender actually made,
 /// and acts only on a header that the tag binds to the ciphertext.
 #[derive(Debug, Clone)]
 pub struct SignedHeader {
@@ -670,14 +669,11 @@ pub struct MessagePacket {
     /// AEAD (ChaCha20-Poly1305) ciphertext. The nonce is derived from the header
     /// (from `message_number`) and is not carried. After decryption it is CBOR-decoded
     /// as a `MessageContent`.
+    /// The AEAD tag (associated data: the raw header bytes) is the only sender
+    /// authentication. There is no signature: either end of the session could have
+    /// made the packet, so it proves nothing to a third party (deniability).
     #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
-    /// Hybrid ML-DSA and Ed25519 signature over the raw header bytes, the ciphertext
-    /// and the recipient.
-    #[serde(with = "serde_bytes")]
-    pub signature_classical: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    pub signature_pq: Vec<u8>,
 }
 
 /// One element of `HistorySyncResponse.messages`. See `ArchivedMessage` in types.rs
@@ -712,10 +708,6 @@ pub struct SyncedMessage {
     /// the "(edited)" label.
     #[serde(default)]
     pub is_edited: bool,
-    /// See `MessageContent::Text.author_proof`. Needed for a group row that the
-    /// responder did not write itself.
-    #[serde(default)]
-    pub author_proof: Option<String>,
     /// Reactions on this row: (reactor identity, emoji, reacted_at_ms).
     #[serde(default, deserialize_with = "bounded::seq_4096")]
     pub reactions: Vec<(String, String, u64)>,
@@ -734,12 +726,6 @@ pub enum MessageContent {
     /// message. Without it the receiver cannot tell a group message from an ordinary
     /// 1:1 message (see `receive_message` in receive.rs).
     Text {
-        /// Group messages only: the author's signature over the message
-        /// (`"<device fingerprint>:<Ed25519 hex>:<ML-DSA hex>"`, see
-        /// `group_author_statement` in core). Other members pass it on with the group
-        /// history, so a row there cannot be attributed to someone who did not write it.
-        #[serde(default)]
-        author_proof: Option<String>,
         group_id: Option<String>,
         text: String,
         /// Set only when `group_id` is present. The N pairwise fan-out copies of one
@@ -820,9 +806,6 @@ pub enum MessageContent {
         new_text: String,
         #[serde(default)]
         group_id: Option<String>,
-        /// As `Text.author_proof`, over the new text.
-        #[serde(default)]
-        author_proof: Option<String>,
         /// Sender's local time (ms, epoch) when this edit was made. The network gives no
         /// ordering guarantee. Two edits of the same message (for example, a correction
         /// made twice within seconds) can reach the recipient in reverse order. The
@@ -841,10 +824,6 @@ pub enum MessageContent {
         target_message_id: String,
         #[serde(default)]
         group_id: Option<String>,
-        /// Group only: the author's signature over the deletion (`GROUP_TOMBSTONE` in
-        /// util.rs). Members pass it on with the history.
-        #[serde(default)]
-        author_proof: Option<String>,
     },
     /// Asks the peer for recent history. A peer with node mode off archives no chat
     /// history (see `archive_message` in archive.rs). With node mode on, the peer has
@@ -1669,9 +1648,9 @@ pub struct SiblingHistoryEntry {
     /// Send time. Backfilled messages are also ordered by SEND time.
     #[serde(default)]
     pub sent_at_ms: u64,
-    /// See `MessageContent::Text.author_proof`.
-    #[serde(default)]
-    pub author_proof: Option<String>,
+    /// Group rows: the member that relayed the row unverified (see `relayed_by` in the core's `ArchivedMessage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relayed_by: Option<String>,
     /// An attachment row instead of a text row: always a `MessageContent::FileOffer` (its `file_id` is
     /// `message_id`). The receiver downloads the file from the sibling that sent it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1730,8 +1709,6 @@ mod wire_size_tests {
                 sent_at_ms: 0,
             }).unwrap(),
             ciphertext: raw.clone(),
-            signature_classical: Vec::new(),
-            signature_pq: raw.clone(),
         };
         let mut buf = Vec::new();
         ciborium::into_writer(&NetworkEnvelope::Message(packet.clone()), &mut buf).unwrap();
@@ -1941,7 +1918,7 @@ mod signing_input_tests {
     fn collection_counts_are_bounded() {
         let text = |n: usize| MessageContent::Text {
             group_id: Some("g".into()), text: String::new(), group_message_local_id: None, sent_at_ms: 0,
-            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None, author_proof: None,
+            reply_to_message_id: None, reply_to_preview: None, reply_to_sender_identity_id: None,
             mentions: vec![String::new(); n], expire_secs: None,
         };
         assert!(MessageContent::from_cbor(&to_cbor(&text(256)).unwrap()).is_ok());

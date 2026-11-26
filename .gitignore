@@ -123,3 +123,6 @@ inspection-*/
 pass.txt
 lineage.bin
 debug_db_key.hex
+
+# Tor PT binaries from tools/fetch-pt-binaries.sh (Android ones land in jniLibs, covered by *.so)
+pt-bin/

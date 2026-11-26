@@ -229,7 +229,7 @@ pub struct DeviceRatchetState {
     pub old_recv: Option<OldRecvChain>,
     /// Fixed for the life of the session: derived from the first (hybrid X25519 + ML-KEM) root key at
     /// `initiate`/`respond`, never changed by a rotation. The server mailbox secret is made from it
-    /// (`server_seal::session_mailbox_secret`), so the mailbox stays put across rotations and is
+    /// (`server_seal::session_inbox_secret`), so the mailbox stays put across rotations and is
     /// still post-quantum: a quantum attacker who knows both devices' public keys cannot derive it.
     pub mailbox_seed: Vec<u8>,
 }
@@ -1286,6 +1286,20 @@ mod tests {
         let (ciphertext, number, _) = initiator.encrypt_next(b"m", b"header").unwrap();
         assert!(responder.decrypt(&ciphertext, number, None, T0, b"header2").is_err());
         assert_eq!(responder.decrypt(&ciphertext, number, None, T0, b"header").unwrap().0, b"m");
+    }
+
+    /// Packets carry no signature: a packet made for one peer's session must not open in another's (a cross-addressed
+    /// replay fails the tag and leaves that chain where it was).
+    #[test]
+    fn packet_for_one_session_does_not_open_in_another() {
+        let (mut a_to_b, mut b) = session();
+        let (mut d_to_c, mut c) = session();
+        let (ciphertext, number, _) = a_to_b.encrypt_next(b"m", b"header").unwrap();
+        let (own_ct, own_number, _) = d_to_c.encrypt_next(b"own", b"header").unwrap();
+        assert!(c.decrypt(&ciphertext, number, None, T0, b"header").is_err());
+        // c's chain did not move: its own peer's packet 0 still opens.
+        assert_eq!(c.decrypt(&own_ct, own_number, None, T0, b"header").unwrap().0, b"own");
+        assert_eq!(b.decrypt(&ciphertext, number, None, T0, b"header").unwrap().0, b"m");
     }
 
     /// Packets of the chain that a rotation replaced still decrypt, on the side that rotated and on the side that

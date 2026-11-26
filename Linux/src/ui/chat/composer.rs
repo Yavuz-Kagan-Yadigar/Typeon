@@ -194,6 +194,7 @@ impl ChatView {
             seen_by: Vec::new(),
             reactions: String::new(),
             expire: expire_secs.map(|secs| (secs, now + secs as u64 * 1000)),
+            relayed_by: None,
         };
         let done = move |view: Rc<Self>, result: Result<Entry, String>, text: String| match result {
             Ok(entry) => view.insert_entry(entry, true),
