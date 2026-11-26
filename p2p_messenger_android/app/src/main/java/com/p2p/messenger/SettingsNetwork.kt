@@ -338,98 +338,69 @@ internal fun SettingsFragment.buildServerRow(obj: org.json.JSONObject): View {
     return row
 }
 
-/** Tor connection modes, in dialog order. See Rust `tor::set_transport`. */
-private val TOR_MODES = arrayOf("direct", "snowflake", "obfs4")
-
-internal fun SettingsFragment.torModeLabel(mode: String): String = getString(
-    when (mode) {
-        "snowflake" -> R.string.tor_mode_snowflake
-        "obfs4" -> R.string.tor_mode_obfs4
-        else -> R.string.tor_mode_direct
-    }
-)
-
-/** Mode label, plus which path is in use now: a bridge mode is a fallback (Rust `tor::watch_bridge_fallback`).
+/** Which path is in use now: the bridges are a fallback (Rust `tor::watch_bridge_fallback`).
  *  Refreshed by the Tor status poll, which runs only while this screen is in the foreground. */
 internal fun SettingsFragment.updateTorModeDesc(root: View? = view) {
     val desc = root?.findViewById<TextView>(R.id.tor_mode_desc) ?: return
-    val mode = P2PService.getTorMode(requireContext())
-    desc.text = if (mode == "direct") torModeLabel(mode)
-        else torModeLabel(mode) + "\n" + getString(if (P2PLib.torBridgeInUse()) R.string.tor_state_bridge else R.string.tor_state_direct)
+    desc.setText(when {
+        !P2PLib.torTransportAvailable(requireContext().applicationInfo.nativeLibraryDir) -> R.string.tor_mode_unavailable
+        P2PLib.torBridgeInUse() -> R.string.tor_state_bridge
+        else -> R.string.tor_state_direct
+    })
 }
 
 internal fun SettingsFragment.setupTorMode(view: View) {
     updateTorModeDesc(view)
-    view.findViewById<Button>(R.id.btn_tor_mode).setOnClickListener { showTorModeDialog() }
+    view.findViewById<Button>(R.id.btn_tor_mode).setOnClickListener { showTorBridgesDialog() }
 }
 
-/** Direct / Snowflake / obfs4 bridges. A change is stored and the app restarts: arti reads it only at start
- *  (see util/AppRestarter.kt). A mode whose PT binary is not in this APK cannot be picked. */
-internal fun SettingsFragment.showTorModeDialog() {
+/** The Snowflake and obfs4 bridge lines (empty = built-in). A change is stored and the app restarts: arti reads
+ *  it only at start (see util/AppRestarter.kt). */
+internal fun SettingsFragment.showTorBridgesDialog() {
     val ctx = requireContext()
-    val ptDir = ctx.applicationInfo.nativeLibraryDir
-    val current = P2PService.getTorMode(ctx)
-    val storedBridges = P2PService.getTorBridges(ctx)
+    val storedSnowflake = P2PService.getTorSnowflakeBridges(ctx)
+    val storedObfs4 = P2PService.getTorBridges(ctx)
     val pad = (16 * resources.displayMetrics.density).toInt()
     val root = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
     root.addView(TextView(ctx).apply { setText(R.string.msg_tor_mode_restart) })
-    val group = android.widget.RadioGroup(ctx)
-    TOR_MODES.forEachIndexed { i, mode ->
-        val available = P2PLib.torTransportAvailable(mode, ptDir)
-        group.addView(android.widget.RadioButton(ctx).apply {
-            id = View.generateViewId()
-            tag = mode
-            text = if (available) torModeLabel(mode)
-                else torModeLabel(mode) + "\n" + getString(R.string.tor_mode_unavailable)
-            isEnabled = available || mode == current
-            isChecked = mode == current || (i == 0 && current !in TOR_MODES)
-        })
-    }
-    root.addView(group)
-    val bridgesInput = EditText(ctx).apply {
-        hint = getString(R.string.hint_tor_bridges)
-        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        setSingleLine(false)
-        minLines = 3
-        maxLines = 8
-        textSize = 12f
-        typeface = android.graphics.Typeface.MONOSPACE
-        setText(storedBridges)
-    }
-    val errorView = TextView(ctx).apply {
-        setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
-        visibility = View.GONE
-    }
-    // Where to get bridges; with no lines Tor's built-in public bridges are used.
-    val bridgesHelp = TextView(ctx).apply {
+    // Where to get bridges.
+    root.addView(TextView(ctx).apply {
         setText(R.string.msg_tor_bridges_help)
         autoLinkMask = android.text.util.Linkify.WEB_URLS
         linksClickable = true
         movementMethod = android.text.method.LinkMovementMethod.getInstance()
         setPadding(0, pad / 2, 0, 0)
+    })
+    fun bridgeBox(label: Int, stored: String): EditText {
+        root.addView(TextView(ctx).apply { setText(label); setPadding(0, pad / 2, 0, 0) })
+        val input = EditText(ctx).apply {
+            hint = getString(R.string.hint_tor_bridges)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine(false)
+            minLines = 2
+            maxLines = 6
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setText(stored)
+        }
+        root.addView(input)
+        return input
     }
-    root.addView(bridgesHelp)
-    root.addView(bridgesInput)
+    val snowflakeInput = bridgeBox(R.string.lbl_tor_snowflake_bridges, storedSnowflake)
+    val obfs4Input = bridgeBox(R.string.lbl_tor_obfs4_bridges, storedObfs4)
+    val errorView = TextView(ctx).apply {
+        setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
+        visibility = View.GONE
+    }
     root.addView(errorView)
-    // Off: Direct first, the bridge only once Direct is blocked. On: a censor never sees a Direct attempt.
+    // Off: Direct first, a bridge only once Direct is blocked. On: a censor never sees a Direct attempt.
     val storedAlways = P2PService.getTorAlwaysBridge(ctx)
     val alwaysBox = android.widget.CheckBox(ctx).apply {
         setText(R.string.lbl_tor_always_bridge)
         isChecked = storedAlways
     }
-    val alwaysHelp = TextView(ctx).apply { setText(R.string.msg_tor_always_bridge) }
     root.addView(alwaysBox)
-    root.addView(alwaysHelp)
-    fun selected(): String = group.findViewById<View>(group.checkedRadioButtonId)?.tag as? String ?: "direct"
-    fun syncVisibility() {
-        bridgesInput.visibility = if (selected() == "obfs4") View.VISIBLE else View.GONE
-        bridgesHelp.visibility = bridgesInput.visibility
-        alwaysBox.visibility = if (selected() == "direct") View.GONE else View.VISIBLE
-        alwaysHelp.visibility = alwaysBox.visibility
-        errorView.visibility = View.GONE
-    }
-    group.setOnCheckedChangeListener { _, _ -> syncVisibility() }
-    syncVisibility()
+    root.addView(TextView(ctx).apply { setText(R.string.msg_tor_always_bridge) })
 
     val dialog = AlertDialog.Builder(ctx)
         .setTitle(R.string.lbl_tor_connection)
@@ -439,20 +410,20 @@ internal fun SettingsFragment.showTorModeDialog() {
         .create()
     dialog.setOnShowListener {
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val mode = selected()
-            val bridges = bridgesInput.text.toString().trim()
-            if (mode == "obfs4" && bridges.isNotEmpty()) {
-                val check = P2PLib.validateBridgeLines(bridges)
+            val snowflake = snowflakeInput.text.toString().trim()
+            val obfs4 = obfs4Input.text.toString().trim()
+            for ((name, lines) in listOf("Snowflake" to snowflake, "obfs4" to obfs4)) {
+                val check = P2PLib.validateBridgeLines(lines, name.lowercase(java.util.Locale.ROOT))
                 if (check.startsWith("Error")) {
-                    errorView.text = getString(R.string.msg_tor_bridges_invalid, check.removePrefix("Error: "))
+                    errorView.text = getString(R.string.msg_tor_bridges_invalid, "$name: " + check.removePrefix("Error: "))
                     errorView.visibility = View.VISIBLE
                     return@setOnClickListener
                 }
             }
             dialog.dismiss()
             val always = alwaysBox.isChecked
-            if (mode == current && (mode != "obfs4" || bridges == storedBridges) && (mode == "direct" || always == storedAlways)) return@setOnClickListener
-            P2PService.setTorTransport(ctx, mode, if (mode == "obfs4") bridges else storedBridges, always)
+            if (snowflake == storedSnowflake && obfs4 == storedObfs4 && always == storedAlways) return@setOnClickListener
+            P2PService.setTorBridges(ctx, snowflake, obfs4, always)
             AppRestarter.restart(ctx)
         }
     }

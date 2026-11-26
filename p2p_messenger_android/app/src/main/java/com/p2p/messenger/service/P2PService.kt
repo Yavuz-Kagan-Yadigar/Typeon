@@ -22,7 +22,7 @@ class P2PService : Service() {
         const val NOTIFICATION_ID = 1
         const val PREFS_NAME = "p2p_settings"
         const val KEY_NODE_MODE = "node_mode_enabled"
-        const val KEY_TOR_MODE = "tor_mode"
+        const val KEY_TOR_SNOWFLAKE_BRIDGES = "tor_snowflake_bridges"
         const val KEY_TOR_ALWAYS_BRIDGE = "tor_always_bridge"
         const val KEY_TOR_BRIDGES = "tor_bridges"
         /** Byte limit for history and attachment storage in node mode (see Rust `history_storage_limit_bytes`). */
@@ -184,8 +184,8 @@ class P2PService : Service() {
         }
 
         /** Tor connection mode: "direct" (default), "snowflake" or "obfs4". Applied on the next process start. */
-        fun getTorMode(context: Context): String =
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_TOR_MODE, "direct") ?: "direct"
+        fun getTorSnowflakeBridges(context: Context): String =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_TOR_SNOWFLAKE_BRIDGES, "") ?: ""
 
         fun getTorBridges(context: Context): String =
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_TOR_BRIDGES, "") ?: ""
@@ -195,9 +195,9 @@ class P2PService : Service() {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_TOR_ALWAYS_BRIDGE, false)
 
         /** `commit`, not `apply`: the caller restarts the process right after. */
-        fun setTorTransport(context: Context, mode: String, bridges: String, alwaysBridge: Boolean) {
+        fun setTorBridges(context: Context, snowflake: String, obfs4: String, alwaysBridge: Boolean) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                .putString(KEY_TOR_MODE, mode).putString(KEY_TOR_BRIDGES, bridges)
+                .putString(KEY_TOR_SNOWFLAKE_BRIDGES, snowflake).putString(KEY_TOR_BRIDGES, obfs4)
                 .putBoolean(KEY_TOR_ALWAYS_BRIDGE, alwaysBridge).commit()
         }
 
@@ -893,10 +893,9 @@ class P2PService : Service() {
             val nodeMode = isNodeModeEnabled(applicationContext)
             // Bridges / PT before arti starts. Fails closed: a bridge mode that cannot be set never starts a
             // direct Tor connection instead (a missing PT binary starts arti, which then cannot connect).
-            val torMode = getTorMode(applicationContext)
-            val torSet = P2PLib.setTorTransport(torMode, getTorBridges(applicationContext), applicationInfo.nativeLibraryDir, getTorAlwaysBridge(applicationContext))
+            val torSet = P2PLib.setTorTransport(getTorSnowflakeBridges(applicationContext), getTorBridges(applicationContext), applicationInfo.nativeLibraryDir, getTorAlwaysBridge(applicationContext))
             if (torSet.startsWith("Error")) {
-                Log.w(TAG, "Tor mode $torMode not applied: $torSet")
+                Log.w(TAG, "Tor bridges not applied: $torSet")
                 retryStart { startNet() }
                 return
             }

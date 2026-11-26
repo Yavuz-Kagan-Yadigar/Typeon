@@ -164,19 +164,19 @@ pub fn set_node_mode(enabled: bool) {
     api::set_node_mode(enabled);
 }
 
-/// Tor mode for the next `start_network` ("direct", "snowflake", "obfs4"). PT binaries are looked up next
-/// to the executable (Flatpak: /app/bin, Windows: bin\).
-pub fn set_tor_transport(mode: &str, bridges: &str, always_bridge: bool) -> Result<(), String> {
-    parse_unit(api::set_tor_transport(mode, bridges, "", always_bridge))
+/// Tor bridges for the next `start_network` (the user's lines, empty = built-in). The PT binary is looked up
+/// next to the executable (Flatpak: /app/bin, Windows: bin\).
+pub fn set_tor_transport(snowflake: &str, obfs4: &str, always_bridge: bool) -> Result<(), String> {
+    parse_unit(api::set_tor_transport(snowflake, obfs4, "", always_bridge))
 }
 
-/// `Err("line N: ...")` for the first bad obfs4 bridge line.
-pub fn validate_bridge_lines(text: &str) -> Result<(), String> {
-    parse_unit(api::validate_bridge_lines(text))
+/// `Err("line N: ...")` for the first bad line of `transport` ("obfs4" / "snowflake").
+pub fn validate_bridge_lines(text: &str, transport: &str) -> Result<(), String> {
+    parse_unit(api::validate_bridge_lines(text, transport))
 }
 
-pub fn tor_transport_available(mode: &str) -> bool {
-    api::tor_transport_available(mode, "")
+pub fn tor_transport_available() -> bool {
+    api::tor_transport_available("")
 }
 
 /// Tor runs over the configured bridge because Direct was blocked.

@@ -270,32 +270,34 @@ fn usage() {
          --dir <path>                          Data directory (TYPEON_SERVER_DIR)\n\
          --storage <size>                  Total disk budget, e.g. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n\n\
          Tor bridges (environment, read by `run`):\n\
-         TYPEON_SERVER_TOR_MODE=direct|snowflake|obfs4   default direct; a bridge is used only when Direct is blocked\n\
+         Bridges are a fallback: used only when Direct is blocked.\n\
          TYPEON_SERVER_BRIDGES_FILE=<path>               obfs4 bridge lines, one per line (unset: Tor built-in bridges)\n\
+         TYPEON_SERVER_SNOWFLAKE_FILE=<path>             Snowflake bridge lines, one per line (unset: Tor built-in bridges)\n\
          TYPEON_SERVER_PT_DIR=<dir>                      lyrebird, obfs4 + snowflake (default: next to this binary)\n\
          TYPEON_SERVER_TOR_ALWAYS_BRIDGE=1               start on the bridge, never try Direct first\n"
     );
 }
 
-/// Tor bridges from the environment (see `usage`). A bridge is a fallback: Direct first, the bridge once
+/// Tor bridges from the environment (see `usage`). A bridge is a fallback: Direct first, a bridge once
 /// Direct is blocked (core `tor::watch_bridge_fallback`). A bad setting stops the server.
 fn apply_tor_transport() {
-    let mode = std::env::var("TYPEON_SERVER_TOR_MODE").unwrap_or_else(|_| "direct".to_string());
-    let bridges = match std::env::var("TYPEON_SERVER_BRIDGES_FILE") {
+    let read = |name: &str| match std::env::var(name) {
         Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("TYPEON_SERVER_BRIDGES_FILE: {e}");
+            eprintln!("{name}: {e}");
             std::process::exit(1);
         }),
         Err(_) => String::new(),
     };
+    let obfs4 = read("TYPEON_SERVER_BRIDGES_FILE");
+    let snowflake = read("TYPEON_SERVER_SNOWFLAKE_FILE");
     let pt_dir = std::env::var("TYPEON_SERVER_PT_DIR").unwrap_or_default();
     let always = std::env::var("TYPEON_SERVER_TOR_ALWAYS_BRIDGE").is_ok_and(|v| v.trim() == "1");
-    if let Err(e) = p2p_messenger::tor::set_transport(mode.trim(), &bridges, &pt_dir, always) {
-        eprintln!("TYPEON_SERVER_TOR_MODE: {e}");
+    if let Err(e) = p2p_messenger::tor::set_transport(&snowflake, &obfs4, &pt_dir, always) {
+        eprintln!("Tor bridges: {e}");
         std::process::exit(1);
     }
-    if !p2p_messenger::tor::pt_available(mode.trim(), &pt_dir) {
-        eprintln!("warning: no PT binary for Tor mode {mode}; Tor cannot connect");
+    if !p2p_messenger::tor::pt_available(&pt_dir) {
+        eprintln!("warning: no PT binary (lyrebird): no Tor bridge fallback{}", if always { "; Tor cannot connect" } else { "" });
     }
 }
 

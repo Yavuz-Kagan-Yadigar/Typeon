@@ -25,9 +25,9 @@ pub struct Prefs {
     /// On by default, exactly as on Android: two devices behind CGNAT can
     /// reach each other out of the box. Only takes effect at `start_network`.
     pub tor_enabled: bool,
-    /// Tor connection: "direct", "snowflake" or "obfs4" (see core `tor::set_transport`). Start-time only.
-    pub tor_mode: String,
-    /// Pasted obfs4 bridge lines, kept when another mode is picked.
+    /// The user's Snowflake bridge lines; empty = built-in. A fallback (core `tor::set_transport`). Start-time only.
+    pub tor_snowflake_bridges: String,
+    /// The user's obfs4 bridge lines; empty = built-in. Start-time only.
     pub tor_bridges: String,
     /// Start on the bridge, never try Direct first (core `tor::set_transport` `always`). Start-time only.
     pub tor_always_bridge: bool,
@@ -94,7 +94,7 @@ impl Default for Prefs {
         Self {
             node_mode: false,
             tor_enabled: true,
-            tor_mode: "direct".to_string(),
+            tor_snowflake_bridges: String::new(),
             tor_bridges: String::new(),
             tor_always_bridge: false,
             history_storage_limit_bytes: DEFAULT_HISTORY_LIMIT_BYTES,

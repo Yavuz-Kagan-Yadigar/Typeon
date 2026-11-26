@@ -510,9 +510,14 @@ pre-authorization. This is now implemented, in a **reachability-only v1**:
 - The toggle takes effect on the next network-layer start (a transport can't
   be added to a live swarm), so enabling it prompts an app restart.
 
-**Snowflake and obfs4 bridges are a fallback, with a privacy cost.** When a
-bridge mode is picked, the app still starts with a direct Tor connection and
-switches the running Tor client to the bridge only after Direct has had 60 s
+**Snowflake and obfs4 bridges are a fallback, with a privacy cost.** The
+fallback is always active when the build ships `lyrebird`; there is no mode to
+pick. The settings hold two optional boxes, Snowflake lines and obfs4 lines.
+The tries run in this order, one at a time: the user's own lines (obfs4 lines
+together, Snowflake lines one by one), then the built-in list of each empty box,
+obfs4 before Snowflake. A user who fills only one box can therefore still reach
+the other kind's public built-in bridges. The app starts with a direct Tor
+connection and switches the running Tor client to the bridge only after Direct has had 60 s
 of online, awake time without becoming ready (no network at all does not
 count). On a censoring network that first Direct attempt shows the network
 observer that this device tried to reach Tor. To limit how often that
@@ -520,12 +525,12 @@ happens, a block is remembered for 24 h (file `direct-blocked` in arti's
 state directory): starts within that time go straight to the bridge. Once a
 process is on the bridge it never goes back to Direct. A user who must never
 be seen connecting to Tor directly turns on **Always use the bridge**
-(Settings > Network > Tor connection; server: `TYPEON_SERVER_TOR_ALWAYS_BRIDGE=1`):
+(Settings > Network > Tor bridges; server: `TYPEON_SERVER_TOR_ALWAYS_BRIDGE=1`):
 the app then starts on the bridge and never tries Direct. A bridge that is not ready for 5 min of online time, at the start or
 after it has died, is parked for growing pauses (10 min doubling to 2 h,
 with 5 min tries in between), so a dead Snowflake does not churn the radio
-and battery all day. arti uses one bridge as its primary guard; the other
-bridge line is only the fallback when the first is down.
+and battery all day. Each try that is not ready in time (90 s for obfs4, 5 min
+for Snowflake) moves to the next one; the park comes after all tries failed.
 
 **Channel padding is reduced for battery.** arti runs with
 `PaddingLevel::Reduced`, and its idle padding interval is stretched to

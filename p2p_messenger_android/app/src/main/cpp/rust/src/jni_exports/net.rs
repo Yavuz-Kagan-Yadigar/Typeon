@@ -231,28 +231,28 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_notifyNetworkChanged(_env: 
 
 /// See api `set_tor_transport`. Kotlin calls it right before `startNetwork`, with `nativeLibraryDir` as `ptDir`.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_setTorTransport<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, mode: JString<'local>, bridges: JString<'local>, pt_dir: JString<'local>, always_bridge: jboolean) -> jstring {
-    let mode = jstr(&mut env, &mode).unwrap_or_default();
-    let bridges = jstr(&mut env, &bridges).unwrap_or_default();
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_setTorTransport<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, snowflake: JString<'local>, obfs4: JString<'local>, pt_dir: JString<'local>, always_bridge: jboolean) -> jstring {
+    let snowflake = jstr(&mut env, &snowflake).unwrap_or_default();
+    let obfs4 = jstr(&mut env, &obfs4).unwrap_or_default();
     let pt_dir = jstr(&mut env, &pt_dir).unwrap_or_default();
-    let out = crate::api::set_tor_transport(&mode, &bridges, &pt_dir, always_bridge != 0);
+    let out = crate::api::set_tor_transport(&snowflake, &obfs4, &pt_dir, always_bridge != 0);
     safe_new_jstring(&mut env, out)
 }
 
 /// See api `validate_bridge_lines`: "OK" or "Error: line N: ...".
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_validateBridgeLines<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, text: JString<'local>) -> jstring {
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_validateBridgeLines<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, text: JString<'local>, transport: JString<'local>) -> jstring {
     let text = jstr(&mut env, &text).unwrap_or_default();
-    let out = crate::api::validate_bridge_lines(&text);
+    let transport = jstr(&mut env, &transport).unwrap_or_default();
+    let out = crate::api::validate_bridge_lines(&text, &transport);
     safe_new_jstring(&mut env, out)
 }
 
 /// See api `tor_transport_available`.
 #[no_mangle]
-pub extern "system" fn Java_com_p2p_messenger_P2PLib_torTransportAvailable<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, mode: JString<'local>, pt_dir: JString<'local>) -> jboolean {
-    let mode = jstr(&mut env, &mode).unwrap_or_default();
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_torTransportAvailable<'local>(mut env: JNIEnv<'local>, _class: JClass<'local>, pt_dir: JString<'local>) -> jboolean {
     let pt_dir = jstr(&mut env, &pt_dir).unwrap_or_default();
-    crate::api::tor_transport_available(&mode, &pt_dir) as jboolean
+    crate::api::tor_transport_available(&pt_dir) as jboolean
 }
 
 /// See api `tor_bridge_in_use`.

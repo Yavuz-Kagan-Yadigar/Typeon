@@ -46,12 +46,12 @@ object P2PLib {
      *  Tor status is monitored with `torStatus()`. Changing this setting requires restarting the network layer (a transport cannot be added to a live swarm). */
     external fun startNetwork(nodeMode: Boolean, torEnabled: Boolean): String
     external fun setNodeMode(enabled: Boolean)
-    /** Tor connection for the next `startNetwork`: mode "direct" / "snowflake" / "obfs4" (+ bridge lines). `ptDir` = nativeLibraryDir. "OK" or "Error: ...". */
-    external fun setTorTransport(mode: String, bridges: String, ptDir: String, alwaysBridge: Boolean): String
-    /** "OK", or "Error: line N: ..." for the first bad obfs4 bridge line. */
-    external fun validateBridgeLines(text: String): String
-    /** The PT binary for [mode] ships in this APK (liblyrebird.so in [ptDir]: obfs4 + snowflake). */
-    external fun torTransportAvailable(mode: String, ptDir: String): Boolean
+    /** Tor bridges for the next `startNetwork` (the user's lines, empty = built-in). `ptDir` = nativeLibraryDir. "OK" or "Error: ...". */
+    external fun setTorTransport(snowflake: String, obfs4: String, ptDir: String, alwaysBridge: Boolean): String
+    /** "OK", or "Error: line N: ..." for the first bad line of `transport` ("obfs4" / "snowflake"). */
+    external fun validateBridgeLines(text: String, transport: String): String
+    /** The PT binary ships in this APK (liblyrebird.so in [ptDir]: obfs4 + snowflake). */
+    external fun torTransportAvailable(ptDir: String): Boolean
     /** Tor runs over the configured bridge (Snowflake / obfs4) because Direct was blocked. False = Direct. */
     external fun torBridgeInUse(): Boolean
     /** The history and attachment storage limit slider (100 MB to 32 GB) in Settings. It applies only while node mode is on (see Rust

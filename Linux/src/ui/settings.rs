@@ -572,31 +572,22 @@ thread_local!(static REBUILDING: std::cell::Cell<bool> = const { std::cell::Cell
 /// Tor connection mode: Direct, Snowflake or pasted obfs4 bridges. Read at network start only, so a change
 /// applies after a restart (same as the Tor switch). A mode whose PT binary is not shipped cannot be picked.
 fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
-    let modes: [(&'static str, &'static str); 3] = [
-        ("direct", t("Direct")),
-        ("snowflake", t("Snowflake (only if Tor is blocked)")),
-        ("obfs4", t("Bridges (obfs4, only if Tor is blocked)")),
-    ];
-    // A bridge mode is a fallback (core `tor::watch_bridge_fallback`): Direct first, the bridge after a minute without Tor.
-    let describe = {
-        let app = app.clone();
-        move || {
-            let now = if app.prefs.borrow().tor_mode == "direct" {
-                ""
-            } else if core::tor_bridge_in_use() {
-                t("Now: using the bridge, Tor was blocked.")
-            } else {
-                t("Now: Direct.")
-            };
-            let base = t("Snowflake and bridges are used only when Tor is blocked. They use more battery and data than Direct.");
-            format!("{base} {now}").trim_end().to_string()
-        }
+    // The bridges are a fallback (core `tor::watch_bridge_fallback`): Direct first, a bridge after a minute without Tor.
+    let describe = || {
+        let base = t("Bridges are a fallback and always ready: Typeon tries Direct first and uses a bridge only when Tor is blocked.");
+        let now = if !core::tor_transport_available() {
+            t("Not available in this build")
+        } else if core::tor_bridge_in_use() {
+            t("Now: using the bridge, Tor was blocked.")
+        } else {
+            t("Now: Direct.")
+        };
+        format!("{base} {now}")
     };
-    let group = adw::PreferencesGroup::builder().title(t("Tor connection")).description(describe()).build();
+    let group = adw::PreferencesGroup::builder().title(t("Tor bridges")).description(describe()).build();
     // Live "Now:" while the group is on screen: the refresh starts on map and stops once it is unmapped or gone.
     group.connect_map(move |group| {
         let weak = group.downgrade();
-        let describe = describe.clone();
         glib::timeout_add_seconds_local(2, move || match weak.upgrade() {
             Some(group) if group.is_mapped() => {
                 group.set_description(Some(&describe()));
@@ -605,61 +596,56 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
             _ => glib::ControlFlow::Break,
         });
     });
-    let labels: Vec<String> = modes
-        .iter()
-        .map(|(mode, label)| {
-            if core::tor_transport_available(mode) { label.to_string() } else { tf!("{} (not available in this build)", label) }
-        })
-        .collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let combo = adw::ComboRow::builder().title(t("Mode")).build();
-    combo.set_model(Some(&gtk::StringList::new(&labels)));
-    let (current, stored_bridges) = {
-        let prefs = app.prefs.borrow();
-        (prefs.tor_mode.clone(), prefs.tor_bridges.clone())
-    };
-    let current_index = modes.iter().position(|(m, _)| *m == current).unwrap_or(0) as u32;
-    combo.set_selected(current_index);
-    group.add(&combo);
 
-    let buffer = gtk::TextBuffer::new(None);
-    buffer.set_text(&stored_bridges);
-    let text = gtk::TextView::builder()
-        .buffer(&buffer)
-        .monospace(true)
-        .wrap_mode(gtk::WrapMode::WordChar)
-        .top_margin(6)
-        .bottom_margin(6)
-        .left_margin(6)
-        .right_margin(6)
-        .build();
-    let scroll = gtk::ScrolledWindow::builder().child(&text).min_content_height(110).build();
-    scroll.add_css_class("card");
-    let error = gtk::Label::builder().xalign(0.0).wrap(true).visible(false).build();
-    error.add_css_class("error");
-    let save = gtk::Button::builder().label(t("Save bridges")).halign(gtk::Align::End).build();
-    save.add_css_class("suggested-action");
     let hint = gtk::Label::builder()
-        .label(t("Get your own bridges at <a href=\"https://bridges.torproject.org/options\">bridges.torproject.org</a> and paste them below, one per line. Left empty, Tor's built-in public bridges are used."))
+        .label(t("One bridge per line. A box left empty uses Tor's built-in bridges. Get your own at <a href=\"https://bridges.torproject.org/options\">bridges.torproject.org</a>."))
         .use_markup(true)
         .wrap(true)
         .xalign(0.0)
         .build();
     hint.add_css_class("dim-label");
-    let editor = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).build();
+    let editor = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
     editor.append(&hint);
-    editor.append(&scroll);
+    let bridge_box = |title: &str, stored: &str| {
+        let label = gtk::Label::builder().label(title).xalign(0.0).margin_top(6).build();
+        let buffer = gtk::TextBuffer::new(None);
+        buffer.set_text(stored);
+        let text = gtk::TextView::builder()
+            .buffer(&buffer)
+            .monospace(true)
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .top_margin(6)
+            .bottom_margin(6)
+            .left_margin(6)
+            .right_margin(6)
+            .build();
+        let scroll = gtk::ScrolledWindow::builder().child(&text).min_content_height(90).build();
+        scroll.add_css_class("card");
+        editor.append(&label);
+        editor.append(&scroll);
+        buffer
+    };
+    let (snowflake, obfs4) = {
+        let prefs = app.prefs.borrow();
+        (
+            bridge_box(t("Snowflake bridges"), &prefs.tor_snowflake_bridges),
+            bridge_box(t("obfs4 bridges"), &prefs.tor_bridges),
+        )
+    };
+    let error = gtk::Label::builder().xalign(0.0).wrap(true).visible(false).build();
+    error.add_css_class("error");
+    let save = gtk::Button::builder().label(t("Save bridges")).halign(gtk::Align::End).build();
+    save.add_css_class("suggested-action");
     editor.append(&error);
     editor.append(&save);
-    editor.set_visible(current == "obfs4");
     group.add(&editor);
 
-    // Off: Direct first, the bridge only once Direct is blocked. On: the network never sees a Direct Tor attempt.
+    // Off: Direct first, a bridge only once Direct is blocked. On: the network never sees a Direct Tor attempt.
     let always = adw::SwitchRow::builder()
         .title(t("Always use the bridge"))
         .subtitle(t("Never try Direct first. Use this where using Tor itself is risky. Uses more battery and data."))
         .active(app.prefs.borrow().tor_always_bridge)
-        .visible(current != "direct")
+        .margin_top(12)
         .build();
     {
         let app = app.clone();
@@ -676,60 +662,27 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
     }
     group.add(&always);
 
-    let store = {
-        let app = app.clone();
-        move |mode: &str, bridges: Option<String>| {
-            let mut prefs = app.prefs.borrow_mut();
-            if prefs.tor_mode == mode && !bridges.as_ref().is_some_and(|b| *b != prefs.tor_bridges) {
-                return;
-            }
-            prefs.tor_mode = mode.to_string();
-            if let Some(b) = bridges {
-                prefs.tor_bridges = b;
-            }
-            prefs.save();
-            drop(prefs);
-            app.toast(t("Tor connection applies after a restart."));
-        }
-    };
-    {
-        let (app, editor, store, always) = (app.clone(), editor.clone(), store.clone(), always.clone());
-        let reverting = Rc::new(Cell::new(false));
-        combo.connect_selected_notify(move |row| {
-            if reverting.replace(false) {
-                return;
-            }
-            let (mode, label) = modes[(row.selected() as usize).min(modes.len() - 1)];
-            if !core::tor_transport_available(mode) {
-                app.toast(&tf!("{} is not available in this build.", label));
-                let back = modes.iter().position(|(m, _)| *m == app.prefs.borrow().tor_mode).unwrap_or(0) as u32;
-                if back != row.selected() {
-                    reverting.set(true);
-                    row.set_selected(back);
-                }
-                return;
-            }
-            editor.set_visible(mode == "obfs4");
-            always.set_visible(mode != "direct");
-            // obfs4 is stored by "Save bridges", once the lines are checked.
-            if mode != "obfs4" {
-                store(mode, None);
-            }
-        });
-    }
+    let app = app.clone();
     save.connect_clicked(move |_| {
-        let lines = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_string();
-        // Empty: Tor's built-in obfs4 bridges (core `OBFS4_BUILTIN_BRIDGES`).
-        match if lines.is_empty() { Ok(()) } else { core::validate_bridge_lines(&lines) } {
-            Ok(()) => {
-                error.set_visible(false);
-                store("obfs4", Some(lines));
-            }
-            Err(e) => {
-                error.set_label(&tf!("Invalid bridge: {}", e));
+        let read = |buffer: &gtk::TextBuffer| buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_string();
+        let (snowflake, obfs4) = (read(&snowflake), read(&obfs4));
+        for (name, lines, transport) in [("Snowflake", &snowflake, "snowflake"), ("obfs4", &obfs4, "obfs4")] {
+            if let Err(e) = core::validate_bridge_lines(lines, transport) {
+                error.set_label(&tf!("Invalid bridge: {}", format!("{name}: {e}")));
                 error.set_visible(true);
+                return;
             }
         }
+        error.set_visible(false);
+        let mut prefs = app.prefs.borrow_mut();
+        if prefs.tor_snowflake_bridges == snowflake && prefs.tor_bridges == obfs4 {
+            return;
+        }
+        prefs.tor_snowflake_bridges = snowflake;
+        prefs.tor_bridges = obfs4;
+        prefs.save();
+        drop(prefs);
+        app.toast(t("Tor connection applies after a restart."));
     });
     group
 }
