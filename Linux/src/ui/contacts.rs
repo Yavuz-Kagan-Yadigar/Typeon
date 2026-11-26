@@ -7,13 +7,14 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::core;
+use crate::i18n::t;
 use crate::ui::dialogs;
 use crate::ui::window::{Conversation, MainUi};
 use crate::util;
 
 pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     let search = gtk::SearchEntry::builder()
-        .placeholder_text("Search contacts")
+        .placeholder_text(t("Search contacts"))
         .margin_top(6)
         .margin_bottom(6)
         .margin_start(12)
@@ -27,10 +28,10 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
 
     let empty = adw::StatusPage::builder()
         .icon_name("contact-new-symbolic")
-        .title("No contacts")
+        .title(t("No contacts"))
         .description(
-            "Contacts pair face to face. Use \"My contact code\" in the menu and have the other \
-             person scan or paste it — or paste theirs with \"Add contact\".",
+            t("Contacts pair face to face. Use \"My contact code\" in the menu and have the other \
+             person scan or paste it — or paste theirs with \"Add contact\"."),
         )
         .build();
 
@@ -46,7 +47,7 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     stack.add_named(&empty, Some("empty"));
 
     let add = gtk::Button::builder()
-        .label("Add contact")
+        .label(t("Add contact"))
         .margin_top(6)
         .margin_bottom(6)
         .margin_start(12)
@@ -193,11 +194,11 @@ fn build_row(
     let ready = !fingerprint.is_empty();
 
     let subtitle = if !ready {
-        "Pairing not finished yet".to_string()
+        t("Pairing not finished yet").to_string()
     } else if contact.added_via_group {
         // Vouched for by a group founder rather than verified face to face —
         // worth saying out loud, since the whole trust model here is TOFU.
-        "Added through a group · not verified in person".to_string()
+        t("Added through a group · not verified in person").to_string()
     } else {
         util::short_fingerprint(&contact.identity_id)
     };
@@ -217,15 +218,15 @@ fn build_row(
     if contact.added_via_group {
         let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
         warning.set_tooltip_text(Some(
-            "This contact was introduced by a group founder. Verify their safety number in \
-             person before treating it as authenticated.",
+            t("This contact was introduced by a group founder. Verify their safety number in \
+             person before treating it as authenticated."),
         ));
         row.add_suffix(&warning);
     }
 
     let revoke = gtk::Button::builder()
         .icon_name("action-unavailable-symbolic")
-        .tooltip_text("Revoke this contact's current device")
+        .tooltip_text(t("Revoke this contact's current device"))
         .valign(gtk::Align::Center)
         .build();
     revoke.add_css_class("flat");
@@ -242,14 +243,14 @@ fn build_row(
             let refresh = refresh.clone();
             dialogs::confirm(
                 &app,
-                "Revoke this device?",
-                &format!(
+                t("Revoke this device?"),
+                &tf!(
                     "Stops accepting anything from {}'s current device — for example if they \
                      told you it was stolen. The contact and history stay; they can re-pair \
                      from a new device.",
                     name
                 ),
-                "Revoke",
+                t("Revoke"),
                 true,
                 move || {
                     let app_inner = app_inner.clone();
@@ -260,7 +261,7 @@ fn build_row(
                         move || core::revoke_contact_device(&contact_id, &device),
                         move |result| {
                             match result {
-                                Ok(()) => app_inner.toast("Device revoked."),
+                                Ok(()) => app_inner.toast(t("Device revoked.")),
                                 Err(error) => app_inner.toast(&error),
                             }
                             refresh();
@@ -277,7 +278,7 @@ fn build_row(
     if blocked {
         let unblock = gtk::Button::builder()
             .icon_name("object-select-symbolic")
-            .tooltip_text("Unblock this person")
+            .tooltip_text(t("Unblock this person"))
             .valign(gtk::Align::Center)
             .build();
         unblock.add_css_class("flat");
@@ -291,7 +292,7 @@ fn build_row(
             crate::app::run_in_background(
                 move || core::unblock_identity(&identity_id),
                 move |()| {
-                    app.toast("Unblocked.");
+                    app.toast(t("Unblocked."));
                     refresh();
                 },
             );
@@ -300,7 +301,7 @@ fn build_row(
     } else {
         let block = gtk::Button::builder()
             .icon_name("avatar-default-symbolic")
-            .tooltip_text("Block this person")
+            .tooltip_text(t("Block this person"))
             .valign(gtk::Align::Center)
             .build();
         block.add_css_class("flat");
@@ -314,13 +315,13 @@ fn build_row(
             let refresh = refresh.clone();
             dialogs::confirm(
                 &app,
-                "Block this person?",
-                &format!(
+                t("Block this person?"),
+                &tf!(
                     "No message or file from any device of {} will be accepted, and nothing \
                      will be sent to them. You can unblock them later from this list.",
                     name
                 ),
-                "Block",
+                t("Block"),
                 true,
                 move || {
                     let app_inner = app_inner.clone();
@@ -330,7 +331,7 @@ fn build_row(
                         move || core::block_identity(&identity_id),
                         move |result| {
                             match result {
-                                Ok(()) => app_inner.toast("Blocked."),
+                                Ok(()) => app_inner.toast(t("Blocked.")),
                                 Err(error) => app_inner.toast(&error),
                             }
                             refresh();
@@ -348,7 +349,7 @@ fn build_row(
     if contact.added_via_group {
         let trust = gtk::Button::builder()
             .icon_name("security-high-symbolic")
-            .tooltip_text("Mark as verified in person")
+            .tooltip_text(t("Mark as verified in person"))
             .valign(gtk::Align::Center)
             .build();
         trust.add_css_class("flat");
@@ -366,13 +367,13 @@ fn build_row(
             let contact_id = contact_id.clone();
             let refresh = refresh.clone();
             let body = if safety_code.is_empty() {
-                format!(
+                tf!(
                     "You met {} through a group, not face to face. Only do this if you have \
                      confirmed their security code another way.",
                     name
                 )
             } else {
-                format!(
+                tf!(
                     "You met {} through a group, not face to face.\n\nSecurity code: {}\n\n\
                      Compare it with them over a different channel — a call, or in person. \
                      If it matches, the keys are genuinely theirs.",
@@ -381,9 +382,9 @@ fn build_row(
             };
             dialogs::confirm(
                 &app,
-                "Mark as verified?",
+                t("Mark as verified?"),
                 &body,
-                "Mark verified",
+                t("Mark verified"),
                 false,
                 move || {
                     let app_inner = app_inner.clone();
@@ -393,7 +394,7 @@ fn build_row(
                         move || core::trust_contact(&contact_id),
                         move |result| {
                             match result {
-                                Ok(()) => app_inner.toast("Marked as verified."),
+                                Ok(()) => app_inner.toast(t("Marked as verified.")),
                                 Err(error) => app_inner.toast(&error),
                             }
                             refresh();

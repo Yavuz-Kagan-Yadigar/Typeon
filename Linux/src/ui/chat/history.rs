@@ -73,7 +73,7 @@ impl ChatView {
         };
         let before = self.order.borrow().first().map(|(key, _)| *key).unwrap_or(0);
         self.fetch_history.set_sensitive(false);
-        self.fetch_history.set_label("Requested…");
+        self.fetch_history.set_label(t("Requested…"));
         let view = self.clone();
         crate::app::run_in_background(
             move || core::fetch_server_history(&chat_key, is_group, before as i64),
@@ -125,7 +125,7 @@ impl ChatView {
 
     pub(super) fn reset_fetch_history(&self) {
         self.fetch_history.set_sensitive(true);
-        self.fetch_history.set_label(FETCH_HISTORY_LABEL);
+        self.fetch_history.set_label(fetch_history_label());
     }
 
     pub(super) fn load_older(self: &Rc<Self>) {

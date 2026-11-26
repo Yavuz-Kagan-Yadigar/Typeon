@@ -6,6 +6,7 @@
 //! so copying the data directory to another machine or account gets an
 //! attacker nothing on its own — the same property the Linux wallet gives.
 
+use crate::i18n::t;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{LocalFree, HLOCAL};
@@ -28,7 +29,7 @@ impl Backend {
     pub fn display_name(self) -> &'static str {
         match self {
             Backend::Dpapi => "Windows Data Protection",
-            Backend::Unknown => "the system keyring",
+            Backend::Unknown => t("the system keyring"),
         }
     }
 }
@@ -39,14 +40,15 @@ pub enum Unavailable {
 
 impl Unavailable {
     pub fn heading(&self) -> String {
-        "Windows Data Protection is not working".to_string()
+        t("Windows Data Protection is not working").to_string()
     }
 
     pub fn detail(&self) -> String {
         let Unavailable::Broken(error) = self;
-        format!(
+        tf!(
             "Typeon keeps this device's secret keys sealed with Windows Data Protection \
-             (DPAPI) and will not run without it.\n\nDetails: {error}"
+             (DPAPI) and will not run without it.\n\nDetails: {}",
+            error
         )
     }
 }
@@ -76,17 +78,17 @@ pub fn load_key(data_dir: &str) -> Result<Option<[u8; 32]>, String> {
     let sealed = match std::fs::read(key_path(data_dir)) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("could not read the vault key: {error}")),
+        Err(error) => return Err(tf!("could not read the vault key: {}", error)),
     };
-    let mut secret = unprotect(&sealed).map_err(|error| format!("could not open the vault key: {error}"))?;
+    let mut secret = unprotect(&sealed).map_err(|error| tf!("could not open the vault key: {}", error))?;
     let key: Result<[u8; 32], String> =
-        secret.as_slice().try_into().map_err(|_| "the stored vault key is not 32 bytes".to_string());
+        secret.as_slice().try_into().map_err(|_| t("the stored vault key is not 32 bytes").to_string());
     secret.zeroize();
     key.map(Some)
 }
 
 pub fn store_key(data_dir: &str, key: &[u8; 32]) -> Result<(), String> {
-    let sealed = protect(key).map_err(|error| format!("could not seal the vault key: {error}"))?;
+    let sealed = protect(key).map_err(|error| tf!("could not seal the vault key: {}", error))?;
     crate::secrets::write_private(&key_path(data_dir), &sealed)
 }
 
@@ -94,7 +96,7 @@ pub fn store_key(data_dir: &str, key: &[u8; 32]) -> Result<(), String> {
 pub fn delete_key(data_dir: &str) -> Result<(), String> {
     match std::fs::remove_file(key_path(data_dir)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            Err(format!("could not remove the vault key: {error}"))
+            Err(tf!("could not remove the vault key: {}", error))
         }
         _ => Ok(()),
     }

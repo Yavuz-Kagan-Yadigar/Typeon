@@ -21,6 +21,7 @@
 //! forgetting the passphrase loses the device — that is what re-linking from
 //! the phone is for.
 
+use crate::i18n::t;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -97,12 +98,12 @@ impl Vault {
 
     fn decode(raw: &[u8]) -> Result<Self, String> {
         if raw.len() < 4 {
-            return Err("vault body truncated".into());
+            return Err(t("vault body truncated").into());
         }
         let bundle_len = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as usize;
         let key_start = 4 + bundle_len;
         if raw.len() < key_start + 64 {
-            return Err("vault body truncated".into());
+            return Err(t("vault body truncated").into());
         }
         let mut history_key = [0u8; 32];
         let mut skipped_key = [0u8; 32];
@@ -172,7 +173,7 @@ pub fn save(dir: &Path, vault: &Vault, passphrase: &str) -> Result<(), String> {
         let mut body = vault.encode();
         let result = cipher
             .encrypt(Nonce::from_slice(&nonce_bytes), body.as_ref())
-            .map_err(|_| "vault encryption failed".to_string());
+            .map_err(|_| t("vault encryption failed").to_string());
         body.zeroize();
         key.zeroize();
         result?
@@ -193,11 +194,11 @@ pub fn save(dir: &Path, vault: &Vault, passphrase: &str) -> Result<(), String> {
 pub fn load(dir: &Path, passphrase: &str) -> Result<Vault, String> {
     let raw = std::fs::read(vault_path(dir)).map_err(|e| e.to_string())?;
     if raw.len() < HEADER_LEN || &raw[..MAGIC.len()] != MAGIC {
-        return Err("not a Typeon vault file".into());
+        return Err(t("not a Typeon vault file").into());
     }
     let mode = raw[MAGIC.len()];
     if mode != MODE_WALLET && mode != MODE_WALLET_PASSPHRASE {
-        return Err("unsupported vault format".into());
+        return Err(t("unsupported vault format").into());
     }
     let salt = &raw[MAGIC.len() + 1..MAGIC.len() + 1 + SALT_LEN];
     let nonce_bytes = &raw[MAGIC.len() + 1 + SALT_LEN..HEADER_LEN];
@@ -205,7 +206,7 @@ pub fn load(dir: &Path, passphrase: &str) -> Result<Vault, String> {
 
     let profile = dir.to_string_lossy().to_string();
     let wallet_key = keyring::load_key(&profile)?.map(Zeroizing::new).ok_or_else(|| {
-        format!(
+        tf!(
             "{} no longer holds this device's vault key. Without it the vault cannot be opened \
              — link this computer to your account again.",
             keyring_name()
@@ -221,9 +222,9 @@ pub fn load(dir: &Path, passphrase: &str) -> Result<Vault, String> {
             // neither should the message.
             .map_err(|_| {
                 if mode == MODE_WALLET_PASSPHRASE {
-                    "wrong passphrase, or the vault file is damaged".to_string()
+                    t("wrong passphrase, or the vault file is damaged").to_string()
                 } else {
-                    "the vault file is damaged, or was sealed by a different wallet".to_string()
+                    t("the vault file is damaged, or was sealed by a different wallet").to_string()
                 }
             });
         key.zeroize();
@@ -358,8 +359,8 @@ fn remember_archive_seal(vault: &Vault) {
 }
 
 fn archive_cipher() -> Result<ChaCha20Poly1305, String> {
-    let key = (*ARCHIVE_SEAL.lock().unwrap_or_else(|e| e.into_inner())).ok_or("the vault is not open")?;
-    ChaCha20Poly1305::new_from_slice(&key).map_err(|_| "bad archive key".to_string())
+    let key = (*ARCHIVE_SEAL.lock().unwrap_or_else(|e| e.into_inner())).ok_or(t("the vault is not open"))?;
+    ChaCha20Poly1305::new_from_slice(&key).map_err(|_| t("bad archive key").to_string())
 }
 
 /// Reads the stored archive root key. `Ok(None)` only when no file exists;
@@ -371,7 +372,7 @@ pub fn load_archive_key(dir: &Path) -> Result<Option<[u8; 32]>, String> {
         Err(e) => return Err(e.to_string()),
     };
     if raw.len() < ARCHIVE_MAGIC.len() + NONCE_LEN + 32 || !raw.starts_with(ARCHIVE_MAGIC) {
-        return Err("the archive key file is damaged".into());
+        return Err(t("the archive key file is damaged").into());
     }
     let cipher = archive_cipher()?;
     let nonce_start = ARCHIVE_MAGIC.len();
@@ -379,11 +380,11 @@ pub fn load_archive_key(dir: &Path) -> Result<Option<[u8; 32]>, String> {
     let nonce = Nonce::from_slice(&raw[nonce_start..body_start]);
     let plain = cipher
         .decrypt(nonce, &raw[body_start..])
-        .map_err(|_| "the archive key file cannot be opened".to_string())?;
+        .map_err(|_| t("the archive key file cannot be opened").to_string())?;
     plain
         .try_into()
         .map(Some)
-        .map_err(|_| "the archive key file is damaged".to_string())
+        .map_err(|_| t("the archive key file is damaged").to_string())
 }
 
 pub fn store_archive_key(dir: &Path, key: &[u8; 32]) -> Result<(), String> {
@@ -391,7 +392,7 @@ pub fn store_archive_key(dir: &Path, key: &[u8; 32]) -> Result<(), String> {
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, key.as_slice()).map_err(|_| "archive key seal failed")?;
+    let ciphertext = cipher.encrypt(nonce, key.as_slice()).map_err(|_| t("archive key seal failed"))?;
 
     let mut out = Vec::with_capacity(ARCHIVE_MAGIC.len() + NONCE_LEN + ciphertext.len());
     out.extend_from_slice(ARCHIVE_MAGIC);
@@ -421,7 +422,7 @@ pub fn ensure_archive_key(dir: &Path) -> Result<[u8; 32], String> {
         return Ok(key);
     }
     if crate::core::is_secondary_device() {
-        return Err("waiting for the archive key from your other device; try again once it has synced".to_string());
+        return Err(t("waiting for the archive key from your other device; try again once it has synced").to_string());
     }
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);

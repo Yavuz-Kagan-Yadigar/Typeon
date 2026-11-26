@@ -16,6 +16,7 @@ use gtk::glib;
 
 use crate::app::{run_in_background, App, Event};
 use crate::core;
+use crate::i18n::t;
 
 const WIDTH: f64 = 1600.0;
 const HEIGHT: f64 = 1000.0;
@@ -233,28 +234,28 @@ impl Board {
 
         let toggle = gtk::ToggleButton::builder()
             .icon_name("document-edit-symbolic")
-            .tooltip_text("Whiteboard")
+            .tooltip_text(t("Whiteboard"))
             .build();
-        let pen = gtk::ToggleButton::builder().icon_name("document-edit-symbolic").tooltip_text("Pen").active(true).build();
-        let eraser = gtk::ToggleButton::builder().icon_name("edit-clear-symbolic").tooltip_text("Eraser").build();
+        let pen = gtk::ToggleButton::builder().icon_name("document-edit-symbolic").tooltip_text(t("Pen")).active(true).build();
+        let eraser = gtk::ToggleButton::builder().icon_name("edit-clear-symbolic").tooltip_text(t("Eraser")).build();
         eraser.set_group(Some(&pen));
         let mut swatches: Vec<gtk::ToggleButton> = Vec::new();
         for _ in 0..3 {
-            let swatch = gtk::ToggleButton::builder().label("⬤").tooltip_text("Colour").build();
+            let swatch = gtk::ToggleButton::builder().label("⬤").tooltip_text(t("Colour")).build();
             if let Some(first) = swatches.first() {
                 swatch.set_group(Some(first));
             }
             swatches.push(swatch);
         }
         swatches[1].set_active(true);
-        let undo_button = gtk::Button::builder().icon_name("edit-undo-symbolic").tooltip_text("Undo").sensitive(false).build();
-        let redo_button = gtk::Button::builder().icon_name("edit-redo-symbolic").tooltip_text("Redo").sensitive(false).build();
+        let undo_button = gtk::Button::builder().icon_name("edit-undo-symbolic").tooltip_text(t("Undo")).sensitive(false).build();
+        let redo_button = gtk::Button::builder().icon_name("edit-redo-symbolic").tooltip_text(t("Redo")).sensitive(false).build();
         let root = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideDown)
             .reveal_child(false)
             .build();
 
-        let window = gtk::Window::builder().title("Whiteboard").default_width(960).default_height(720).build();
+        let window = gtk::Window::builder().title(t("Whiteboard")).default_width(960).default_height(720).build();
         window.set_application(Some(&app.application));
         window.set_child(Some(&root));
         let inner = Rc::new(Inner {
@@ -352,14 +353,14 @@ impl Inner {
         column.append(&self.area);
 
         let pages = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
-        let prev = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text("Previous page").build();
-        let next = gtk::Button::builder().icon_name("go-next-symbolic").tooltip_text("Next page").build();
+        let prev = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text(t("Previous page")).build();
+        let next = gtk::Button::builder().icon_name("go-next-symbolic").tooltip_text(t("Next page")).build();
         let size = gtk::Scale::with_range(gtk::Orientation::Horizontal, 1.0, MAX_PEN_WIDTH as f64, 1.0);
         size.set_value(DEFAULT_PEN_WIDTH as f64);
         size.set_draw_value(false);
         size.set_hexpand(true);
-        size.set_tooltip_text(Some("Pen size"));
-        let pdf = gtk::Button::builder().label("PDF").tooltip_text("Save this page as PDF").build();
+        size.set_tooltip_text(Some(t("Pen size")));
+        let pdf = gtk::Button::builder().label("PDF").tooltip_text(t("Save this page as PDF")).build();
         pages.append(&prev);
         pages.append(&self.page_label);
         pages.append(&next);
@@ -667,7 +668,7 @@ impl Inner {
                     }
                 }
                 if let Err(error) = &result {
-                    me.app.toast(&format!("Could not draw: {}", error));
+                    me.app.toast(&tf!("Could not draw: {}", error));
                     me.style_history();
                 }
                 if reload {
@@ -904,7 +905,7 @@ impl Inner {
     fn update_unread(&self) {
         let unseen = self.state.borrow().unread != 0;
         self.toggle
-            .set_tooltip_text(Some(if unseen { "Whiteboard — new drawing" } else { "Whiteboard" }));
+            .set_tooltip_text(Some(if unseen { t("Whiteboard — new drawing") } else { t("Whiteboard") }));
         if unseen {
             self.toggle.add_css_class("accent");
         } else {
@@ -960,7 +961,7 @@ impl Inner {
             (st.strokes.clone(), st.names.len().max(2), st.page)
         };
         let dialog = gtk::FileDialog::builder().modal(false)
-            .title("Save whiteboard page")
+            .title(t("Save whiteboard page"))
             .initial_name(format!("whiteboard-{}.pdf", page as u32 + 1))
             .build();
         let window = anchor.root().and_downcast::<gtk::Window>();
@@ -986,7 +987,7 @@ impl Inner {
             if !ok {
                 let _ = std::fs::remove_file(&path);
             }
-            me.app.toast(if ok { "Page saved as PDF" } else { "Could not save the PDF" });
+            me.app.toast(if ok { t("Page saved as PDF") } else { t("Could not save the PDF") });
         });
     }
 }

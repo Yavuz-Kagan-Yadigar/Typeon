@@ -1,0 +1,676 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon</string>
+    <string name="action_settings">Ajustes</string>
+    <string name="action_scan_qr">Escanear QR</string>
+    <string name="action_show_qr">Mi QR</string>
+    <string name="action_new_chat">Nuevo chat</string>
+    <string name="hint_message">Mensaje</string>
+    <string name="btn_send">Enviar</string>
+    <!-- Texto visible del botón Enviar; btn_send se mantiene como contentDescription para accesibilidad. -->
+    <string name="lbl_send_symbol">»</string>
+    <string name="action_scroll_to_bottom">Ir al final</string>
+    <string name="lbl_language">Idioma</string>
+    <string name="lbl_identity_code">Código de identidad</string>
+    <string name="lbl_device_fingerprint">Huella del dispositivo</string>
+    <string name="lbl_node_address">Dirección del nodo</string>
+    <string name="lbl_copy">Copiar</string>
+    <string name="lbl_copied">¡Copiado!</string>
+    <string name="msg_no_contacts">Aún no hay contactos. Escanea un código QR o añádelo manualmente para empezar.</string>
+    <string name="hint_search_chats">Buscar chats y grupos</string>
+    <string name="hint_search_messages">Buscar mensajes</string>
+    <string name="action_search_messages">Buscar</string>
+    <string name="action_search_prev">Coincidencia anterior</string>
+    <string name="action_search_next">Siguiente coincidencia</string>
+    <string name="lbl_search_no_matches">Sin coincidencias</string>
+    <string name="msg_security_warning">¡Advertencia de seguridad: se ha detectado un dispositivo no verificado!</string>
+    <string name="msg_device_added">Nuevo dispositivo añadido por</string>
+    <string name="msg_read">Visto</string>
+    <string name="title_chats">Chats</string>
+    <string name="title_contacts">Contactos</string>
+    <string name="title_settings">Ajustes</string>
+    <string name="title_group_chats">Grupos</string>
+    <string name="lbl_create_group">Crear grupo</string>
+    <string name="lbl_group_name">Nombre del grupo</string>
+    <string name="lbl_members">Miembros</string>
+    <string name="lbl_add_member">Añadir miembro</string>
+    <string name="lbl_leave_group">Salir del grupo</string>
+    <string name="lbl_verify_identity">Verificar identidad</string>
+    <string name="lbl_safety_number">Número de seguridad</string>
+    <string name="lbl_node_mode">Modo nodo</string>
+    <string name="lbl_node_mode_desc">Ayuda a otros a conectarse reenviando su tráfico cifrado. No puede leer ningún contenido. Pero usa tus datos de internet y tu ancho de banda, y puede ver quién se conecta a través de ti.</string>
+    <string name="lbl_history_storage_limit">Límite de almacenamiento de adjuntos</string>
+    <string name="lbl_history_storage_limit_desc">Con el modo nodo activado, tu dispositivo guarda cada archivo que pasa por él. Cuando el total supera este límite, se borran primero los archivos más antiguos.</string>
+    <string name="lbl_relay_address">Dirección de relé conocida</string>
+    <string name="lbl_relay_address_desc">Solo hace falta cuando dos personas en redes distintas se conectan por primera vez. Pega la dirección de un dispositivo de confianza con el modo nodo activado, o la de tu propio dispositivo.</string>
+    <string name="lbl_relay_address_hint">/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…</string>
+    <string name="action_add_relay_address">Añadir</string>
+    <string name="msg_relay_address_added">Dirección de relé añadida</string>
+    <!-- Servidores (almacenar y reenviar) -->
+    <string name="lbl_servers">Servidores</string>
+    <string name="lbl_servers_desc">Un servidor guarda tus mensajes mientras la otra persona está desconectada y se los entrega cuando vuelve a conectarse. No puede leerlos, porque siguen cifrados.</string>
+    <string name="action_add_server">Escanear QR del servidor</string>
+    <string name="action_add_server_paste">Pegar código</string>
+    <string name="dlg_add_server_title">Añadir servidor</string>
+    <string name="dlg_add_server_hint">typeon-server:/dns/…onion/tcp/…/p2p/…#token</string>
+    <string name="lbl_display_name">Nombre de la cuenta</string>
+    <string name="lbl_display_name_desc">El nombre que ven tus contactos. Si lo cambias, tus contactos se actualizan automáticamente. Quien esté desconectado lo recibirá al volver a conectarse.</string>
+    <string name="action_change_display_name">Cambiar nombre</string>
+    <string name="dlg_change_display_name_title">Nombre de la cuenta</string>
+    <string name="msg_display_name_changed">Nombre cambiado. Se está avisando a tus contactos.</string>
+    <string name="msg_contact_renamed">%1$s cambió su nombre a %2$s</string>
+    <string name="msg_server_added">Servidor añadido. Conectando…</string>
+    <string name="msg_join_link_confirm">¿Añadir este servidor?\n\n%1$s</string>
+    <string name="msg_join_link_needs_identity">Crea primero tu cuenta y luego vuelve a abrir el enlace.</string>
+    <string name="lbl_app_version">Versión %1$s</string>
+    <string name="msg_server_removed">Servidor eliminado</string>
+    <string name="lbl_server_route">Enviar mensajes a través de este servidor</string>
+    <string name="lbl_server_history">Guardar el historial en este servidor</string>
+    <string name="lbl_server_history_warn">Permite que un dispositivo nuevo cargue tus mensajes antiguos. A diferencia de los mensajes en directo, esta copia de seguridad no tiene secreto hacia adelante: quien obtenga la clave del archivo podrá leer todo lo subido hasta ahora.</string>
+    <string name="msg_server_history_upload">Tus mensajes recientes se subirán a él, sellados para que el servidor no pueda leerlos.</string>
+    <string name="action_remove_server">Quitar</string>
+    <string name="confirm_remove_server">¿Quitar el servidor %1$s? Para volver a unirte necesitarás su código de acceso.</string>
+    <string name="state_server_connected">Conectado</string>
+    <string name="state_server_connecting">Conectando…</string>
+    <string name="state_server_not_enrolled">No registrado</string>
+    <string name="action_restore_history">Cargar mi historial desde este servidor</string>
+    <string name="msg_restore_started">Cargando. Los mensajes antiguos aparecerán según vayan llegando.</string>
+    <string name="error_key_unreadable">No se pudo leer una clave guardada. El historial de mensajes y el estado de la sesión no se están guardando en este dispositivo.</string>
+    <string name="msg_restore_incomplete">El servidor no envió todo el historial. Inténtalo más tarde.</string>
+
+    <!-- Servicio onion de Tor -->
+    <!-- Un contacto añadido a través de un grupo y avalado por el fundador aún no se ha verificado en persona con un código QR. -->
+    <string name="contact_added_via_group">Añadido mediante un grupo — no verificado en persona</string>
+
+    <!-- El fundador puede eliminar el grupo para todos. -->
+    <string name="action_delete_group">Eliminar grupo (para todos)</string>
+    <string name="confirm_delete_group">Este grupo se eliminará para TODOS los miembros y no se puede deshacer. ¿Seguro?</string>
+    <string name="msg_group_deleted">Grupo eliminado</string>
+    <string name="action_leave_group">Salir del grupo</string>
+    <string name="confirm_leave_group">Saldrás de este grupo y necesitarás que te inviten de nuevo para volver a entrar. ¿Seguro?</string>
+    <string name="msg_left_group">Has salido del grupo</string>
+    <string name="status_no_internet">Sin conexión a internet</string>
+    <string name="status_unknown">Estado desconocido</string>
+    <string name="status_tor_bootstrapping">Conectando mediante Tor…</string>
+    <string name="status_tor_failed">Falló la conexión con Tor — reintentando…</string>
+    <string name="status_connected_tor">Conectado mediante Tor</string>
+    <string name="status_connected_tor_node">Conectado mediante Tor (Nodo)</string>
+    <string name="status_connected_node">Conectado (Nodo)</string>
+    <string name="status_connected">Conectado</string>
+    <string name="status_reconnecting">Reconectando…</string>
+
+    <!-- Vista previa de adjuntos en la lista de chats. -->
+    <string name="lbl_last_photo">📷 Foto</string>
+    <string name="lbl_last_sticker">🙂 Sticker</string>
+    <string name="lbl_last_video">🎬 Vídeo</string>
+    <string name="lbl_last_voice">🎤 Mensaje de voz</string>
+    <string name="lbl_last_file">📎 Archivo</string>
+    <!-- Contador de tiempo de descarga. -->
+    <string name="lbl_eta_seconds">~%d s restantes</string>
+    <string name="lbl_eta_minutes">~%1$d min %2$d s restantes</string>
+
+    <string name="lbl_tor">Accesibilidad mediante Tor</string>
+    <string name="lbl_tor_desc">La mayoría de las redes móviles y domésticas no te dan una IP fija (estática). Actívalo para llegar a personas en otras redes. Consume algo de batería y la primera conexión tarda unos segundos. La otra persona también debe tenerlo activado. Reinicia la app después de cambiarlo.</string>
+    <string name="tor_status_disabled">Tor: desactivado</string>
+    <string name="tor_status_bootstrapping">Tor: conectando…</string>
+    <string name="tor_status_ready">Tor: listo — la dirección .onion está activa</string>
+    <string name="tor_status_failed">Tor: error (consulta el registro)</string>
+    <string name="lbl_tor_connection">Conexión Tor</string>
+    <string name="action_tor_mode">Cambiar</string>
+    <string name="tor_mode_direct">Directa</string>
+    <string name="tor_mode_snowflake">Snowflake (solo si Tor está bloqueado)</string>
+    <string name="tor_mode_obfs4">Puentes (obfs4, solo si Tor está bloqueado)</string>
+    <string name="tor_mode_unavailable">No disponible en esta versión</string>
+    <string name="tor_state_direct">Ahora: Directa</string>
+    <string name="tor_state_bridge">Ahora: usando un puente, porque Tor estaba bloqueado</string>
+    <string name="msg_tor_bridges_help">Consigue tus propios puentes en https://bridges.torproject.org/options y pégalos abajo. Si lo dejas vacío, se usan los puentes públicos integrados de Tor.</string>
+    <string name="hint_tor_bridges">Pega las líneas de puentes obfs4, una por línea</string>
+    <string name="msg_tor_mode_restart">Snowflake y los puentes solo se usan cuando Tor está bloqueado: la app intenta primero Directa y cambia tras un minuto sin Tor. Consumen más batería que Directa. La app se reinicia para aplicar un cambio.</string>
+    <string name="msg_tor_bridges_invalid">Puente no válido: %1$s</string>
+    <string name="tor_restart_needed">Reinicia la app para que este cambio surta efecto</string>
+    <string name="action_tor_reconnect">Reconectar Tor / red</string>
+    <string name="title_tor_reconnect">¿Reconectar la red?</string>
+    <string name="msg_tor_reconnect">Esto reinicia la app para desconectar y volver a conectar la capa de red (incluido Tor, si está activado). Se perderá cualquier borrador sin enviar.</string>
+    <string name="action_reconnect">Reconectar</string>
+
+    <!-- Vinculación copiando y pegando en lugar de con QR, y compartir la dirección de relé. Ver ContactsFragment. -->
+    <string name="action_copy_manual_code">Copiar mi código</string>
+    <string name="action_copy_own_address">Copiar mi dirección</string>
+    <string name="msg_manual_code_copied">Código de vinculación copiado — pégalo en «Añadir manualmente» de la otra persona</string>
+    <string name="msg_own_address_copied">Dirección copiada — pégala en «Añadir manualmente» de la otra persona</string>
+    <string name="error_address_not_ready">La dirección aún no está lista, inténtalo de nuevo en unos instantes</string>
+    <string name="lbl_key_security">Seguridad de las claves</string>
+    <string name="lbl_keys_hardware_backed">✓ Tus claves están protegidas por el hardware de seguridad del dispositivo (StrongBox/TEE)</string>
+    <string name="lbl_keys_software_backed">⚠ Tus claves están protegidas solo por software (este dispositivo no tiene módulo de seguridad hardware)</string>
+    <string name="lbl_recovery_export">Recuperación de identidad</string>
+    <string name="lbl_recovery_export_desc">Guarda un archivo protegido con contraseña con todas tus claves. Es la única forma de recuperar tu cuenta si pierdes este teléfono. Guárdalo sin conexión, por ejemplo en una memoria USB. Quien tenga este archivo y su contraseña puede hacerse pasar por ti. Un historial muy grande solo conserva los mensajes más recientes.</string>
+    <string name="action_export_recovery">Exportar archivo de recuperación…</string>
+    <string name="lbl_recovery_password">Contraseña</string>
+    <string name="lbl_recovery_password_confirm">Confirmar contraseña</string>
+    <string name="error_recovery_password_mismatch">Las contraseñas no coinciden</string>
+    <string name="error_recovery_password_empty">Introduce una contraseña</string>
+    <string name="msg_recovery_exporting">Exportando archivo de recuperación…</string>
+    <string name="msg_recovery_export_success">Archivo de recuperación guardado</string>
+    <string name="msg_recovery_export_trimmed">Archivo de recuperación guardado. Era demasiado grande: solo contiene los %1$d mensajes más recientes</string>
+    <string name="error_recovery_export_failed">No se pudo exportar el archivo de recuperación</string>
+
+    <!-- Lo contrario de exportar: restaurar desde un archivo de recuperación (ver MainActivity importRecoveryFrom). -->
+    <string name="action_restore_from_recovery">Restaurar desde archivo de recuperación</string>
+    <string name="lbl_recovery_import_desc">Introduce la contraseña que usaste al exportar este archivo de recuperación.</string>
+    <string name="msg_recovery_importing">Restaurando identidad…</string>
+    <string name="msg_recovery_import_success">Identidad restaurada</string>
+    <string name="lbl_text_scale">Tamaño del texto</string>
+    <string name="lbl_ui_scale">Tamaño de la interfaz</string>
+    <string name="lbl_font_family">Tipografía</string>
+    <string name="lbl_scale_percent">%1$d%%</string>
+    <string name="lbl_font_default">Predeterminada</string>
+    <string name="lbl_font_sans_medium">Sans Medium</string>
+    <string name="lbl_font_sans_condensed">Sans Condensed</string>
+    <string name="lbl_font_serif">Serif</string>
+    <string name="lbl_font_monospace">Monoespaciada</string>
+    <string name="lbl_font_sans_black">Sans Black</string>
+    <string name="lbl_font_import">Importar un archivo .ttf…</string>
+    <string name="lbl_font_custom">Personalizada</string>
+    <string name="lbl_chat_appearance">Apariencia</string>
+    <string name="lbl_chat_bg_color">Color de fondo</string>
+    <string name="lbl_accent_color">Color de acento</string>
+    <string name="lbl_chat_wallpaper">Fondo de pantalla</string>
+    <string name="action_choose">Elegir</string>
+    <string name="action_reset">Restablecer</string>
+    <string name="action_choose_wallpaper">Elegir imagen</string>
+    <string name="lbl_wallpaper_blur">Desenfoque del fondo</string>
+    <string name="lbl_wallpaper_darkness">Oscuridad del fondo</string>
+    <string name="action_remove_wallpaper">Quitar</string>
+    <string name="title_pick_bg_color">Elige un color de fondo</string>
+    <string name="title_pick_accent_color">Elige un color de acento</string>
+    <string name="content_desc_color_swatch">Muestra de color</string>
+    <string name="content_desc_chat_wallpaper_preview">Vista previa del fondo</string>
+    <string name="lbl_enable_notifications">Activar notificaciones</string>
+    <string name="lbl_backup_identity">Copia de seguridad de la identidad</string>
+    <string name="lbl_recovery_file">Archivo de recuperación</string>
+    <string name="lbl_download">Descargar</string>
+    <string name="lbl_status_online">En línea</string>
+    <string name="lbl_status_offline">Desconectado</string>
+    <string name="lbl_typing">escribiendo...</string>
+    <string name="lbl_typing_named">%s está escribiendo...</string>
+    <string name="lbl_typing_several">Varias personas están escribiendo...</string>
+    <string name="error_camera_permission">Se necesita permiso de cámara</string>
+    <string name="error_network">Error de red. Comprueba tu conexión.</string>
+    <string name="error_send_failed">No se pudo enviar el mensaje</string>
+    <!-- Se muestra cuando initiate_handshake_with falla de forma permanente, por ejemplo porque los datos de la clave están dañados o son incompatibles, o porque un lado usa una versión antigua de la app o parámetros criptográficos distintos. Ver ChatActivity handshake_failed. -->
+    <string name="error_handshake_incompatible">No se puede conectar con este contacto — formato de clave incompatible. Probablemente un lado usa otra versión de la app. Prueba a eliminar el contacto y vincularlo de nuevo.</string>
+    <string name="confirm_revoke_device">¿Seguro que quieres revocar este dispositivo? Seguirá en tu lista de contactos, pero ya no podrás enviar ni recibir mensajes desde él. El historial no se borra.</string>
+    <string name="confirm_block_contact">¿Bloquear este contacto?</string>
+
+    <string name="lbl_edited">(editado)</string>
+    <string name="lbl_synced">(del historial sincronizado)</string>
+    <string name="lbl_relayed_unverified">Reenviado por %1$s · no verificado</string>
+    <string name="lbl_you">Tú</string>
+    <string name="lbl_today">Hoy</string>
+    <string name="lbl_yesterday">Ayer</string>
+    <string name="msg_reply_target_not_loaded">El mensaje original no está cargado — desplázate hacia arriba para encontrarlo</string>
+    <string name="lbl_sent_at">(enviado a las: %s)</string>
+    <!-- Los mensajes recibidos muestran la hora local de recepción y la hora real de envío. %1$s es la hora de recepción, %2$s la de envío. -->
+    <string name="lbl_received_sent_at">%1$s (enviado a las: %2$s)</string>
+    <string name="title_pending_messages">Mensajes pendientes</string>
+    <string name="action_view_pending_messages">Mensajes pendientes</string>
+    <string name="msg_no_pending_messages">No hay mensajes esperando confirmación de entrega</string>
+    <string name="action_cancel_pending_message">Cancelar</string>
+    <string name="action_retry_pending_message">Reintentar ahora</string>
+    <string name="msg_pending_message_retrying">Reintentando…</string>
+    <string name="lbl_pending_last_attempt">Último intento: %s</string>
+    <string name="msg_pending_message_cancelled">Cancelado — ya no se reintenta</string>
+    <!-- Pantalla de gestión de almacenamiento (Ajustes, Almacenamiento): uso total, tamaño de adjuntos por chat y borrado de adjuntos uno a uno. -->
+    <string name="title_storage">Almacenamiento</string>
+    <string name="action_view_storage">Almacenamiento</string>
+    <string name="storage_total">Total</string>
+    <string name="storage_database">Base de datos</string>
+    <string name="storage_attachments">Adjuntos</string>
+    <string name="storage_decrypted_cache">Caché descifrada</string>
+    <string name="action_clear_decrypted_cache">Vaciar caché descifrada</string>
+    <string name="msg_decrypted_cache_cleared">Caché descifrada vaciada</string>
+    <string name="storage_chats_header">Chats</string>
+    <string name="storage_no_chats">Aún no hay adjuntos</string>
+    <string name="storage_files_count">%1$d archivos · %2$s</string>
+    <string name="storage_no_attachments">No hay adjuntos en este chat</string>
+    <string name="action_select_all">Seleccionar todo</string>
+    <string name="action_delete_selected">Eliminar seleccionados</string>
+    <string name="action_files_media">Archivos y multimedia</string>
+    <string name="storage_delete_confirm_title">¿Eliminar los adjuntos seleccionados?</string>
+    <string name="storage_delete_confirm_message">Solo se borra la copia de este dispositivo. No se avisa al remitente: los adjuntos se pueden volver a descargar.</string>
+    <string name="msg_attachments_removed">%1$d adjunto(s) eliminado(s) de este dispositivo</string>
+    <string name="storage_attachment_type">%1$s · %2$s</string>
+    <string name="msg_storage_load_failed">No se pudo leer la información de almacenamiento</string>
+    <string name="content_desc_attachment_preview">Vista previa del adjunto</string>
+    <string name="msg_deleted">Este mensaje se ha eliminado</string>
+    <string name="msg_connecting">Conectando…</string>
+    <string name="msg_securing_no_send">Protegiendo la conexión con este contacto — podrás enviar mensajes cuando esté lista.</string>
+    <string name="msg_wait_secure_connection">Espera a que termine de configurarse la conexión segura.</string>
+    <string name="action_edit_message">Editar</string>
+    <string name="action_delete_message">Eliminar</string>
+    <!-- Reenviar un mensaje fallido (icono ERROR). En el menú de mantener pulsado solo aparece en los mensajes fallidos. -->
+    <string name="action_resume_download">Reanudar</string>
+    <string name="action_retry_message">Reintentar</string>
+    <string name="action_resend_message">Reenviar</string>
+    <string name="msg_resend_nothing">Ya entregado, no hay nada que reenviar</string>
+    <string name="msg_retrying_message">Reintentando…</string>
+    <string name="confirm_delete_message">¿Seguro que quieres eliminar este mensaje?</string>
+    <string name="lbl_edit_message_hint">Editar mensaje</string>
+
+    <string name="title_groups">Grupos</string>
+    <string name="msg_no_groups">Aún no has creado ningún grupo.</string>
+    <string name="action_create_group">Crear grupo</string>
+    <string name="lbl_new_group_name_hint">Nombre del grupo</string>
+    <string name="lbl_add_member_to_group">Añadir miembro</string>
+    <string name="lbl_manage_members">Gestionar miembros</string>
+    <string name="lbl_founder_badge">%1$s (Fundador)</string>
+    <string name="action_remove_member">Quitar</string>
+    <string name="confirm_remove_member">¿Quitar a %1$s del grupo?</string>
+    <string name="msg_member_removed">Miembro eliminado</string>
+    <string name="msg_no_contacts_to_add">No hay contactos que añadir — añade primero un contacto.</string>
+    <string name="msg_voice_not_supported_in_groups">Los mensajes de voz aún no son compatibles en los chats de grupo</string>
+
+    <plurals name="lbl_member_count">
+        <item quantity="one">%d miembro</item>
+        <item quantity="many">%d miembros</item>
+        <item quantity="other">%d miembros</item>
+    </plurals>
+
+    <string name="content_desc_attach_file">Adjuntar archivo</string>
+    <string name="msg_attachment_downloading">Descargando…</string>
+    <string name="msg_attachment_failed">Error en la descarga</string>
+    <string name="error_attachment_open_failed">No se pudo abrir el archivo</string>
+    <!-- %1$s = detalle del error del núcleo o del sistema. -->
+    <string name="error_with_message">Error: %1$s</string>
+
+    <string name="action_save_to_downloads">Guardar en Descargas</string>
+    <string name="action_save_as_jxl">Guardar como JPEG XL</string>
+    <string name="action_copy_image">Copiar imagen</string>
+    <string name="msg_saved_to_downloads">Guardado en Descargas/P2P</string>
+    <string name="action_open_with">Abrir con…</string>
+    <string name="lbl_open_with_chooser">Abrir con</string>
+    <string name="lbl_attachment_reply_preview">📎 %1$s</string>
+
+    <!-- Menú de mantener pulsado en la lista de chats. -->
+    <string name="action_clear_chat_history">Vaciar historial del chat</string>
+    <string name="confirm_clear_chat_history">Se borrará el historial local de este chat (mensajes y adjuntos). El contacto se mantiene en tu lista. ¿Seguro?</string>
+    <string name="action_delete_contact">Eliminar contacto</string>
+    <string name="confirm_delete_contact_step1">¿Seguro que quieres eliminar este contacto? También se borrará el historial del chat.</string>
+    <string name="confirm_delete_contact_step2">Esta acción NO SE PUEDE DESHACER: tendrás que volver a escanear su código QR para escribirle. ¿Eliminar de todos modos?</string>
+    <string name="msg_chat_history_cleared">Historial del chat vaciado</string>
+    <string name="msg_contact_deleted">Contacto eliminado</string>
+    <!-- Corrección de auditoría de seguridad: quitar un dispositivo solo lo marca como no confiable, sin borrar el contacto (ver revoke_contact_device en Rust). -->
+    <string name="action_revoke_device">Revocar este dispositivo</string>
+    <string name="msg_device_revoked">Dispositivo revocado — ya no se aceptarán mensajes de este contacto</string>
+
+    <!-- Grabación de mensajes de voz. -->
+    <string name="content_desc_record_voice">Grabar mensaje de voz</string>
+    <string name="msg_recording_voice">Desliza para cancelar ▷</string>
+    <string name="msg_recording_cancelled">Grabación cancelada</string>
+    <string name="error_recording_failed">No se pudo iniciar la grabación de audio</string>
+
+    <!-- Foto de perfil. -->
+    <string name="content_desc_profile_picture">Foto de perfil</string>
+    <string name="lbl_profile_picture">Foto de perfil</string>
+    <string name="lbl_profile_picture_desc">Tus contactos ven esta foto en la lista de chats</string>
+    <string name="action_change_picture">Cambiar foto</string>
+    <string name="action_remove_picture">Quitar foto</string>
+
+    <!-- Control de velocidad de reproducción para los reproductores de vídeo y audio. -->
+    <string name="lbl_playback_speed">Velocidad</string>
+
+    <!-- Cadenas que antes estaban fijas en MainActivity/ContactsFragment/QrScanActivity/fragment_*.xml. -->
+    <string name="hint_username">Nombre de usuario</string>
+    <string name="title_welcome">Bienvenido</string>
+    <string name="msg_enter_username">Escribe un nombre de usuario para crear tu identidad.</string>
+    <string name="action_create">Crear</string>
+    <string name="msg_identity_read_failed">No se pudieron leer las claves de identidad. Si tienes un archivo de recuperación, quizá tengas que usarlo.</string>
+    <string name="error_identity_persist_failed">No se pudieron guardar las claves de identidad. La configuración volverá a empezar — si tienes un archivo de recuperación, quizá tengas que usarlo.</string>
+    <!-- %s = los primeros 8 caracteres del nuevo ID de identidad. -->
+    <string name="lbl_id_short">ID: %s…</string>
+    <!-- %s = código corto de identidad. -->
+    <string name="lbl_id_code">ID: %s</string>
+    <string name="title_reliable_delivery">Entrega fiable de mensajes</string>
+    <string name="msg_battery_optimization">La optimización de batería de Android puede retrasar la entrega de mensajes en segundo plano y los reintentos de esta app. Permite que funcione sin restricciones de batería para la experiencia más fiable. Se puede cambiar más tarde en los ajustes del sistema.</string>
+    <string name="action_open_settings">Abrir ajustes</string>
+    <string name="action_not_now">Ahora no</string>
+    <string name="title_security_warning_dialog">Advertencia de seguridad</string>
+    <string name="lbl_unknown">Desconocido</string>
+    <!-- %1$s = nombre del contacto (aparece dos veces), %2$s = código corto del nuevo dispositivo. -->
+    <string name="msg_new_device_warning">Se ha detectado un dispositivo NUEVO y NO VERIFICADO de %1$s.\n\nCódigo del nuevo dispositivo: %2$s\n\nNo aceptes este cambio sin verificarlo con %1$s por otro canal (llamada telefónica o en persona).</string>
+    <string name="action_verified_accept">Lo he verificado, aceptar</string>
+    <string name="action_reject">Rechazar</string>
+    <string name="msg_connection_not_complete">La conexión aún no está completa, inténtalo de nuevo en unos instantes</string>
+    <string name="title_add_manually">Añadir manualmente</string>
+    <string name="action_add">Añadir</string>
+    <string name="msg_added">Añadido</string>
+    <!-- %s = mensaje de la excepción del sistema. -->
+    <string name="error_camera_start_failed">No se pudo iniciar la cámara: %s</string>
+    <string name="msg_connected">Conectado</string>
+    <!-- %s = nombre del archivo. -->
+    <string name="error_file_too_large_named">%s: supera el límite de 4 GB</string>
+    <string name="action_add_contact_qr">Añadir contacto con QR</string>
+    <!-- Etiqueta del portapapeles para el código de vinculación. -->
+    <string name="lbl_clipboard_pairing_code">Código de vinculación de Typeon</string>
+    <string name="lbl_scan_qr_instructions">Escanea el código QR para conectar</string>
+    <string name="lbl_initializing">Iniciando…</string>
+
+    <string name="lbl_time_just_now">Ahora mismo</string>
+    <string name="lbl_time_minutes_ago">hace %d min</string>
+    <string name="lbl_time_hours_ago">hace %d h</string>
+    <string name="lbl_time_days_ago">hace %d d</string>
+
+    <string name="action_pin_chat">Fijar chat</string>
+    <string name="action_unpin_chat">Desfijar chat</string>
+
+    <!-- Multidispositivo (especificación 1.5, 1.6, 1.7): vincular un dispositivo secundario. -->
+    <string name="linked_devices_section_title">Dispositivos vinculados</string>
+    <string name="linked_devices_section_desc">Usa esta cuenta en varios dispositivos. Cada dispositivo tiene sus propias claves. Los mensajes se envían a todos tus dispositivos activos.</string>
+    <string name="linked_devices_manage">Gestionar dispositivos / Añadir un dispositivo</string>
+    <string name="linked_devices_add">Añadir un dispositivo (escanear)</string>
+    <string name="linked_devices_this_device">este dispositivo</string>
+    <string name="linked_devices_revoked">revocado</string>
+    <string name="linked_devices_confirm_forget">¿Quitar de la lista este dispositivo revocado? Seguirá revocado.</string>
+    <string name="action_remove_from_list">Quitar de la lista</string>
+    <string name="linked_devices_confirm_revoke">¿Revocar este dispositivo vinculado? Ya no podrá enviar ni recibir mensajes como esta cuenta.</string>
+
+    <!-- Cerrar sesión en la cuenta (borra los datos locales). -->
+    <string name="logout_section_title">Cerrar sesión</string>
+    <string name="logout_section_desc">Quita esta cuenta de este dispositivo. Los mensajes, contactos y claves guardados aquí se borran de forma permanente. Tus otros dispositivos y las copias de tus mensajes en poder de otras personas no se ven afectados.</string>
+    <string name="action_logout">Cerrar sesión</string>
+    <string name="logout_confirm_title">¿Cerrar sesión?</string>
+    <string name="logout_confirm_message">Esto borra todos los mensajes, contactos y claves locales de este dispositivo. Si no has exportado un archivo de recuperación, esta cuenta no se podrá recuperar en este dispositivo. No se puede deshacer.</string>
+    <string name="action_logout_confirm">Cerrar sesión y borrar</string>
+    <string name="action_delete_account">Eliminar cuenta</string>
+    <string name="delete_account_confirm_title">¿Eliminar tu cuenta?</string>
+    <string name="delete_account_confirm_message">A todos tus contactos y grupos se les avisará de que esta cuenta se ha eliminado, y ya no podrán enviarte mensajes. Tus dispositivos vinculados también se borrarán. Los mensajes, contactos y claves locales se eliminan. No se puede deshacer.</string>
+    <string name="msg_deleting_account">Avisando a tus contactos…</string>
+    <string name="error_delete_account_failed">No se pudo avisar a tus contactos. La cuenta no se ha eliminado; inténtalo de nuevo cuando haya conexión.</string>
+    <string name="external_open_title">¿Abrir fuera de Typeon?</string>
+    <string name="external_open_message">La app que abre este archivo está fuera de Typeon y de Tor. Puede cargar contenido de internet y revelar tu dirección IP.</string>
+    <string name="external_open_continue">Abrir de todos modos</string>
+    <string name="delete_account_pending_message">Aún no han llegado a tus contactos %1$d aviso(s) de eliminación. ¿Seguir esperando o eliminar de todos modos?</string>
+    <string name="delete_account_keep_waiting">Seguir esperando</string>
+    <string name="delete_account_anyway">Eliminar de todos modos</string>
+    <string name="msg_contact_deleted_account">%1$s eliminó su cuenta</string>
+    <string name="notif_contact_deleted_account_hidden">Un contacto eliminó su cuenta</string>
+    <string name="msg_account_deleted_no_send">Esta persona eliminó su cuenta. Ya no se pueden enviar mensajes.</string>
+    <string name="device_unlinked_notification">Este dispositivo se desvinculó de tu cuenta. Sus datos locales se han borrado.</string>
+
+    <string name="link_device_as_secondary">Vincular a una cuenta existente</string>
+    <string name="link_device_title">Vincular este dispositivo</string>
+    <string name="link_device_instructions">En tu otro dispositivo (el principal), abre Ajustes → Dispositivos vinculados → «Añadir un dispositivo (escanear)» y escanea el código de abajo. Mantén esta pantalla abierta hasta que termine la vinculación.</string>
+    <string name="link_device_waiting">Esperando a que tu otro dispositivo escanee…</string>
+    <string name="link_device_network_not_ready">La red aún no está lista. Comprueba que tienes conexión e inténtalo de nuevo.</string>
+    <string name="link_device_success">Este dispositivo ya está vinculado a tu cuenta.</string>
+    <string name="link_device_confirm">¿Vincular este dispositivo a tu cuenta? Recibirá tus contactos, grupos e historial.\n\n%1$s\n%2$s</string>
+    <string name="link_device_approved">Nuevo dispositivo añadido a tu cuenta.</string>
+    <string name="error_group_update_rejected">Se rechazó una actualización del grupo enviada por el fundador y no se aplicó.</string>
+    <string name="action_block">Bloquear</string>
+    <string name="action_unblock">Desbloquear</string>
+    <string name="action_trust_contact">Marcar como verificado</string>
+    <string name="msg_identity_blocked">Bloqueado. No llegará nada de esta persona hasta que la desbloquees.</string>
+    <string name="msg_identity_unblocked">Desbloqueado.</string>
+    <string name="msg_contact_trusted">Marcado como verificado.</string>
+    <!-- %1$s = nombre, %2$s = código corto del dispositivo. -->
+    <string name="notif_new_device_warning">%1$s está escribiendo desde un dispositivo que no has verificado (%2$s). Toca para revisarlo.</string>
+    <string name="confirm_block_title">¿Bloquear a esta persona?</string>
+    <string name="confirm_block_body">No se aceptará ningún mensaje ni archivo de ningún dispositivo de %1$s. Puedes desbloquearla más tarde desde el menú de su contacto, o volviendo a vincularla en persona.</string>
+    <string name="confirm_trust_title">¿Marcar como verificado?</string>
+    <string name="confirm_trust_body">Conociste a %1$s a través de un grupo, no en persona. Hazlo solo si has confirmado su código de seguridad por otro medio.</string>
+    <string name="action_transfer_founder">Transferir la propiedad</string>
+    <string name="msg_founder_transferred">Propiedad del grupo transferida.</string>
+    <string name="confirm_transfer_founder">¿Ceder la propiedad del grupo a %1$s? Ya no podrás añadir ni quitar miembros, ni cambiar el nombre y la foto.</string>
+    <string name="lbl_safety_code">Código de seguridad: %1$s\n\nCompáralo con esa persona por otro canal: una llamada o en persona. Si coincide, las claves son realmente suyas.</string>
+
+    <!-- Captura instantánea (cámara). Ver ui.CameraCaptureActivity. -->
+    <string name="content_desc_take_photo">Hacer una foto</string>
+    <string name="action_capture_photo">Hacer foto</string>
+    <string name="action_flip_camera">Cambiar de cámara</string>
+    <string name="action_retake_photo">Repetir</string>
+
+    <!-- Mostrar u ocultar el texto de los mensajes en las notificaciones. -->
+    <string name="lbl_notif_show_message">Mostrar mensajes en las notificaciones</string>
+    <string name="lbl_notif_show_message_desc">Si está desactivado, las notificaciones solo dicen «Nuevo mensaje». El remitente y el texto quedan ocultos.</string>
+
+    <!-- Contraseña de bloqueo de la app. -->
+    <string name="lbl_app_lock_section">Contraseña de la app</string>
+    <string name="lbl_app_lock_section_desc">Se pide cada vez que abres la app. Puedes cambiar la contraseña, pero no quitarla.</string>
+    <string name="action_change_app_password">Cambiar contraseña</string>
+    <string name="title_app_lock_create">Crea una contraseña</string>
+    <string name="msg_app_lock_create">Esta contraseña cifra tus claves y mensajes en este dispositivo. Si la olvidas, nada de este dispositivo se podrá volver a abrir. Guarda un archivo de recuperación.</string>
+    <string name="title_app_lock_unlock">Introduce tu contraseña</string>
+    <string name="msg_app_lock_unlock">Introduce la contraseña de la app para continuar.</string>
+    <string name="hint_app_lock_password">Contraseña</string>
+    <string name="hint_app_lock_password_confirm">Confirmar contraseña</string>
+    <string name="hint_app_lock_current">Contraseña actual</string>
+    <string name="hint_app_lock_new">Contraseña nueva</string>
+    <string name="action_app_lock_save">Guardar</string>
+    <string name="action_app_lock_unlock">Desbloquear</string>
+    <string name="error_app_lock_empty">La contraseña no puede estar vacía.</string>
+    <string name="error_app_lock_mismatch">Las dos contraseñas no coinciden.</string>
+    <string name="error_app_lock_wrong">Contraseña incorrecta.</string>
+    <string name="error_app_lock_wait">Demasiados intentos fallidos. Inténtalo de nuevo en %1$d s.</string>
+    <string name="msg_app_lock_changed">Contraseña cambiada.</string>
+
+    <!-- Reacciones con emoji en los mensajes. -->
+    <string name="title_pick_reaction">Reaccionar</string>
+    <string name="action_react">Reaccionar</string>
+    <string name="action_remove_reaction">Quitar mi reacción</string>
+    <string name="title_reactions">Reacciones</string>
+    <string name="title_seen_by">Visto por</string>
+    <string name="title_attachment_caption">Añadir un pie de foto</string>
+    <string name="hint_attachment_caption">Pie de foto (opcional)</string>
+    <string name="attachment_hi_res">Sin pérdida</string>
+    <string name="image_edit_revert">Original</string>
+    <string name="image_edit_undo">Revertir</string>
+    <string name="image_edit_rotate_left">Girar a la izquierda</string>
+    <string name="image_edit_rotate_right">Girar a la derecha</string>
+    <string name="image_edit_crop">Recortar</string>
+    <string name="image_edit_apply_crop">Aplicar recorte</string>
+    <string name="image_edit_pen">Lápiz</string>
+    <string name="image_edit_blur">Difuminar</string>
+    <string name="image_edit_color">Color del lápiz</string>
+    <string name="image_edit_size">Tamaño</string>
+    <string name="image_edit_no_memory">No hay memoria suficiente para esta edición</string>
+    <string name="image_edit_save_failed">No se pudo guardar la edición</string>
+    <!-- %1$d × %2$d = tamaño reducido de la imagen. -->
+    <string name="image_edit_reduced">Editando a %1$d × %2$d para caber en memoria</string>
+    <!-- Encabezados de sección de la pantalla de ajustes -->
+    <string name="settings_section_profile">Perfil</string>
+    <string name="settings_section_privacy">Privacidad y seguridad</string>
+    <string name="settings_section_network">Red y conexión</string>
+    <string name="settings_section_devices">Dispositivos y mensajes</string>
+    <string name="settings_section_account">Cuenta</string>
+    <string name="settings_advanced">Avanzado</string>
+    <string name="action_open">Abrir</string>
+    <string name="msg_group_gone">Este grupo ya no está disponible</string>
+    <string name="msg_full_screen_intent">Para mostrar las llamadas entrantes en la pantalla de bloqueo, Typeon necesita el permiso «Notificaciones a pantalla completa». Abre el ajuste y permítelo.</string>
+    <string name="desc_syncing">Actualizando</string>
+    <string name="msg_background_restricted">Typeon tiene restringida la ejecución en segundo plano, así que los mensajes y las llamadas no pueden llegar con la pantalla apagada. Abre los ajustes de la app y pon Batería en «Sin restricciones».</string>
+    <!-- Llamadas -->
+    <string name="action_voice_call">Llamada de voz</string>
+    <string name="action_video_call">Videollamada</string>
+    <string name="action_attend_call">Atender</string>
+    <string name="call_calling">Llamando…</string>
+    <string name="call_incoming_voice">Llamada de voz entrante</string>
+    <string name="call_incoming_video">Videollamada entrante</string>
+    <string name="call_connecting">Conectando…</string>
+    <string name="call_accept">Responder</string>
+    <string name="call_decline">Rechazar</string>
+    <string name="call_hangup">Colgar</string>
+    <string name="call_state_on">Activado</string>
+    <string name="call_state_off">Silenciado</string>
+    <string name="call_mute">Silenciar</string>
+    <string name="call_unmute">Activar micrófono</string>
+    <string name="call_speaker">Altavoz</string>
+    <string name="call_device_default">Predeterminado del sistema</string>
+    <string name="call_device_phone_mic">Micrófono del teléfono</string>
+    <string name="call_device_wired">Auriculares con cable</string>
+    <string name="call_pick_mic">Micrófono</string>
+    <string name="call_pick_output">Salida de audio</string>
+    <string name="call_earpiece">Auricular</string>
+    <string name="call_camera_off">Cámara desactivada</string>
+    <string name="call_camera_on">Cámara activada</string>
+    <string name="call_ended">Llamada finalizada</string>
+    <string name="call_rejected">Llamada rechazada</string>
+    <string name="call_busy">Ocupado</string>
+    <string name="call_no_answer">Sin respuesta</string>
+    <string name="call_missed">Llamada perdida</string>
+    <string name="call_via_p2p">directa</string>
+    <string name="call_via_server">a través del servidor</string>
+    <string name="call_audio_failing">no llega audio</string>
+    <string name="call_mic_failing">micrófono no disponible</string>
+    <string name="call_waiting_media">esperando medios</string>
+    <string name="call_needs_android10">Las llamadas requieren Android 10 o una versión posterior</string>
+    <string name="call_permission_needed">Se necesita permiso de micrófono (y de cámara para las videollamadas)</string>
+    <string name="call_channel_name">Llamadas</string>
+    <string name="call_notification_title">Llamada de Typeon</string>
+    <string name="msg_share_pick_chat">Elige un chat al que compartir</string>
+    <string name="action_whiteboard">Pizarra</string>
+    <string name="whiteboard_prev_page">Página anterior</string>
+    <string name="whiteboard_next_page">Página siguiente</string>
+    <string name="whiteboard_pen">Lápiz</string>
+    <string name="whiteboard_eraser">Borrador</string>
+    <string name="whiteboard_color">Color</string>
+    <string name="whiteboard_export_pdf">Exportar como PDF</string>
+    <string name="whiteboard_page_full">Esta página está llena. Borra algo o usa otra página.</string>
+    <string name="whiteboard_pdf_saved">Pizarra guardada como PDF</string>
+    <string name="whiteboard_pdf_failed">No se pudo guardar el PDF</string>
+    <string name="whiteboard_undo">Deshacer</string>
+    <string name="whiteboard_redo">Rehacer</string>
+    <string name="whiteboard_pen_size">Grosor del lápiz</string>
+    <string name="msg_primary_device_only">Solo el dispositivo principal puede añadir un dispositivo.</string>
+    <string name="lbl_material_you">Material You (colores del sistema)</string>
+    <string name="lbl_text_color">Color del texto</string>
+    <string name="title_pick_text_color">Elige un color de texto</string>
+    <string name="call_pip">PiP</string>
+    <string name="msg_primary_device_only_delete">Solo el dispositivo principal puede eliminar la cuenta.</string>
+    <string name="msg_open_link_warning">%1$s\n\nEste enlace se abre en tu navegador, fuera de Tor. El sitio verá tu dirección IP real.</string>
+    <string name="confirm_send_shared">¿Enviar %1$d archivo(s) a %2$s?</string>
+    <string name="error_app_lock_short">La contraseña necesita al menos %1$d caracteres.</string>
+    <string name="channel_unlock">Desbloquear</string>
+    <string name="title_overlay_permission">Pedir la contraseña al momento</string>
+    <string name="msg_overlay_permission">Tras un reinicio, Typeon no puede recibir mensajes hasta que introduzcas su contraseña. Permite «Mostrar sobre otras apps» para que la pantalla de contraseña se abra sola en lugar de esperar como notificación.</string>
+    <string name="msg_unlock_to_receive">Introduce tu contraseña para recibir mensajes.</string>
+    <string name="msg_tamper_closed">Typeon se ha cerrado y ha borrado sus claves de la memoria: se ha detectado un depurador o una herramienta de hooking dentro de la app. Elimínala y vuelve a abrir Typeon.</string>
+    <string name="error_recovery_password_short">La contraseña de recuperación necesita al menos %1$d caracteres.</string>
+    <string name="action_fetch_older_history">Cargar historial anterior</string>
+    <string name="msg_fetch_history_requested">Solicitado…</string>
+    <!-- %1$s = código de comparación. -->
+    <string name="link_device_code_shown">Código para comparar: %1$s\nTu otro dispositivo muestra el mismo código antes de que lo apruebes.</string>
+    <string name="link_device_code_check">Código para comparar: %1$s\nApruébalo solo si el dispositivo nuevo muestra el mismo código.</string>
+    <string name="notif_new_message">Nuevo mensaje</string>
+    <string name="notif_new_drawing">Nuevo dibujo</string>
+    <string name="notif_new_drawing_from">Nuevo dibujo de %1$s</string>
+    <string name="title_scan_qr">Escanear QR</string>
+    <string name="tor_off_no_network">Tor está desactivado: la red no se iniciará sin Tor.</string>
+    <string name="msg_pairing_contact_limit">Falló la vinculación: tu lista de contactos está llena.</string>
+    <string name="notif_fg_text">Conexión P2P segura activa</string>
+    <string name="channel_service_name">Servicio en segundo plano</string>
+    <string name="channel_messages_name">Mensajes</string>
+    <string name="channel_mentions_name">Menciones</string>
+    <string name="notif_mention_title">%1$s te mencionó en %2$s</string>
+    <string name="notif_mention_hidden">Te han mencionado en un grupo</string>
+    <string name="error_edit_failed">No se pudo editar el mensaje</string>
+    <string name="error_delete_failed">No se pudo eliminar el mensaje</string>
+    <string name="action_discard">Descartar</string>
+    <string name="msg_recording_in_background">Una grabación de voz sigue en curso. ¿Enviarla o descartarla?</string>
+    <string name="notif_fg_server_down">Servidor inaccesible — los mensajes solo se envían directamente</string>
+    <string name="notif_fg_recording">Grabando un mensaje de voz</string>
+    <string name="msg_media_scrub_failed">No se pudieron eliminar los datos de ubicación o del dispositivo de este archivo. ¿Enviar de todos modos?</string>
+    <string name="action_send_anyway">Enviar de todos modos</string>
+    <string name="title_confirm_contact">¿Añadir este contacto?</string>
+    <string name="msg_confirm_contact">¿Añadir el contacto de este código QR?</string>
+    <string name="msg_loading">Cargando…</string>
+    <string name="action_resend_group">Reenviar el grupo a todos</string>
+    <string name="msg_group_resent">Grupo enviado de nuevo a todos</string>
+    <string name="err_core_locked">La app está bloqueada. Desbloquéala e inténtalo de nuevo.</string>
+    <string name="err_core_not_founder">Solo el fundador del grupo puede hacer esto.</string>
+    <string name="err_core_already">Esto ya estaba hecho.</string>
+    <string name="err_core_blocked">Este contacto está bloqueado.</string>
+    <string name="err_core_too_large">Demasiado grande.</string>
+    <string name="err_core_no_session">Aún no hay una sesión segura con este contacto.</string>
+    <string name="err_core_invalid">Entrada o código no válido.</string>
+    <string name="err_core_not_allowed">No permitido.</string>
+    <string name="err_core_not_found">No encontrado.</string>
+    <string name="err_core_internal">Algo salió mal dentro de la app.</string>
+    <!-- %1$s = nombre, %2$s = código de seguridad. -->
+    <string name="msg_confirm_contact_named">¿Añadir a %1$s?\n\nCódigo de seguridad: %2$s\n\nCompara este código con tu contacto antes de aceptar.</string>
+    <!-- Stickers. -->
+    <string name="content_desc_stickers">Stickers</string>
+    <string name="action_sticker_add">Añadir</string>
+    <string name="action_sticker_import_whatsapp">Importar desde WhatsApp</string>
+    <string name="action_add_to_my_stickers">Añadir a mis stickers</string>
+    <string name="msg_confirm_delete_sticker">¿Eliminar los stickers seleccionados?</string>
+    <string name="msg_sticker_saved">Añadido a tus stickers</string>
+    <string name="msg_sticker_import_failed">No se pudo añadir el sticker</string>
+    <!-- %1$d/%2$d = progreso de la importación. -->
+    <string name="msg_sticker_importing">Importando stickers… %1$d/%2$d</string>
+    <string name="action_sticker_favorite">Añadir a favoritos</string>
+    <string name="action_sticker_unfavorite">Quitar de favoritos</string>
+    <string name="action_sticker_folder_create">Nueva carpeta</string>
+    <string name="action_sticker_add_to_folder">Añadir a carpeta</string>
+    <string name="action_sticker_remove_from_folder">Quitar de la carpeta</string>
+    <string name="action_sticker_folder_rename">Renombrar carpeta</string>
+    <string name="action_sticker_folder_delete">Eliminar carpeta</string>
+    <string name="hint_sticker_folder_name">Nombre de la carpeta</string>
+    <string name="msg_confirm_delete_sticker_folder">¿Eliminar la carpeta «%1$s»? Sus stickers se conservan.</string>
+    <string name="msg_sticker_added_to_folder">Añadido a %1$s</string>
+    <string name="msg_sticker_imported">%1$d sticker(s) añadido(s)</string>
+    <string name="storage_voice">Mensajes de voz</string>
+    <string name="storage_stickers">Stickers</string>
+    <string name="storage_prune_button">Eliminar mensajes antiguos</string>
+    <string name="storage_prune_sizes">Mensajes (%1$d): %2$s → %3$s · Adjuntos: %4$s → %5$s</string>
+    <string name="storage_prune_confirm_title">¿Eliminar mensajes antiguos?</string>
+    <string name="storage_prune_confirm_message">Se eliminarán de este dispositivo todos los mensajes y adjuntos de este chat anteriores a %1$s. La otra persona no se ve afectada. No se puede deshacer.</string>
+    <string name="storage_prune_done">Eliminado</string>
+    <string name="action_forward">Reenviar</string>
+    <string name="lbl_forwarded">Reenviado</string>
+    <string name="msg_forward_pick_chat">Elige un chat al que reenviar</string>
+    <string name="confirm_forward">¿Reenviar a %1$s?</string>
+    <string name="action_select">Seleccionar</string>
+    <string name="msg_select_same_kind">Solo se pueden seleccionar juntos mensajes del mismo tipo</string>
+    <plurals name="confirm_delete_messages">
+        <item quantity="one">¿Eliminar este mensaje?</item>
+        <item quantity="many">¿Eliminar estos %d mensajes?</item>
+        <item quantity="other">¿Eliminar estos %d mensajes?</item>
+    </plurals>
+    <plurals name="forward_not_sent">
+        <item quantity="one">1 mensaje reenviado no se ha enviado</item>
+        <item quantity="many">%d mensajes reenviados no se han enviado</item>
+        <item quantity="other">%d mensajes reenviados no se han enviado</item>
+    </plurals>
+    <string name="lbl_beta_updates">Actualizaciones beta</string>
+    <string name="lbl_beta_updates_desc">Typeon se actualiza solo una vez al día desde las versiones de GitHub, a través de Tor. Activado: instala también las versiones beta.</string>
+    <string name="action_check_updates">Buscar actualizaciones</string>
+    <string name="update_status">Instalada: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">Aún no se ha comprobado</string>
+    <string name="update_state_latest">Actualizada</string>
+    <string name="update_state_waiting">La nueva versión aún se está compilando</string>
+    <string name="update_state_downloading">Descargando… %1$s MB</string>
+    <string name="update_state_ready">Descargada, instalando</string>
+    <string name="update_state_error">La última comprobación falló: %1$s</string>
+    <string name="update_ready_title">Actualización lista</string>
+    <string name="update_ready_text">Toca para instalar Typeon %1$s</string>
+    <!-- Mensajes temporales (ui/Disappear.kt). -->
+    <string name="disappear_title">Mensajes temporales</string>
+    <string name="disappear_hint">Todo lo que envíes en este chat desaparecerá después de leerse. No se puede copiar, reenviar ni guardar, y las capturas de pantalla están bloqueadas en Android.</string>
+    <string name="disappear_turn_on">Activar</string>
+    <string name="disappear_turned_off">Mensajes temporales desactivados</string>
+    <string name="disappear_cannot_open">No se puede abrir un archivo temporal de este tipo: solo se muestran imágenes y vídeos</string>
+    <string name="disappear_notification">Mensaje temporal</string>
+    <string name="disappear_left_s">⏱ %1$d s</string>
+    <string name="disappear_left_min">⏱ %1$d min</string>
+    <string name="disappear_left_h">⏱ %1$d h</string>
+    <string name="disappear_left_d">⏱ %1$d días</string>
+    <string-array name="disappear_stop_labels">
+        <item>30 segundos</item>
+        <item>5 minutos</item>
+        <item>1 hora</item>
+        <item>8 horas</item>
+        <item>1 día</item>
+        <item>1 semana</item>
+        <item>4 semanas</item>
+    </string-array>
+</resources>

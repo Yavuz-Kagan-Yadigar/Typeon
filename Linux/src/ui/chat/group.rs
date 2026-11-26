@@ -19,7 +19,7 @@ pub(super) fn group_members(view: &Rc<ChatView>) {
         .cloned();
     let Some(summary) = group_summary else { return };
 
-    let list = adw::PreferencesGroup::builder().title("Members").build();
+    let list = adw::PreferencesGroup::builder().title(t("Members")).build();
     for identity in &summary.member_identity_ids {
         let row = adw::ActionRow::builder()
             .title(glib::markup_escape_text(&view.app().identity_name(identity)).as_str())
@@ -40,7 +40,7 @@ pub(super) fn group_members(view: &Rc<ChatView>) {
             let remove = gtk::Button::builder()
                 .icon_name("list-remove-symbolic")
                 .valign(gtk::Align::Center)
-                .tooltip_text("Remove from group")
+                .tooltip_text(t("Remove from group"))
                 .build();
             remove.add_css_class("flat");
             let view = view.clone();
@@ -52,10 +52,10 @@ pub(super) fn group_members(view: &Rc<ChatView>) {
                     move || core::remove_from_group(&group_id, &identity),
                     move |removed| {
                         if removed {
-                            view.app().toast("Member removed.");
+                            view.app().toast(t("Member removed."));
                             view.app().refresh_caches();
                         } else {
-                            view.app().toast("Could not remove that member.");
+                            view.app().toast(t("Could not remove that member."));
                         }
                     },
                 );
@@ -71,11 +71,11 @@ pub(super) fn group_members(view: &Rc<ChatView>) {
     let mut resend_row = None;
     if summary.is_founder {
         let resend = adw::ActionRow::builder()
-            .title("Resend group to everyone")
-            .subtitle("Sends the current group state to every member again.")
+            .title(t("Resend group to everyone"))
+            .subtitle(t("Sends the current group state to every member again."))
             .build();
         let resend_button = gtk::Button::builder()
-            .label("Resend")
+            .label(t("Resend"))
             .valign(gtk::Align::Center)
             .build();
         {
@@ -88,7 +88,7 @@ pub(super) fn group_members(view: &Rc<ChatView>) {
                 crate::app::run_in_background(
                     move || core::resend_group_to_all(&group_id),
                     move |result| match result {
-                        Ok(()) => view.app().toast("Group state sent to everyone."),
+                        Ok(()) => view.app().toast(t("Group state sent to everyone.")),
                         Err(error) => view.app().toast(&error),
                     },
                 );
@@ -101,7 +101,7 @@ pub(super) fn group_members(view: &Rc<ChatView>) {
     let page = adw::PreferencesPage::new();
     page.add(&list);
     if let Some(resend) = resend_row {
-        let actions = adw::PreferencesGroup::builder().title("Group").build();
+        let actions = adw::PreferencesGroup::builder().title(t("Group")).build();
         actions.add(&resend);
         page.add(&actions);
     }
@@ -168,11 +168,11 @@ pub(super) fn group_invite(view: &Rc<ChatView>) {
                         move || core::invite_to_group(&group_id, &identity),
                         move |invited| {
                             if invited {
-                                view.app().toast("Invitation sent.");
+                                view.app().toast(t("Invitation sent."));
                                 view.app().refresh_caches();
                                 row.set_sensitive(false);
                             } else {
-                                view.app().toast("Could not invite that contact.");
+                                view.app().toast(t("Could not invite that contact."));
                             }
                         },
                     );
@@ -203,7 +203,7 @@ pub(super) fn group_invite(view: &Rc<ChatView>) {
     adw::Window::builder()
         .modal(true)
         .transient_for(&window)
-        .title("Invite to group")
+        .title(t("Invite to group"))
         .default_width(400)
         .default_height(480)
         .content(&toolbar)
@@ -217,7 +217,7 @@ pub(super) fn group_picture(view: &Rc<ChatView>) {
     };
     let Some(window) = view.app().window() else { return };
 
-    let dialog = gtk::FileDialog::builder().modal(false).title("Choose a group picture").build();
+    let dialog = gtk::FileDialog::builder().modal(false).title(t("Choose a group picture")).build();
     let view = view.clone();
     let group_id = group_id.clone();
     dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
@@ -229,12 +229,12 @@ pub(super) fn group_picture(view: &Rc<ChatView>) {
         app::run_in_background(
             move || match util::scaled_jpeg(&source, 720, 85) {
                 Some(jpeg) => core::set_group_profile_picture(&group_id, Some(jpeg)),
-                None => Err("That file is not an image Typeon can read.".to_string()),
+                None => Err(t("That file is not an image Typeon can read.").to_string()),
             },
             move |result| match result {
                 // Only the founder may set it; the core enforces that.
                 Ok(()) => {
-                    view.app().toast("Group picture updated.");
+                    view.app().toast(t("Group picture updated."));
                     view.app().refresh_caches();
                 }
                 Err(error) => view.app().toast(&error),

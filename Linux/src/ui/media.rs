@@ -17,6 +17,7 @@ use gtk::gio;
 use gtk::glib;
 
 use crate::app::App;
+use crate::i18n::t;
 use crate::util;
 
 /// Zoom bounds for the image viewer's scroll-to-zoom.
@@ -56,7 +57,7 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
     let header = adw::HeaderBar::new();
     let external = gtk::Button::builder()
         .icon_name("external-link-symbolic")
-        .tooltip_text("Open with the system application")
+        .tooltip_text(t("Open with the system application"))
         .build();
     {
         let app = app.clone();
@@ -67,7 +68,7 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
 
     let save = gtk::Button::builder()
         .icon_name("document-save-symbolic")
-        .tooltip_text("Save a copy")
+        .tooltip_text(t("Save a copy"))
         .build();
     {
         let app = app.clone();
@@ -80,7 +81,7 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
     if util::is_image(mime) && image_ok(path).is_some() {
         let copy = gtk::Button::builder()
             .icon_name("edit-copy-symbolic")
-            .tooltip_text("Copy image")
+            .tooltip_text(t("Copy image"))
             .build();
         let app = app.clone();
         let path = path.to_string();
@@ -91,9 +92,9 @@ pub fn open(app: &Rc<App>, path: &str, mime: &str, title: &str) {
                 move |result| match result {
                     Ok(texture) => {
                         clipboard.set_texture(&texture);
-                        app.toast("Image copied");
+                        app.toast(t("Image copied"));
                     }
-                    Err(error) => app.toast(&format!("Could not copy the image: {error}")),
+                    Err(error) => app.toast(&tf!("Could not copy the image: {}", error)),
                 },
             );
         });
@@ -173,8 +174,8 @@ fn image_pane(path: &str) -> gtk::Widget {
     let Some((natural_w, natural_h)) = image_ok(path) else {
         return adw::StatusPage::builder()
             .icon_name("dialog-warning-symbolic")
-            .title("Cannot show this image here")
-            .description("Its format is not supported or it is too large. Use \"Save a copy\".")
+            .title(t("Cannot show this image here"))
+            .description(t("Its format is not supported or it is too large. Use \"Save a copy\"."))
             .build()
             .upcast();
     };
@@ -303,15 +304,15 @@ fn playback_pane(app: &Rc<App>, path: &str, is_video: bool) -> (gtk::Widget, gtk
     // The fallback pane, shown only if the backend turns out to be missing.
     let missing = adw::StatusPage::builder()
         .icon_name("dialog-warning-symbolic")
-        .title("Cannot play this here")
+        .title(t("Cannot play this here"))
         .description(
-            "No GTK media backend is installed, so audio and video cannot be played inside \
+            t("No GTK media backend is installed, so audio and video cannot be played inside \
              Typeon. Install one — on openSUSE the GStreamer backend ships with GTK's media \
-             module — or use the button below to open the file in your usual player.",
+             module — or use the button below to open the file in your usual player."),
         )
         .build();
     let open_external = gtk::Button::builder()
-        .label("Open externally")
+        .label(t("Open externally"))
         .halign(gtk::Align::Center)
         .build();
     open_external.add_css_class("pill");
@@ -361,7 +362,7 @@ fn transport_bar(media: &gtk::MediaFile) -> gtk::Widget {
 
     let skip_back = gtk::Button::from_icon_name("media-skip-backward-symbolic");
     skip_back.add_css_class("flat");
-    skip_back.set_tooltip_text(Some("Back 5 seconds"));
+    skip_back.set_tooltip_text(Some(t("Back 5 seconds")));
 
     let play_pause = gtk::Button::from_icon_name("media-playback-pause-symbolic");
     play_pause.add_css_class("flat");
@@ -369,7 +370,7 @@ fn transport_bar(media: &gtk::MediaFile) -> gtk::Widget {
 
     let skip_forward = gtk::Button::from_icon_name("media-skip-forward-symbolic");
     skip_forward.add_css_class("flat");
-    skip_forward.set_tooltip_text(Some("Forward 5 seconds"));
+    skip_forward.set_tooltip_text(Some(t("Forward 5 seconds")));
 
     let elapsed = gtk::Label::new(Some("0:00"));
     elapsed.add_css_class("caption");
@@ -482,7 +483,7 @@ fn launch_externally(app: &Rc<App>, path: &str) {
     // The viewer's "open with the system application" button lands here too,
     // and the MIME type is only the sender's claim — so check again.
     if !is_safe_to_launch(path) {
-        app.toast("This file type is not opened directly. Use \"Save a copy\".");
+        app.toast(t("This file type is not opened directly. Use \"Save a copy\"."));
         return;
     }
     // The other program runs outside Typeon and outside Tor: a document can
@@ -492,17 +493,17 @@ fn launch_externally(app: &Rc<App>, path: &str) {
     let path = path.to_string();
     crate::ui::dialogs::confirm(
         app,
-        "Open in another application?",
-        "The file opens in your system's default application, which does not use Tor. A \
+        t("Open in another application?"),
+        t("The file opens in your system's default application, which does not use Tor. A \
          document can load content from the internet and reveal your network address to its \
-         author. Only open files from people you trust.",
-        "Open",
+         author. Only open files from people you trust."),
+        t("Open"),
         false,
         move || {
             let uri = gio::File::for_path(&path).uri();
             if gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE).is_err() {
                 app_for_launch
-                    .toast(&format!("No application is registered for this file. It is at {path}"));
+                    .toast(&tf!("No application is registered for this file. It is at {}", path));
             }
         },
     );
@@ -538,7 +539,7 @@ pub fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
         suggested_name.as_str()
     };
     let dialog = gtk::FileDialog::builder().modal(false)
-        .title("Save a copy")
+        .title(t("Save a copy"))
         .initial_name(suggested_name)
         .build();
 
@@ -561,8 +562,8 @@ pub fn save_copy(app: &Rc<App>, path: &str, suggested_name: &str) {
                 copied
             },
             move |result| match result {
-                Ok(_) => app.toast(&format!("Saved to {shown}")),
-                Err(error) => app.toast(&format!("Could not save: {error}")),
+                Ok(_) => app.toast(&tf!("Saved to {}", shown)),
+                Err(error) => app.toast(&tf!("Could not save: {}", error)),
             },
         );
     });

@@ -17,6 +17,7 @@ use zeroize::Zeroize;
 
 use crate::app::App;
 use crate::core;
+use crate::i18n::t;
 use crate::ui::{chat, chats, contacts, dialogs, settings, widgets};
 use crate::util;
 
@@ -151,7 +152,7 @@ pub(crate) fn sidebar_toggle_button(main: &Rc<MainUi>) -> gtk::Button {
         move || {
             let (Some(split), Some(button)) = (split.upgrade(), button.upgrade()) else { return };
             let collapsed = split.is_collapsed();
-            button.set_tooltip_text(Some(if collapsed { "Show chat list" } else { "Collapse chat list" }));
+            button.set_tooltip_text(Some(if collapsed { t("Show chat list") } else { t("Collapse chat list") }));
         }
     };
     sync();
@@ -233,15 +234,15 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
     error.add_css_class("error");
 
     let entry = gtk::PasswordEntry::builder().show_peek_icon(true).build();
-    entry.set_placeholder_text(Some("Passphrase"));
+    entry.set_placeholder_text(Some(t("Passphrase")));
 
-    let unlock = gtk::Button::builder().label("Unlock").build();
+    let unlock = gtk::Button::builder().label(t("Unlock")).build();
     unlock.add_css_class("suggested-action");
     unlock.add_css_class("pill");
 
     // Without this the user would be stuck: the lock page replaces the whole
     // window content, so the header bar (and its close button) is gone too.
-    let quit = gtk::Button::builder().label("Quit Typeon").build();
+    let quit = gtk::Button::builder().label(t("Quit Typeon")).build();
     quit.add_css_class("flat");
 
     let form = gtk::Box::builder()
@@ -255,10 +256,10 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
 
     let lock_page = adw::StatusPage::builder()
         .icon_name("system-lock-screen-symbolic")
-        .title("Typeon is locked")
+        .title(t("Typeon is locked"))
         .description(
-            "Ten minutes without input. Messages keep arriving — enter your \
-             passphrase to continue.",
+            t("Ten minutes without input. Messages keep arriving — enter your \
+             passphrase to continue."),
         )
         .child(&adw::Clamp::builder().maximum_size(420).child(&form).build())
         .build();
@@ -349,7 +350,7 @@ fn idle_lock(app: &Rc<App>, host: &adw::ToastOverlay) {
         Rc::new(move || {
             let mut passphrase = entry.text().to_string();
             if passphrase.is_empty() {
-                error.set_text("Enter your passphrase.");
+                error.set_text(t("Enter your passphrase."));
                 return;
             }
             let data_dir = app.data_dir.clone();
@@ -494,13 +495,13 @@ fn sidebar(main: &Rc<MainUi>) -> adw::NavigationPage {
     stack.add_titled_with_icon(
         &chats::build(main),
         Some("chats"),
-        "Chats",
+        t("Chats"),
         "user-available-symbolic",
     );
     stack.add_titled_with_icon(
         &contacts::build(main),
         Some("contacts"),
-        "Contacts",
+        t("Contacts"),
         "system-users-symbolic",
     );
 
@@ -528,8 +529,8 @@ fn sidebar(main: &Rc<MainUi>) -> adw::NavigationPage {
 fn placeholder_page(main: &Rc<MainUi>) -> adw::NavigationPage {
     let status = adw::StatusPage::builder()
         .icon_name("mail-unread-symbolic")
-        .title("No conversation open")
-        .description("Pick a chat on the left, or add a contact to start one.")
+        .title(t("No conversation open"))
+        .description(t("Pick a chat on the left, or add a contact to start one."))
         .build();
 
     let header = adw::HeaderBar::new();
@@ -553,14 +554,14 @@ fn placeholder_page(main: &Rc<MainUi>) -> adw::NavigationPage {
 /// they can never disagree.
 fn status_indicator(app: &Rc<App>) -> gtk::Box {
     let dot = gtk::Label::new(Some("●"));
-    let text = gtk::Label::new(Some("Connecting…"));
+    let text = gtk::Label::new(Some(t("Connecting…")));
     text.add_css_class("caption");
     text.add_css_class("dim-label");
 
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(6)
-        .tooltip_text("This device's own network status")
+        .tooltip_text(t("This device's own network status"))
         .build();
     row.append(&dot);
     row.append(&text);
@@ -571,19 +572,19 @@ fn status_indicator(app: &Rc<App>) -> gtk::Box {
         move |status: core::OwnStatus| {
             // Tor is the only transport: with it off the network never starts.
             let (css_class, label) = if !status.tor_enabled {
-                ("error", "Network off (Tor disabled in Settings)")
+                ("error", t("Network off (Tor disabled in Settings)"))
             } else {
                 match status.tor_status.as_str() {
                     "ready" => (
                         "success",
                         if status.node_mode {
-                            "Connected via Tor · node"
+                            t("Connected via Tor · node")
                         } else {
-                            "Connected via Tor"
+                            t("Connected via Tor")
                         },
                     ),
-                    "failed" => ("error", "Tor failed"),
-                    _ => ("warning", "Starting Tor…"),
+                    "failed" => ("error", t("Tor failed")),
+                    _ => ("warning", t("Starting Tor…")),
                 }
             };
 
@@ -634,32 +635,32 @@ fn menu_button(main: &Rc<MainUi>) -> gtk::MenuButton {
     let mut entries: Vec<(&str, &str, Box<dyn Fn(&Rc<MainUi>)>)> = vec![
         (
             "list-add-symbolic",
-            "New group",
+            t("New group"),
             Box::new(|main: &Rc<MainUi>| dialogs::create_group(main)),
         ),
         (
             "contact-new-symbolic",
-            "Add contact",
+            t("Add contact"),
             Box::new(|main: &Rc<MainUi>| dialogs::add_contact(&main.app)),
         ),
         (
             "view-reveal-symbolic",
-            "My contact code",
+            t("My contact code"),
             Box::new(|main: &Rc<MainUi>| dialogs::show_own_code(&main.app)),
         ),
         (
             "phonelink-symbolic",
-            "Linked devices",
+            t("Linked devices"),
             Box::new(|main: &Rc<MainUi>| dialogs::linked_devices(&main.app)),
         ),
         (
             "document-send-symbolic",
-            "Pending messages",
+            t("Pending messages"),
             Box::new(|main: &Rc<MainUi>| dialogs::pending_messages(&main.app)),
         ),
         (
             "preferences-system-symbolic",
-            "Settings",
+            t("Settings"),
             Box::new(|main: &Rc<MainUi>| settings::present(&main.app)),
         ),
     ];
@@ -667,7 +668,7 @@ fn menu_button(main: &Rc<MainUi>) -> gtk::MenuButton {
     #[cfg(windows)]
     entries.push((
         "application-exit-symbolic",
-        "Quit",
+        t("Quit"),
         Box::new(|main: &Rc<MainUi>| main.app.application.quit()),
     ));
 
@@ -684,7 +685,7 @@ fn menu_button(main: &Rc<MainUi>) -> gtk::MenuButton {
 
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
-        .tooltip_text("Main menu")
+        .tooltip_text(t("Main menu"))
         .popover(&popover)
         .build()
 }

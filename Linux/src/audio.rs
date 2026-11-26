@@ -11,6 +11,7 @@
 //! and a truncated Ogg is exactly the kind of file that plays back here and
 //! fails on the phone. `q` makes ffmpeg finalise properly.
 
+use crate::i18n::t;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -81,7 +82,7 @@ impl Recording {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| format!("could not start ffmpeg: {error}"))?;
+            .map_err(|error| tf!("could not start ffmpeg: {}", error))?;
 
         Ok(Self {
             child,
@@ -116,14 +117,14 @@ impl Recording {
         let output = self
             .child
             .wait_with_output()
-            .map_err(|error| format!("ffmpeg did not finish: {error}"))?;
+            .map_err(|error| tf!("ffmpeg did not finish: {}", error))?;
 
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
             let detail = detail.trim();
             let _ = std::fs::remove_file(&self.path);
             return Err(if detail.is_empty() {
-                "recording failed — is a microphone connected?".to_string()
+                t("recording failed — is a microphone connected?").to_string()
             } else {
                 detail.lines().last().unwrap_or(detail).to_string()
             });
@@ -132,7 +133,7 @@ impl Recording {
         let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         if size == 0 {
             let _ = std::fs::remove_file(&self.path);
-            return Err("nothing was recorded".to_string());
+            return Err(t("nothing was recorded").to_string());
         }
 
         Ok((self.path.clone(), duration_ms))

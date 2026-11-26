@@ -6,6 +6,7 @@
 //! for it to reach the sink, so oggmux writes its final page — the Windows
 //! equivalent of ffmpeg's `q`.
 
+use crate::i18n::t;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ impl Recording {
             .map_err(|e| e.to_string())?
             .downcast::<gst::Pipeline>()
             .map_err(|_| "not a pipeline".to_string())?;
-        pipeline.set_state(gst::State::Playing).map_err(|_| "recording failed — is a microphone connected?".to_string())?;
+        pipeline.set_state(gst::State::Playing).map_err(|_| t("recording failed — is a microphone connected?").to_string())?;
         let started_at = crate::util::now_ms();
         // Hard cap: a recording nobody stops must not run forever (ffmpeg `-t 600`).
         let weak = pipeline.downgrade();
@@ -73,7 +74,7 @@ impl Recording {
                         error = Some(e.error().to_string());
                     }
                 }
-                None => error = Some("recording did not finish".to_string()),
+                None => error = Some(t("recording did not finish").to_string()),
             }
         }
         let _ = self.pipeline.set_state(gst::State::Null);
@@ -84,7 +85,7 @@ impl Recording {
         let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         if size == 0 {
             let _ = std::fs::remove_file(&self.path);
-            return Err("nothing was recorded".to_string());
+            return Err(t("nothing was recorded").to_string());
         }
         Ok((self.path.clone(), duration_ms))
     }

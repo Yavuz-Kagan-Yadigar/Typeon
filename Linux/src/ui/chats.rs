@@ -14,6 +14,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::core;
+use crate::i18n::t;
 use crate::ui::dialogs;
 use crate::ui::window::{Conversation, MainUi};
 use crate::util;
@@ -40,7 +41,7 @@ struct Row {
 
 pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
     let search = gtk::SearchEntry::builder()
-        .placeholder_text("Search chats")
+        .placeholder_text(t("Search chats"))
         .margin_top(6)
         .margin_bottom(6)
         .margin_start(12)
@@ -54,8 +55,8 @@ pub fn build(main: &Rc<MainUi>) -> gtk::Widget {
 
     let empty = adw::StatusPage::builder()
         .icon_name("system-users-symbolic")
-        .title("No chats yet")
-        .description("Add a contact from the main menu to start talking.")
+        .title(t("No chats yet"))
+        .description(t("Add a contact from the main menu to start talking."))
         .build();
 
     let stack = gtk::Stack::new();
@@ -237,8 +238,8 @@ fn collect_rows(own_identity: &str) -> Vec<Row> {
         let newest = if ready { newest_direct(&fingerprint) } else { None };
         let (subtitle, timestamp, incoming) = match newest {
             Some((text, at, incoming)) => (text, at, incoming),
-            None if ready => ("No messages yet".to_string(), 0, false),
-            None => ("Pairing… waiting for the other device".to_string(), 0, false),
+            None if ready => (t("No messages yet").to_string(), 0, false),
+            None => (t("Pairing… waiting for the other device").to_string(), 0, false),
         };
         rows.push(Row {
             incoming,
@@ -266,11 +267,7 @@ fn collect_rows(own_identity: &str) -> Vec<Row> {
         let (subtitle, timestamp, incoming) = match newest {
             Some((text, at, incoming)) => (text, at, incoming),
             None => (
-                format!(
-                    "{} member{}",
-                    member_count,
-                    if member_count == 1 { "" } else { "s" }
-                ),
+                tf!("Members: {}", member_count),
                 0,
                 false,
             ),
@@ -327,13 +324,13 @@ fn newest_direct(fingerprint: &str) -> Option<(String, u64, bool)> {
 
     if let Some(message) = core::message_history(fingerprint, 1).into_iter().next_back() {
         let text = if message.is_deleted {
-            "Message deleted".to_string()
+            t("Message deleted").to_string()
         } else {
             util::preview_text(&message.text, 64)
         };
         let sent = message.direction == "sent";
         let text = if sent {
-            format!("You: {}", text)
+            tf!("You: {}", text)
         } else {
             text
         };
@@ -350,7 +347,7 @@ fn newest_direct(fingerprint: &str) -> Option<(String, u64, bool)> {
             let label = util::attachment_label(&attachment.mime_type, &attachment.file_name, attachment.sticker);
             let sent = attachment.direction == "sent";
             let label = if sent {
-                format!("You: {}", label)
+                tf!("You: {}", label)
             } else {
                 label
             };
@@ -366,7 +363,7 @@ fn newest_group(group_id: &str, own_identity: &str) -> Option<(String, u64, bool
 
     if let Some(message) = core::group_message_history(group_id, 1).into_iter().next_back() {
         let text = if message.is_deleted {
-            "Message deleted".to_string()
+            t("Message deleted").to_string()
         } else {
             util::preview_text(&message.text, 64)
         };

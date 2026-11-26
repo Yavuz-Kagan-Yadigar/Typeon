@@ -36,6 +36,8 @@ pub struct Prefs {
     pub read_state: HashMap<String, u64>,
     /// Conversation ids pinned to the top of the chat list (same key form).
     pub pinned: HashSet<String>,
+    /// UI language code (see `i18n::LANGUAGES`); `None` follows the system.
+    pub language: Option<String>,
     /// `None` follows the desktop's light/dark preference.
     pub dark_mode: Option<bool>,
     /// `#rrggbb` seed for the Material 3 palette; `None` uses M3's own
@@ -95,6 +97,7 @@ impl Default for Prefs {
             history_storage_limit_bytes: DEFAULT_HISTORY_LIMIT_BYTES,
             read_state: HashMap::new(),
             pinned: HashSet::new(),
+            language: None,
             dark_mode: None,
             accent_color: None,
             background_color: None,

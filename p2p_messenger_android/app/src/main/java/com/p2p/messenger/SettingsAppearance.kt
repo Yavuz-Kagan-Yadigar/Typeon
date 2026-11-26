@@ -192,17 +192,18 @@ internal fun SettingsFragment.setupAppearanceControls(view: View) {
     }
 }
 
-/** Language picker (English/Turkish). AppCompatDelegate.setApplicationLocales
+/** Language picker. AppCompatDelegate.setApplicationLocales
  *  persists the choice itself (see AndroidManifest AppLocalesMetadataHolderService)
  *  and recreates all activities; the explicit recreate() below matches this
  *  screen's own font/color pickers for immediate visual feedback. */
 internal fun SettingsFragment.setupLanguageControl(view: View) {
-    val languageCodes = arrayOf("en", "tr")
-    val languageLabels = arrayOf("English", "Türkçe")
+    val languageCodes = arrayOf("en", "tr", "es", "ru", "uk", "hi", "ar", "zh-CN")
+    val languageLabels = arrayOf("English", "Türkçe", "Español", "Русский", "Українська", "हिन्दी", "العربية", "简体中文")
     val languageValueText = view.findViewById<TextView>(R.id.language_value)
     fun currentLanguageIndex(): Int {
         val current = AppCompatDelegate.getApplicationLocales().toLanguageTags()
-        return languageCodes.indexOfFirst { current.startsWith(it) }.coerceAtLeast(0)
+            .ifEmpty { resources.configuration.locales[0].language } // follows the system
+        return languageCodes.indexOfFirst { current.substringBefore('-') == it.substringBefore('-') }.coerceAtLeast(0)
     }
     languageValueText.text = languageLabels[currentLanguageIndex()]
     view.findViewById<Button>(R.id.btn_pick_language).setOnClickListener {

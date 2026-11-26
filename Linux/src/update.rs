@@ -8,6 +8,7 @@
 //!
 //! Not installed during a call; the download waits for the next hourly tick.
 
+use crate::i18n::t;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -64,21 +65,21 @@ pub fn status_text() -> String {
     let raw = raw.trim();
     let (github, state) = raw.split_once(' ').unwrap_or((if raw.is_empty() { "-" } else { raw }, ""));
     let word = if raw.is_empty() {
-        "Not checked yet".to_string()
+        t("Not checked yet").to_string()
     } else if let Some(e) = state.strip_prefix("error") {
-        format!("Last check failed: {}", e.trim())
+        tf!("Last check failed: {}", e.trim())
     } else if let Some(mb) = state.strip_prefix("downloading") {
-        format!("Downloading… {} MB", mb.trim())
+        tf!("Downloading… {} MB", mb.trim())
     } else if github == installed {
-        "Up to date".to_string()
+        t("Up to date").to_string()
     } else if state == "waiting" {
-        "New release is still being built".to_string()
+        t("New release is still being built").to_string()
     } else if state == "ready" {
-        "Downloaded, installing".to_string()
+        t("Downloaded, installing").to_string()
     } else {
-        "Up to date".to_string()
+        t("Up to date").to_string()
     };
-    format!("Installed: {installed} · GitHub: {github} · {word}")
+    tf!("Installed: {} · GitHub: {} · {}", installed, github, word)
 }
 
 /// Runs a check now, for a changed channel (`set_beta` removed the day stamp).
@@ -125,8 +126,8 @@ fn ask_restart(app: &Rc<App>, version: &str) {
         return;
     };
     let toast = adw::Toast::builder()
-        .title(glib::markup_escape_text(&format!("Typeon {version} is ready to install")).as_str())
-        .button_label("Restart")
+        .title(glib::markup_escape_text(&tf!("Typeon {} is ready to install", version)).as_str())
+        .button_label(t("Restart"))
         .timeout(0)
         .build();
     let restart = app.clone();
@@ -153,7 +154,7 @@ fn install_now(app: &Rc<App>, version: String, path: PathBuf) {
             Ok(()) => app.application.quit(),
             Err(error) => {
                 log::warn!("update: {error}");
-                app.toast(&format!("Update failed: {error}"));
+                app.toast(&tf!("Update failed: {}", error));
             }
         },
     );
@@ -185,7 +186,7 @@ fn platform_install(bundle: &Path, _version: &str) -> Result<(), String> {
     // Seen on flatpak 1.18: the new commit is deployed, then removing the old deploy fails with
     // "Directory not empty" and the exit code says failure. What counts is the active commit.
     if !status.success() && commit() == before {
-        return Err(format!("flatpak install exited with {status}"));
+        return Err(tf!("flatpak install exited with {}", status));
     }
     let _ = std::fs::remove_file(bundle);
     // Single instance: the new one must start after this one is gone.
@@ -200,7 +201,7 @@ fn platform_install(bundle: &Path, _version: &str) -> Result<(), String> {
              do sleep 1; i=$((i+1)); done; exec flatpak run com.p2p.messenger.Typeon' >/dev/null 2>&1 </dev/null &",
         ])
         .spawn()
-        .map_err(|e| format!("restart: {e}"))?;
+        .map_err(|e| tf!("restart: {}", e))?;
     Ok(())
 }
 
@@ -210,10 +211,10 @@ fn platform_install(zip: &Path, version: &str) -> Result<(), String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // ...\Typeon\bin\typeon.exe; the zip holds the same `Typeon\` tree.
-    let root = exe.parent().and_then(Path::parent).ok_or("no install dir")?;
+    let root = exe.parent().and_then(Path::parent).ok_or(t("no install dir"))?;
     // Unpacked under Program Files, say: the copy would fail after this process quit.
     let probe = root.join(".typeon-update-probe");
-    std::fs::write(&probe, b"").map_err(|e| format!("install folder is not writable: {e}"))?;
+    std::fs::write(&probe, b"").map_err(|e| tf!("install folder is not writable: {}", e))?;
     let _ = std::fs::remove_file(&probe);
     let quote = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
     let staging = dir().join("unpacked");

@@ -11,6 +11,7 @@
 //! main thread to whichever views have registered interest — the desktop
 //! equivalent of `P2PService.listeners`.
 
+use crate::i18n::t;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -179,7 +180,7 @@ impl App {
         let target = self.custom_font_path(&id);
 
         // Copy the font file to the data directory.
-        std::fs::copy(path, &target).map_err(|e| format!("Failed to copy font: {e}"))?;
+        std::fs::copy(path, &target).map_err(|e| tf!("Failed to copy font: {}", e))?;
 
         // Persist in prefs.
         {
@@ -266,13 +267,13 @@ impl App {
                     &self.application,
                     "core-panic",
                     "Typeon",
-                    "The messaging core hit an internal error and stopped working. \
-                     Please restart Typeon.",
+                    t("The messaging core hit an internal error and stopped working. \
+                     Please restart Typeon."),
                     gio::NotificationPriority::Urgent,
                 );
                 self.toast(
-                    "The messaging core hit an internal error and stopped working. \
-                     Please restart Typeon.",
+                    t("The messaging core hit an internal error and stopped working. \
+                     Please restart Typeon."),
                 );
             }
             return;
@@ -355,14 +356,14 @@ impl App {
                 if let Some(window) = self.window() {
                     let dialog = adw::MessageDialog::new(
                         Some(&window),
-                        Some("This device was unlinked"),
+                        Some(t("This device was unlinked")),
                         Some(
-                            "Your account removed this device. Its local identity, messages and \
+                            t("Your account removed this device. Its local identity, messages and \
                              attachments have been erased from this computer. Your other devices \
-                             keep working.",
+                             keep working."),
                         ),
                     );
-                    dialog.add_response("ok", "OK");
+                    dialog.add_response("ok", t("OK"));
                     dialog.set_default_response(Some("ok"));
                     dialog.set_close_response("ok");
                     let erase_and_quit = std::cell::RefCell::new(Some(erase_and_quit));
@@ -412,7 +413,7 @@ impl App {
                 let recent = self.whiteboard_notified.borrow().get(&conv).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(120));
                 if !conv.is_empty() && !recent {
                     self.whiteboard_notified.borrow_mut().insert(conv.clone(), std::time::Instant::now());
-                    self.notify_if_away_text(&conv, &format!("wb:{}", conv), "Typeon", &format!("New drawing from {}", name), "New drawing", gio::NotificationPriority::Normal);
+                    self.notify_if_away_text(&conv, &format!("wb:{}", conv), "Typeon", &tf!("New drawing from {}", name), t("New drawing"), gio::NotificationPriority::Normal);
                 }
             }
             "group_message" => {
@@ -421,7 +422,7 @@ impl App {
                     let title = self.group_name(&group_id);
                     let sender = self.identity_name(&event.string("sender_identity_id"));
                     if event.value.get("mentions_me").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        let title = format!("{} mentioned you in {}", sender, title);
+                        let title = tf!("{} mentioned you in {}", sender, title);
                         self.notify_if_away_as(&format!("group:{}", group_id), &title, &shown_text(event, event.string("text")), true);
                     } else {
                         let body = format!("{}: {}", sender, shown_text(event, event.string("text")));
@@ -462,35 +463,36 @@ impl App {
                 let code = event.string("device_short_code");
                 self.notify_always(
                     &format!("device-alert:{who}:{code}"),
-                    "Unverified device",
-                    &format!("{who} is writing from a device you have not verified ({code})."),
+                    t("Unverified device"),
+                    &tf!("{} is writing from a device you have not verified ({}).", who, code),
                 );
             }
             "pairing_failed" => {
                 if event.string("reason") == "contact_limit" {
-                    self.toast("Pairing failed: your contact list is full.");
+                    self.toast(t("Pairing failed: your contact list is full."));
                 }
             }
             "history_restore_incomplete" => {
-                self.toast("The server did not send all of the history. Try again later.");
+                self.toast(t("The server did not send all of the history. Try again later."));
             }
             "account_deleted" => {
                 let name = event.string("display_name");
                 let name = if name.is_empty() { self.contact_name(&event.string("peer")) } else { name };
-                let body = format!("{name} deleted their account");
+                let body = tf!("{} deleted their account", name);
                 self.toast(&body);
                 self.notify_always(&format!("account-deleted:{}", event.string("peer")), "Typeon", &body);
             }
             "handshake_failed" => {
                 let who = self.contact_name(&event.string("peer"));
-                self.toast(&format!(
-                    "{who}: secure session could not be set up — the other side may be on an incompatible version."
+                self.toast(&tf!(
+                    "{}: secure session could not be set up — the other side may be on an incompatible version.",
+                    who
                 ));
             }
             // A rejected group update is shown to the user.
             "group_update_failed" => {
                 let name = self.group_name(&event.string("group_id"));
-                self.toast(&format!("{name}: a group update was rejected and not applied."));
+                self.toast(&tf!("{}: a group update was rejected and not applied.", name));
             }
             "device_change" | "device_linked" | "group_updated" | "member_left"
             | "profile_update" => {
@@ -542,7 +544,7 @@ impl App {
     fn notify_always(self: &Rc<Self>, id: &str, title: &str, body: &str) {
         // Same setting as message notifications: no names on a lock screen.
         let hide = self.prefs.borrow().hide_notification_content;
-        let (title, body) = if hide { ("Typeon", "Security notice") } else { (title, body) };
+        let (title, body) = if hide { ("Typeon", t("Security notice")) } else { (title, body) };
         post_notification(&self.application, id, title, body, gio::NotificationPriority::High);
     }
 
@@ -555,7 +557,7 @@ impl App {
         let body = util::quote_plain(body);
         let priority = if mention { gio::NotificationPriority::High } else { gio::NotificationPriority::Normal };
         // The setting hides who wrote and what: the title is a contact or group name.
-        let hidden = if mention { "You were mentioned in a group" } else { "New message" };
+        let hidden = if mention { t("You were mentioned in a group") } else { t("New message") };
         // One notification id per conversation, so a burst of messages
         // replaces itself instead of stacking up a wall of popups.
         self.notify_if_away_text(conversation_id, conversation_id, title, &body, hidden, priority);
@@ -612,7 +614,7 @@ impl App {
             return String::new();
         }
         if *self.own_identity_id.borrow() == identity_id {
-            return "You".to_string();
+            return t("You").to_string();
         }
         for contact in self.contacts.borrow().iter() {
             if contact.identity_id == identity_id {
@@ -628,7 +630,7 @@ impl App {
                 return group.name.clone();
             }
         }
-        "Group".to_string()
+        t("Group").to_string()
     }
 
     /// Avatar bytes for a contact, looked up by identity id.
@@ -813,7 +815,7 @@ pub fn set_metered(metered: bool) {
 
 /// A disappearing message's content never goes into a notification (it would outlive the message there).
 fn shown_text(event: &Event, text: String) -> String {
-    if event.number("expire_secs") > 0 { "Disappearing message".to_string() } else { text }
+    if event.number("expire_secs") > 0 { t("Disappearing message").to_string() } else { text }
 }
 
 /// One desktop notification, replacing any earlier one with the same `id`.

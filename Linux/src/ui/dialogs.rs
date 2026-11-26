@@ -10,6 +10,7 @@ use gtk::glib;
 
 use crate::app::App;
 use crate::core;
+use crate::i18n::t;
 use crate::qr;
 use crate::ui::window::{Conversation, MainUi};
 use crate::util;
@@ -26,7 +27,7 @@ pub fn confirm(
 ) {
     let Some(window) = app.window() else { return };
     let dialog = adw::MessageDialog::new(Some(&window), Some(heading), Some(body));
-    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("cancel", t("Cancel"));
     dialog.add_response("accept", accept_label);
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
@@ -65,7 +66,7 @@ pub fn prompt(
 
     let dialog = adw::MessageDialog::new(Some(&window), Some(heading), Some(body));
     dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&entry)));
-    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("cancel", t("Cancel"));
     dialog.add_response("accept", accept_label);
     dialog.set_default_response(Some("accept"));
     dialog.set_close_response("cancel");
@@ -116,7 +117,7 @@ pub fn chat_context_menu(
         let on_pin_toggled = on_pin_toggled.clone();
         entries.push((
             "view-pin-symbolic",
-            if pinned { "Unpin chat" } else { "Pin chat" }.to_string(),
+            if pinned { t("Unpin chat") } else { t("Pin chat") }.to_string(),
             false,
             Box::new(move || {
                 main.app.prefs.borrow_mut().set_pinned(&pin_key, !pinned);
@@ -136,7 +137,7 @@ pub fn chat_context_menu(
                 let conversation = conversation.clone();
                 entries.push((
                     "user-trash-symbolic",
-                    "Clear chat history".to_string(),
+                    t("Clear chat history").to_string(),
                     true,
                     Box::new(move || {
                         let main = main.clone();
@@ -144,13 +145,13 @@ pub fn chat_context_menu(
                         let conversation = conversation.clone();
                         confirm(
                             &main.app.clone(),
-                            "Clear this chat?",
-                            &format!(
+                            t("Clear this chat?"),
+                            &tf!(
                                 "Deletes the local messages and attachments for {}. You stay \
                                  paired and can keep messaging.",
                                 name
                             ),
-                            "Clear",
+                            t("Clear"),
                             true,
                             move || {
                                 let main = main.clone();
@@ -163,7 +164,7 @@ pub fn chat_context_menu(
                                     move |result| match result {
                                         Ok(()) => {
                                             main.reload_if_open(&conversation);
-                                            main.app.toast("Chat history cleared.");
+                                            main.app.toast(t("Chat history cleared."));
                                         }
                                         Err(error) => main.app.toast(&error),
                                     },
@@ -180,7 +181,7 @@ pub fn chat_context_menu(
                 let conversation = conversation.clone();
                 entries.push((
                     "edit-delete-symbolic",
-                    "Delete contact".to_string(),
+                    t("Delete contact").to_string(),
                     true,
                     Box::new(move || {
                         let main = main.clone();
@@ -188,13 +189,13 @@ pub fn chat_context_menu(
                         let conversation = conversation.clone();
                         confirm(
                             &main.app.clone(),
-                            "Delete this contact?",
-                            &format!(
+                            t("Delete this contact?"),
+                            &tf!(
                                 "Removes {} completely, including the ratchet session. You will \
                                  need a fresh QR or manual pairing to message them again.",
                                 name
                             ),
-                            "Delete",
+                            t("Delete"),
                             true,
                             move || {
                                 let main = main.clone();
@@ -206,7 +207,7 @@ pub fn chat_context_menu(
                                         Ok(()) => {
                                             main.close_if_open(&conversation);
                                             main.refresh_chats();
-                                            main.app.toast("Contact deleted.");
+                                            main.app.toast(t("Contact deleted."));
                                         }
                                         Err(error) => main.app.toast(&error),
                                     },
@@ -225,9 +226,9 @@ pub fn chat_context_menu(
             // The founder cannot leave — for them the only exit is deleting the
             // group for everyone (see the core's `leave_group`).
             let label = if is_founder {
-                "Delete group for everyone"
+                t("Delete group for everyone")
             } else {
-                "Leave group"
+                t("Leave group")
             };
             entries.push((
                 "edit-delete-symbolic",
@@ -238,9 +239,9 @@ pub fn chat_context_menu(
                     let group_id = group_id.clone();
                     let conversation = conversation.clone();
                     let body = if is_founder {
-                        format!("\"{}\" is removed for every member. This cannot be undone.", name)
+                        tf!("\"{}\" is removed for every member. This cannot be undone.", name)
                     } else {
-                        format!(
+                        tf!(
                             "You leave \"{}\". The founder is told, and the group disappears from \
                              all your linked devices.",
                             name
@@ -248,9 +249,9 @@ pub fn chat_context_menu(
                     };
                     confirm(
                         &main.app.clone(),
-                        if is_founder { "Delete this group?" } else { "Leave this group?" },
+                        if is_founder { t("Delete this group?") } else { t("Leave this group?") },
                         &body,
-                        if is_founder { "Delete" } else { "Leave" },
+                        if is_founder { t("Delete") } else { t("Leave") },
                         true,
                         move || {
                             let main = main.clone();
@@ -266,7 +267,7 @@ pub fn chat_context_menu(
                                     Ok(()) => {
                                         main.close_if_open(&conversation);
                                         main.refresh_chats();
-                                        main.app.toast("Done.");
+                                        main.app.toast(t("Done."));
                                     }
                                     Err(error) => main.app.toast(&error),
                                 },
@@ -303,11 +304,11 @@ pub fn add_contact(app: &Rc<App>) {
     let app_for_submit = app.clone();
     prompt(
         app,
-        "Add a contact",
-        "Paste the code from the other person's \"My contact code\" screen.",
+        t("Add a contact"),
+        t("Paste the code from the other person's \"My contact code\" screen."),
         "identity|fingerprint|nonce|name|/ip4/…",
         "",
-        "Add",
+        t("Add"),
         move |text| {
             // Core lock — the poll thread can hold it for seconds — so the
             // manual-entry processing runs off the GTK thread and the UI only
@@ -318,12 +319,12 @@ pub fn add_contact(app: &Rc<App>) {
                 move |result| match result {
                     Ok(peer) => {
                         app.refresh_caches();
-                        app.toast(&format!(
+                        app.toast(&tf!(
                             "Pairing with {} — this finishes once both devices are reachable.",
                             peer.device_name
                         ));
                     }
-                    Err(error) => app.toast(&format!("Could not add contact: {}", error)),
+                    Err(error) => app.toast(&tf!("Could not add contact: {}", error)),
                 },
             );
         },
@@ -344,7 +345,7 @@ pub fn show_own_code(app: &Rc<App>) {
         .build();
 
     let code_label = gtk::Label::builder()
-        .label("Waiting for a network address…")
+        .label(t("Waiting for a network address…"))
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .selectable(true)
@@ -354,7 +355,7 @@ pub fn show_own_code(app: &Rc<App>) {
     code_label.add_css_class("caption");
 
     let copy = gtk::Button::builder()
-        .label("Copy code")
+        .label(t("Copy code"))
         .halign(gtk::Align::Center)
         .sensitive(false)
         .build();
@@ -378,7 +379,7 @@ pub fn show_own_code(app: &Rc<App>) {
         || core::identity_short_code().unwrap_or_default(),
         move |short_code| {
             if !short_code.is_empty() {
-                safety.set_label(&format!("Safety number: {}", short_code));
+                safety.set_label(&tf!("Safety number: {}", short_code));
                 safety.set_visible(true);
             }
         },
@@ -399,7 +400,7 @@ pub fn show_own_code(app: &Rc<App>) {
     let dialog = adw::Window::builder()
         .modal(true)
         .transient_for(&window)
-        .title("My contact code")
+        .title(t("My contact code"))
         .default_width(420)
         .default_height(620)
         .content(&toolbar)
@@ -438,7 +439,7 @@ pub fn show_own_code(app: &Rc<App>) {
                     in_flight.set(false);
                     let Some((manual, payload)) = found else {
                         if attempts_now >= 40 {
-                            code_label.set_label("No listening address yet — check your connection.");
+                            code_label.set_label(t("No listening address yet — check your connection."));
                             // give up: the flag stays set, later ticks are no-ops.
                             in_flight.set(true);
                         }
@@ -477,11 +478,11 @@ pub fn create_group(main: &Rc<MainUi>) {
     let main = main.clone();
     prompt(
         &main.app.clone(),
-        "New group",
-        "Members are invited afterwards, from inside the group.",
-        "Group name",
+        t("New group"),
+        t("Members are invited afterwards, from inside the group."),
+        t("Group name"),
         "",
-        "Create",
+        t("Create"),
         move |name| {
             // Core lock: off the GTK thread.
             let main = main.clone();
@@ -493,7 +494,7 @@ pub fn create_group(main: &Rc<MainUi>) {
                         main.app.refresh_caches();
                         main.open_conversation(Conversation::Group { group_id, name });
                     }
-                    Err(error) => main.app.toast(&format!("Could not create the group: {}", error)),
+                    Err(error) => main.app.toast(&tf!("Could not create the group: {}", error)),
                 },
             );
         },
@@ -506,9 +507,9 @@ pub fn linked_devices(app: &Rc<App>) {
     let Some(window) = app.window() else { return };
 
     let group = adw::PreferencesGroup::builder()
-        .title("Devices on your account")
+        .title(t("Devices on your account"))
         .description(
-            "Each device holds its own keys. Revoke a device from your phone.",
+            t("Each device holds its own keys. Revoke a device from your phone."),
         )
         .build();
 
@@ -523,7 +524,7 @@ pub fn linked_devices(app: &Rc<App>) {
     let dialog = adw::Window::builder()
         .modal(true)
         .transient_for(&window)
-        .title("Linked devices")
+        .title(t("Linked devices"))
         .default_width(480)
         .default_height(420)
         .content(&toolbar)
@@ -546,12 +547,13 @@ pub fn linked_devices(app: &Rc<App>) {
                     group.remove(&row);
                 }
                 for device in devices {
-                    let subtitle = format!(
-                        "{}{}{}",
-                        util::short_fingerprint(&device.device_fingerprint),
-                        if device.is_this_device { " · this computer" } else { "" },
-                        if device.is_active { "" } else { " · revoked" },
-                    );
+                    let fingerprint = util::short_fingerprint(&device.device_fingerprint);
+                    let subtitle = match (device.is_this_device, device.is_active) {
+                        (true, true) => tf!("{} · this computer", fingerprint),
+                        (true, false) => tf!("{} · this computer · revoked", fingerprint),
+                        (false, false) => tf!("{} · revoked", fingerprint),
+                        (false, true) => fingerprint,
+                    };
                     let row = adw::ActionRow::builder()
                         .title(glib::markup_escape_text(&device.device_name).as_str())
                         .subtitle(subtitle.as_str())
@@ -561,7 +563,7 @@ pub fn linked_devices(app: &Rc<App>) {
 
                     // A revoked device stays listed until the user removes it here.
                     if !device.is_active {
-                        let forget = gtk::Button::builder().label("Remove from list").valign(gtk::Align::Center).build();
+                        let forget = gtk::Button::builder().label(t("Remove from list")).valign(gtk::Align::Center).build();
                         let app = app.clone();
                         let fingerprint = device.device_fingerprint.clone();
                         forget.connect_clicked(move |_| {
@@ -607,10 +609,10 @@ pub fn pending_messages(app: &Rc<App>) {
     let Some(window) = app.window() else { return };
 
     let group = adw::PreferencesGroup::builder()
-        .title("Waiting for delivery confirmation")
+        .title(t("Waiting for delivery confirmation"))
         .description(
-            "These are retried automatically with a growing backoff. \"Retry now\" only moves \
-             the next attempt forward.",
+            t("These are retried automatically with a growing backoff. \"Retry now\" only moves \
+             the next attempt forward."),
         )
         .build();
 
@@ -618,7 +620,7 @@ pub fn pending_messages(app: &Rc<App>) {
     page.add(&group);
 
     let header = adw::HeaderBar::new();
-    let retry_all = gtk::Button::builder().label("Retry all").build();
+    let retry_all = gtk::Button::builder().label(t("Retry all")).build();
     header.pack_end(&retry_all);
 
     let toolbar = adw::ToolbarView::new();
@@ -628,7 +630,7 @@ pub fn pending_messages(app: &Rc<App>) {
     let dialog = adw::Window::builder()
         .modal(true)
         .transient_for(&window)
-        .title("Pending messages")
+        .title(t("Pending messages"))
         .default_width(560)
         .default_height(480)
         .content(&toolbar)
@@ -636,8 +638,8 @@ pub fn pending_messages(app: &Rc<App>) {
 
     let rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
     let placeholder = adw::ActionRow::builder()
-        .title("Nothing pending")
-        .subtitle("Every message has been acknowledged.")
+        .title(t("Nothing pending"))
+        .subtitle(t("Every message has been acknowledged."))
         .build();
     group.add(&placeholder);
 
@@ -665,7 +667,7 @@ pub fn pending_messages(app: &Rc<App>) {
                     } else {
                         message.device_name.clone()
                     };
-                    let subtitle = format!(
+                    let subtitle = tf!(
                         "to {} · sent {}",
                         target,
                         util::format_list_time(message.original_sent_at)
@@ -681,7 +683,7 @@ pub fn pending_messages(app: &Rc<App>) {
                         .valign(gtk::Align::Center)
                         .build();
 
-                    let retry = gtk::Button::builder().label("Retry now").build();
+                    let retry = gtk::Button::builder().label(t("Retry now")).build();
                     {
                         let app = app.clone();
                         let message_id = message.message_id.clone();
@@ -690,13 +692,13 @@ pub fn pending_messages(app: &Rc<App>) {
                             let message_id = message_id.clone();
                             crate::app::run_in_background(
                                 move || core::retry_pending_message_now(&message_id),
-                                move |_| app.toast("Retrying now."),
+                                move |_| app.toast(t("Retrying now.")),
                             );
                         });
                     }
                     buttons.append(&retry);
 
-                    let cancel = gtk::Button::builder().label("Give up").build();
+                    let cancel = gtk::Button::builder().label(t("Give up")).build();
                     cancel.add_css_class("destructive-action");
                     {
                         let app = app.clone();
@@ -705,15 +707,15 @@ pub fn pending_messages(app: &Rc<App>) {
                             let (app_done, message_id) = (app.clone(), message_id.clone());
                             confirm(
                                 &app,
-                                "Give up on this message?",
-                                "It is removed from the queue and never sent.",
-                                "Give up",
+                                t("Give up on this message?"),
+                                t("It is removed from the queue and never sent."),
+                                t("Give up"),
                                 true,
                                 move || {
                                     let (app, message_id) = (app_done.clone(), message_id.clone());
                                     crate::app::run_in_background(
                                         move || core::cancel_pending_message(&message_id),
-                                        move |_| app.toast("Message abandoned."),
+                                        move |_| app.toast(t("Message abandoned.")),
                                     );
                                 },
                             );
@@ -739,7 +741,7 @@ pub fn pending_messages(app: &Rc<App>) {
             crate::app::run_in_background(
                 core::retry_all_pending_now,
                 move |()| {
-                    app.toast("Retrying everything now.");
+                    app.toast(t("Retrying everything now."));
                     rebuild();
                 },
             );
@@ -842,14 +844,14 @@ fn check_device_alerts(watch: &Rc<AlertWatch>) {
 
         *watch.showing.borrow_mut() = Some(alert.new_device_fingerprint.clone());
 
-        let body = format!(
+        let body = tf!(
             "{} is now messaging from a device you have not seen before.\n\nNew safety number: \
              {}\nKnown: {}\n\nAccept only if they told you they added or replaced a device. If \
              not, this could be someone impersonating them.",
             alert.contact_display_name,
             alert.new_device_short_code,
             if alert.known_device_short_codes.is_empty() {
-                "none".to_string()
+                t("none").to_string()
             } else {
                 alert.known_device_short_codes.join(", ")
             }
@@ -857,11 +859,11 @@ fn check_device_alerts(watch: &Rc<AlertWatch>) {
 
         let dialog = adw::MessageDialog::new(
             Some(&window),
-            Some("A contact's device changed"),
+            Some(t("A contact's device changed")),
             Some(&body),
         );
-        dialog.add_response("reject", "Reject");
-        dialog.add_response("accept", "Accept");
+        dialog.add_response("reject", t("Reject"));
+        dialog.add_response("accept", t("Accept"));
         dialog.set_default_response(Some("reject"));
         dialog.set_close_response("reject");
         dialog.set_response_appearance("reject", adw::ResponseAppearance::Destructive);
@@ -883,9 +885,9 @@ fn check_device_alerts(watch: &Rc<AlertWatch>) {
                 },
                 move |()| {
                     watch.app.toast(if accepting {
-                        "New device accepted."
+                        t("New device accepted.")
                     } else {
-                        "New device rejected."
+                        t("New device rejected.")
                     });
                     watch.app.refresh_caches();
                     *watch.showing.borrow_mut() = None;
@@ -936,7 +938,7 @@ pub fn storage(app: &Rc<App>) {
     let dialog = adw::Window::builder()
         .modal(true)
         .transient_for(&window)
-        .title("Storage")
+        .title(t("Storage"))
         .default_width(520)
         .default_height(620)
         .content(&toolbar)
@@ -958,20 +960,20 @@ pub fn storage(app: &Rc<App>) {
                 };
                 let again: Rc<dyn Fn()> = Rc::new(again);
 
-                let totals = adw::PreferencesGroup::builder().title("On this device").build();
+                let totals = adw::PreferencesGroup::builder().title(t("On this device")).build();
                 for (title, bytes) in [
-                    ("Messages (database)", usage.db_bytes),
-                    ("Files and media", usage.attachments_bytes),
-                    ("Voice messages", usage.voice_bytes),
-                    ("Stickers", usage.stickers_bytes),
+                    (t("Messages (database)"), usage.db_bytes),
+                    (t("Files and media"), usage.attachments_bytes),
+                    (t("Voice messages"), usage.voice_bytes),
+                    (t("Stickers"), usage.stickers_bytes),
                 ] {
                     totals.add(&adw::ActionRow::builder().title(title).subtitle(util::human_size(bytes).as_str()).build());
                 }
                 let cache = adw::ActionRow::builder()
-                    .title("Decrypted cache")
+                    .title(t("Decrypted cache"))
                     .subtitle(util::human_size(usage.cache_bytes).as_str())
                     .build();
-                let clear = gtk::Button::builder().label("Clear").valign(gtk::Align::Center).build();
+                let clear = gtk::Button::builder().label(t("Clear")).valign(gtk::Align::Center).build();
                 {
                     let again = again.clone();
                     clear.connect_clicked(move |_| {
@@ -985,21 +987,21 @@ pub fn storage(app: &Rc<App>) {
                 groups.borrow_mut().push(totals);
 
                 let chats = adw::PreferencesGroup::builder()
-                    .title("Chats")
-                    .description("Removing files keeps the messages; a file can be downloaded again while its sender still has it.")
+                    .title(t("Chats"))
+                    .description(t("Removing files keeps the messages; a file can be downloaded again while its sender still has it."))
                     .build();
                 for chat in usage.chats {
                     let row = adw::ActionRow::builder()
                         .title(glib::markup_escape_text(&chat.name).as_str())
-                        .subtitle(format!("{} · {} files", util::human_size(chat.bytes), chat.count).as_str())
+                        .subtitle(tf!("{} · Files: {}", util::human_size(chat.bytes), chat.count).as_str())
                         .build();
                     if chat.count > 0 {
-                        let remove = gtk::Button::builder().icon_name("edit-clear-all-symbolic").tooltip_text("Remove this chat's files from this device").valign(gtk::Align::Center).build();
+                        let remove = gtk::Button::builder().icon_name("edit-clear-all-symbolic").tooltip_text(t("Remove this chat's files from this device")).valign(gtk::Align::Center).build();
                         remove.add_css_class("flat");
                         let (app, chat, again) = (app.clone(), chat.clone(), again.clone());
                         remove.connect_clicked(move |_| {
                             let (app2, chat, again) = (app.clone(), chat.clone(), again.clone());
-                            confirm(&app, "Remove these files?", &format!("{} of files from \"{}\" leave this device. The messages stay.", util::human_size(chat.bytes), chat.name), "Remove", true, move || {
+                            confirm(&app, t("Remove these files?"), &tf!("{} of files from \"{}\" leave this device. The messages stay.", util::human_size(chat.bytes), chat.name), t("Remove"), true, move || {
                                 let (app, chat, again) = (app2.clone(), chat.clone(), again.clone());
                                 crate::app::run_in_background(
                                     move || {
@@ -1035,7 +1037,7 @@ pub fn storage(app: &Rc<App>) {
                         });
                         row.add_suffix(&remove);
                     }
-                    let prune = gtk::DropDown::from_strings(&["Delete older than…", "1 week", "1 month", "3 months", "6 months", "1 year"]);
+                    let prune = gtk::DropDown::from_strings(&[t("Delete older than…"), t("1 week"), t("1 month"), t("3 months"), t("6 months"), t("1 year")]);
                     prune.set_valign(gtk::Align::Center);
                     {
                         let (app, chat, again) = (app.clone(), chat.clone(), again.clone());
@@ -1051,11 +1053,11 @@ pub fn storage(app: &Rc<App>) {
                                 },
                                 move |stats| {
                                     if stats.del_msg_count == 0 && stats.del_att_bytes == 0 {
-                                        app.toast("Nothing that old in this chat");
+                                        app.toast(t("Nothing that old in this chat"));
                                         return;
                                     }
                                     let app2 = app.clone();
-                                    confirm(&app, "Delete older items?", &format!("{} messages and {} of files from \"{}\" are deleted on this device.", stats.del_msg_count, util::human_size(stats.del_att_bytes), chat.name), "Delete", true, move || {
+                                    confirm(&app, t("Delete older items?"), &tf!("Deleted on this device from \"{}\". Messages: {}. Files: {}.", chat.name, stats.del_msg_count, util::human_size(stats.del_att_bytes)), t("Delete"), true, move || {
                                         let (app, chat, again) = (app2.clone(), chat.clone(), again.clone());
                                         crate::app::run_in_background(
                                             move || core::prune_chat_before(&chat.kind, &chat.id, before),

@@ -13,7 +13,9 @@ use gtk::glib;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::app::{self, App};
+use crate::i18n;
 use crate::core;
+use crate::i18n::t;
 use crate::secrets;
 use crate::ui::{dialogs, onboarding};
 use crate::util;
@@ -56,17 +58,17 @@ pub fn present_page(app: &Rc<App>, page: Option<&str>) {
 
 fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
-        .title("Network")
+        .title(t("Network"))
         .icon_name("network-wireless-symbolic")
         .build();
 
-    let connectivity = adw::PreferencesGroup::builder().title("Connectivity").build();
+    let connectivity = adw::PreferencesGroup::builder().title(t("Connectivity")).build();
 
     let tor = adw::SwitchRow::builder()
-        .title("Route through Tor")
+        .title(t("Route through Tor"))
         .subtitle(
-            "Publishes a persistent .onion address so people can reach you from behind CGNAT. \
-             Takes effect the next time Typeon starts — a live swarm cannot gain a transport.",
+            t("Publishes a persistent .onion address so people can reach you from behind CGNAT. \
+             Takes effect the next time Typeon starts — a live swarm cannot gain a transport."),
         )
         .active(app.prefs.borrow().tor_enabled)
         .build();
@@ -89,9 +91,9 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
                     // the network starts, so the change lands at the next launch.
                     // Tor is the only transport: with it off, no network starts.
                     app.toast(if enabled {
-                        "Tor setting applies after a restart."
+                        t("Tor setting applies after a restart.")
                     } else {
-                        "Tor setting applies after a restart. With Tor off the network will not start."
+                        t("Tor setting applies after a restart. With Tor off the network will not start.")
                     });
                 }
             };
@@ -106,14 +108,14 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
                 .or_else(|| app.window().map(|window| window.upcast()));
             let dialog = adw::MessageDialog::new(
                 parent.as_ref(),
-                Some("Turn Tor off?"),
+                Some(t("Turn Tor off?")),
                 Some(
-                    "Tor is Typeon's only transport. With it off the network does not start after \
-                     the next restart: nothing is sent or received until you turn it back on.",
+                    t("Tor is Typeon's only transport. With it off the network does not start after \
+                     the next restart: nothing is sent or received until you turn it back on."),
                 ),
             );
-            dialog.add_response("cancel", "Cancel");
-            dialog.add_response("off", "Turn off");
+            dialog.add_response("cancel", t("Cancel"));
+            dialog.add_response("off", t("Turn off"));
             dialog.set_default_response(Some("cancel"));
             dialog.set_close_response("cancel");
             dialog.set_response_appearance("off", adw::ResponseAppearance::Destructive);
@@ -134,14 +136,14 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     #[cfg(windows)]
     {
         let autostart = adw::SwitchRow::builder()
-            .title("Start with Windows")
-            .subtitle("Starts hidden in the tray when you sign in, so messages keep arriving.")
+            .title(t("Start with Windows"))
+            .subtitle(t("Starts hidden in the tray when you sign in, so messages keep arriving."))
             .active(crate::win::autostart_enabled())
             .build();
         let app = app.clone();
         autostart.connect_active_notify(move |row| {
             if let Err(error) = crate::win::set_autostart(row.is_active()) {
-                app.toast(&format!("Could not change autostart: {error}"));
+                app.toast(&tf!("Could not change autostart: {}", error));
             }
         });
         connectivity.add(&autostart);
@@ -150,17 +152,17 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     // Builds without an installer path (a plain cargo build) do not self-update; no switch there.
     if cfg!(windows) || std::path::Path::new("/.flatpak-info").exists() {
         let beta = adw::SwitchRow::builder()
-            .title("Beta updates")
-            .subtitle("Typeon updates itself once a day from GitHub releases, over Tor. On: also install beta releases.")
+            .title(t("Beta updates"))
+            .subtitle(t("Typeon updates itself once a day from GitHub releases, over Tor. On: also install beta releases."))
             .active(p2p_messenger::update::beta_enabled(&crate::update::dir()))
             .build();
         let app_beta = app.clone();
         beta.connect_active_notify(move |row| match p2p_messenger::update::set_beta(&crate::update::dir(), row.is_active()) {
             Ok(()) => crate::update::tick(&app_beta),
-            Err(error) => app_beta.toast(&format!("Could not change the update channel: {error}")),
+            Err(error) => app_beta.toast(&tf!("Could not change the update channel: {}", error)),
         });
         connectivity.add(&beta);
-        let status = adw::ActionRow::builder().title("Update status").use_markup(false).subtitle(crate::update::status_text()).build();
+        let status = adw::ActionRow::builder().title(t("Update status")).use_markup(false).subtitle(crate::update::status_text()).build();
         let weak = status.downgrade();
         glib::timeout_add_seconds_local(2, move || match weak.upgrade() {
             Some(row) => {
@@ -169,7 +171,7 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
             }
             None => glib::ControlFlow::Break,
         });
-        let check = gtk::Button::builder().label("Check now").valign(gtk::Align::Center).build();
+        let check = gtk::Button::builder().label(t("Check now")).valign(gtk::Align::Center).build();
         let app = app.clone();
         check.connect_clicked(move |_| {
             let _ = std::fs::remove_file(crate::update::dir().join("last-check"));
@@ -180,10 +182,10 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     }
 
     let node = adw::SwitchRow::builder()
-        .title("Node mode")
+        .title(t("Node mode"))
         .subtitle(
-            "Archive this device's traffic locally and relay for others. Without it, nothing is \
-             kept on disk and history has to be fetched from a peer.",
+            t("Archive this device's traffic locally and relay for others. Without it, nothing is \
+             kept on disk and history has to be fetched from a peer."),
         )
         .active(app.prefs.borrow().node_mode)
         .build();
@@ -204,13 +206,13 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     page.add(&tor_bridges_group(app));
 
     let storage = adw::PreferencesGroup::builder()
-        .title("Storage")
-        .description("Only enforced in node mode. Lowering the limit deletes the oldest files at once.")
+        .title(t("Storage"))
+        .description(t("Only enforced in node mode. Lowering the limit deletes the oldest files at once."))
         .build();
 
     let limit_mb = (app.prefs.borrow().history_storage_limit_bytes / (1024 * 1024)) as f64;
     let limit = adw::SpinRow::with_range(100.0, 32768.0, 100.0);
-    limit.set_title("History and attachment limit (MB)");
+    limit.set_title(t("History and attachment limit (MB)"));
     limit.set_value(limit_mb);
     {
         let app = app.clone();
@@ -235,8 +237,8 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     }
     storage.add(&limit);
     let manage = adw::ActionRow::builder()
-        .title("Manage storage")
-        .subtitle("What this device keeps, per chat; remove files or older history.")
+        .title(t("Manage storage"))
+        .subtitle(t("What this device keeps, per chat; remove files or older history."))
         .activatable(true)
         .build();
     manage.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
@@ -248,10 +250,10 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     page.add(&storage);
 
     let relays = adw::PreferencesGroup::builder()
-        .title("Relays")
+        .title(t("Relays"))
         .description(
-            "A Circuit Relay v2 address you run or trust. This is the one reliable way for two \
-             people on different networks to pair when they share no relay history.",
+            t("A Circuit Relay v2 address you run or trust. This is the one reliable way for two \
+             people on different networks to pair when they share no relay history."),
         )
         .build();
 
@@ -272,10 +274,10 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
                 move || core::add_known_relay_address(&address),
                 move |result| match result {
                     Ok(()) => {
-                        app.toast("Relay added.");
+                        app.toast(t("Relay added."));
                         row.set_text("");
                     }
-                    Err(error) => app.toast(&format!("Rejected: {}", error)),
+                    Err(error) => app.toast(&tf!("Rejected: {}", error)),
                 },
             );
         });
@@ -283,11 +285,11 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
     relays.add(&relay_row);
 
     let reconnect = adw::ActionRow::builder()
-        .title("Reconnect now")
-        .subtitle("Retries every known device immediately, ignoring the backoff.")
+        .title(t("Reconnect now"))
+        .subtitle(t("Retries every known device immediately, ignoring the backoff."))
         .build();
     let reconnect_button = gtk::Button::builder()
-        .label("Reconnect")
+        .label(t("Reconnect"))
         .valign(gtk::Align::Center)
         .build();
     {
@@ -297,7 +299,7 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
                 core::notify_network_changed();
                 core::retry_all_pending_now();
             });
-            app.toast("Reconnecting.");
+            app.toast(t("Reconnecting."));
         });
     }
     reconnect.add_suffix(&reconnect_button);
@@ -315,12 +317,12 @@ fn network_page(app: &Rc<App>) -> adw::PreferencesPage {
 /// That difference is what the user sees. Merging both into one "add address" box would set the wrong expectation.
 fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
-        .title("Servers")
+        .title(t("Servers"))
         .description(
-            "A server holds your messages while the other person is offline and delivers them when \
+            t("A server holds your messages while the other person is offline and delivers them when \
              they come back. It never sees them: they stay end-to-end encrypted and are sealed a \
              second time before being stored. Unlike a relay, a server actually stores — a relay \
-             only forwards while both sides are online.",
+             only forwards while both sides are online."),
         )
         .build();
 
@@ -353,12 +355,12 @@ fn servers_group(app: &Rc<App>) -> adw::PreferencesGroup {
                 move || core::add_server(&code),
                 move |result| match result {
                     Ok(()) => {
-                        app.toast("Server added. Connecting…");
+                        app.toast(t("Server added. Connecting…"));
                         row.set_text("");
                         // Refresh the window so the row list is redrawn.
                         present_page(&app, Some("Network"));
                     }
-                    Err(error) => app.toast(&format!("Rejected: {}", error)),
+                    Err(error) => app.toast(&tf!("Rejected: {}", error)),
                 },
             );
         });
@@ -373,9 +375,9 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
     // Enrolment uses the join code the operator published. If it fails, the reason shows here.
     let subtitle = match (&entry.last_error, entry.connected, entry.enrolled) {
         (Some(err), _, _) if !err.is_empty() => err.clone(),
-        (_, true, true) => "Connected".to_string(),
-        (_, true, false) => "Not enrolled".to_string(),
-        _ => "Connecting…".to_string(),
+        (_, true, true) => t("Connected").to_string(),
+        (_, true, false) => t("Not enrolled").to_string(),
+        _ => t("Connecting…").to_string(),
     };
     let row = adw::ExpanderRow::builder()
         .title(gtk::glib::markup_escape_text(&title).as_str())
@@ -383,7 +385,7 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
         .build();
 
     let route = adw::SwitchRow::builder()
-        .title("Route messages through this server")
+        .title(t("Route messages through this server"))
         .active(entry.route_messages)
         .build();
     {
@@ -395,7 +397,7 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
                 move || core::set_server_routing(&id, on),
                 move |result| {
                     if let Err(e) = result {
-                        app.toast(&format!("Failed: {}", e));
+                        app.toast(&tf!("Failed: {}", e));
                     }
                 },
             );
@@ -404,10 +406,10 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
     row.add_row(&route);
 
     let history = adw::SwitchRow::builder()
-        .title("Store history on this server")
+        .title(t("Store history on this server"))
         .subtitle(
-            "Lets a new device load your old messages. Unlike live messages this backup is not \
-             forward-secret: whoever gets the archive key can read everything uploaded so far.",
+            t("Lets a new device load your old messages. Unlike live messages this backup is not \
+             forward-secret: whoever gets the archive key can read everything uploaded so far."),
         )
         .active(entry.store_history)
         .build();
@@ -425,10 +427,10 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
                         // would mean a device that had not yet heard from its sibling
                         // uploads an archive the others cannot read.
                         let ark = crate::secrets::ensure_archive_key(&data_dir)
-                            .map_err(|e| format!("Could not prepare the archive key: {e}"))?;
+                            .map_err(|e| tf!("Could not prepare the archive key: {}", e))?;
                         core::set_archive_root_key(&ark);
                     }
-                    core::set_server_history(&id, on).map_err(|e| format!("Failed: {e}"))
+                    core::set_server_history(&id, on).map_err(|e| tf!("Failed: {}", e))
                 },
                 move |result| {
                     if let Err(e) = result {
@@ -447,26 +449,26 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
     // conversation is already on screen, but here there are no messages yet
     // and nothing to scroll.
     let restore = adw::ActionRow::builder()
-        .title("Load my history from this server")
-        .subtitle("Needed after restoring from a recovery file or linking this device.")
+        .title(t("Load my history from this server"))
+        .subtitle(t("Needed after restoring from a recovery file or linking this device."))
         .build();
-    let restore_button = gtk::Button::builder().label("Load").valign(gtk::Align::Center).build();
+    let restore_button = gtk::Button::builder().label(t("Load")).valign(gtk::Align::Center).build();
     {
         let app = app.clone();
         restore_button.connect_clicked(move |_| {
             let app = app.clone();
             app::run_in_background(core::restore_server_history, move |result| match result {
-                Ok(n) => app.toast(&format!("Loading history for {} conversations.", n)),
-                Err(e) => app.toast(&format!("Failed: {}", e)),
+                Ok(n) => app.toast(&tf!("Loading history. Conversations: {}", n)),
+                Err(e) => app.toast(&tf!("Failed: {}", e)),
             });
         });
     }
     restore.add_suffix(&restore_button);
     row.add_row(&restore);
 
-    let remove = adw::ActionRow::builder().title("Remove this server").build();
+    let remove = adw::ActionRow::builder().title(t("Remove this server")).build();
     let remove_button = gtk::Button::builder()
-        .label("Remove")
+        .label(t("Remove"))
         .valign(gtk::Align::Center)
         .css_classes(vec!["destructive-action".to_string()])
         .build();
@@ -477,10 +479,10 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
             let (app_done, id) = (app.clone(), id.clone());
             dialogs::confirm(
                 &app,
-                "Remove this server?",
-                "Store-and-forward through it stops on this device. Using it again needs a new \
-                 join code from the server.",
-                "Remove",
+                t("Remove this server?"),
+                t("Store-and-forward through it stops on this device. Using it again needs a new \
+                 join code from the server."),
+                t("Remove"),
                 true,
                 move || {
                     let (app, id) = (app_done.clone(), id.clone());
@@ -488,10 +490,10 @@ fn server_row(app: &Rc<App>, entry: &core::ServerEntry) -> adw::ExpanderRow {
                         move || core::remove_server(&id),
                         move |result| match result {
                             Ok(()) => {
-                                app.toast("Server removed.");
+                                app.toast(t("Server removed."));
                                 present_page(&app, Some("Network"));
                             }
-                            Err(e) => app.toast(&format!("Failed: {}", e)),
+                            Err(e) => app.toast(&tf!("Failed: {}", e)),
                         },
                     );
                 },
@@ -555,23 +557,25 @@ impl ScaleSlot {
 
 /// Built-in font choices — generic CSS families resolve on any desktop via
 /// fontconfig, so nothing has to be bundled.
-const BUILT_IN_FONTS: [(&str, Option<&str>); 5] = [
-    ("System default", None),
-    ("Sans", Some("sans-serif")),
-    ("Serif", Some("serif")),
-    ("Monospace", Some("monospace")),
-    ("Cantarell", Some("Cantarell")),
-];
+fn built_in_fonts() -> [(&'static str, Option<&'static str>); 5] {
+    [
+        (t("System default"), None),
+        (t("Sans"), Some("sans-serif")),
+        (t("Serif"), Some("serif")),
+        (t("Monospace"), Some("monospace")),
+        ("Cantarell", Some("Cantarell")),
+    ]
+}
 
 thread_local!(static REBUILDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
 
 /// Tor connection mode: Direct, Snowflake or pasted obfs4 bridges. Read at network start only, so a change
 /// applies after a restart (same as the Tor switch). A mode whose PT binary is not shipped cannot be picked.
 fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
-    const MODES: [(&str, &str); 3] = [
-        ("direct", "Direct"),
-        ("snowflake", "Snowflake (only if Tor is blocked)"),
-        ("obfs4", "Bridges (obfs4, only if Tor is blocked)"),
+    let modes: [(&'static str, &'static str); 3] = [
+        ("direct", t("Direct")),
+        ("snowflake", t("Snowflake (only if Tor is blocked)")),
+        ("obfs4", t("Bridges (obfs4, only if Tor is blocked)")),
     ];
     // A bridge mode is a fallback (core `tor::watch_bridge_fallback`): Direct first, the bridge after a minute without Tor.
     let describe = {
@@ -580,14 +584,15 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
             let now = if app.prefs.borrow().tor_mode == "direct" {
                 ""
             } else if core::tor_bridge_in_use() {
-                " Now: using the bridge, Tor was blocked."
+                t("Now: using the bridge, Tor was blocked.")
             } else {
-                " Now: Direct."
+                t("Now: Direct.")
             };
-            format!("Snowflake and bridges are used only when Tor is blocked. They use more battery and data than Direct.{now}")
+            let base = t("Snowflake and bridges are used only when Tor is blocked. They use more battery and data than Direct.");
+            format!("{base} {now}").trim_end().to_string()
         }
     };
-    let group = adw::PreferencesGroup::builder().title("Tor connection").description(describe()).build();
+    let group = adw::PreferencesGroup::builder().title(t("Tor connection")).description(describe()).build();
     // Live "Now:" while the group is on screen: the refresh starts on map and stops once it is unmapped or gone.
     group.connect_map(move |group| {
         let weak = group.downgrade();
@@ -600,20 +605,20 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
             _ => glib::ControlFlow::Break,
         });
     });
-    let labels: Vec<String> = MODES
+    let labels: Vec<String> = modes
         .iter()
         .map(|(mode, label)| {
-            if core::tor_transport_available(mode) { label.to_string() } else { format!("{label} (not available in this build)") }
+            if core::tor_transport_available(mode) { label.to_string() } else { tf!("{} (not available in this build)", label) }
         })
         .collect();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let combo = adw::ComboRow::builder().title("Mode").build();
+    let combo = adw::ComboRow::builder().title(t("Mode")).build();
     combo.set_model(Some(&gtk::StringList::new(&labels)));
     let (current, stored_bridges) = {
         let prefs = app.prefs.borrow();
         (prefs.tor_mode.clone(), prefs.tor_bridges.clone())
     };
-    let current_index = MODES.iter().position(|(m, _)| *m == current).unwrap_or(0) as u32;
+    let current_index = modes.iter().position(|(m, _)| *m == current).unwrap_or(0) as u32;
     combo.set_selected(current_index);
     group.add(&combo);
 
@@ -632,10 +637,10 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
     scroll.add_css_class("card");
     let error = gtk::Label::builder().xalign(0.0).wrap(true).visible(false).build();
     error.add_css_class("error");
-    let save = gtk::Button::builder().label("Save bridges").halign(gtk::Align::End).build();
+    let save = gtk::Button::builder().label(t("Save bridges")).halign(gtk::Align::End).build();
     save.add_css_class("suggested-action");
     let hint = gtk::Label::builder()
-        .label("Get your own bridges at <a href=\"https://bridges.torproject.org/options\">bridges.torproject.org</a> and paste them below, one per line. Left empty, Tor's built-in public bridges are used.")
+        .label(t("Get your own bridges at <a href=\"https://bridges.torproject.org/options\">bridges.torproject.org</a> and paste them below, one per line. Left empty, Tor's built-in public bridges are used."))
         .use_markup(true)
         .wrap(true)
         .xalign(0.0)
@@ -662,7 +667,7 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
             }
             prefs.save();
             drop(prefs);
-            app.toast("Tor connection applies after a restart.");
+            app.toast(t("Tor connection applies after a restart."));
         }
     };
     {
@@ -672,10 +677,10 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
             if reverting.replace(false) {
                 return;
             }
-            let (mode, label) = MODES[(row.selected() as usize).min(MODES.len() - 1)];
+            let (mode, label) = modes[(row.selected() as usize).min(modes.len() - 1)];
             if !core::tor_transport_available(mode) {
-                app.toast(&format!("{label} is not available in this build."));
-                let back = MODES.iter().position(|(m, _)| *m == app.prefs.borrow().tor_mode).unwrap_or(0) as u32;
+                app.toast(&tf!("{} is not available in this build.", label));
+                let back = modes.iter().position(|(m, _)| *m == app.prefs.borrow().tor_mode).unwrap_or(0) as u32;
                 if back != row.selected() {
                     reverting.set(true);
                     row.set_selected(back);
@@ -698,7 +703,7 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
                 store("obfs4", Some(lines));
             }
             Err(e) => {
-                error.set_label(&format!("Invalid bridge: {e}"));
+                error.set_label(&tf!("Invalid bridge: {}", e));
                 error.set_visible(true);
             }
         }
@@ -724,8 +729,8 @@ fn rebuild_font_model(app: &Rc<App>, active_id: Option<&str>, font_row: &adw::Co
 
     // Build labels: [0]="Load a custom font …", [1..]=built-in fonts,
     // [built-in+1..]=custom fonts.
-    let mut labels: Vec<String> = vec!["Load a custom font…".to_string()];
-    labels.extend(BUILT_IN_FONTS.iter().map(|(l, _)| l.to_string()));
+    let mut labels: Vec<String> = vec![t("Load a custom font…").to_string()];
+    labels.extend(built_in_fonts().iter().map(|(l, _)| l.to_string()));
     labels.extend(custom_fonts.iter().map(|f| f.display_name.clone()));
 
     font_row.set_model(Some(&gtk::StringList::new(
@@ -736,14 +741,14 @@ fn rebuild_font_model(app: &Rc<App>, active_id: Option<&str>, font_row: &adw::Co
     let active_idx = if let Some(aid) = active_id {
         if let Some(pos) = custom_fonts.iter().position(|f| f.id == aid) {
             // Built-in fonts count + 1 for "Load…", then the custom font index.
-            Some(BUILT_IN_FONTS.len() + 1 + pos)
+            Some(built_in_fonts().len() + 1 + pos)
         } else {
             None
         }
     } else {
         // Check if a built-in font is active.
         let current_family = &app.prefs.borrow().font_family;
-        BUILT_IN_FONTS
+        built_in_fonts()
             .iter()
             .position(|(_, value)| value.map(|s| s.to_string()) == *current_family)
             .map(|i| i + 1) // +1 for "Load…" option
@@ -754,15 +759,36 @@ fn rebuild_font_model(app: &Rc<App>, active_id: Option<&str>, font_row: &adw::Co
 
 fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
-        .title("Appearance")
+        .title(t("Appearance"))
         .name("appearance")
         .icon_name("applications-graphics-symbolic")
         .build();
 
+    // --- language ---
+    let language_group = adw::PreferencesGroup::new();
+    let language = adw::ComboRow::builder().title(i18n::t("Language")).subtitle(i18n::t("Restart Typeon to apply.")).build();
+    let mut names = vec![i18n::t("Follow system")];
+    names.extend(i18n::LANGUAGES.iter().map(|(_, name)| *name));
+    language.set_model(Some(&gtk::StringList::new(&names)));
+    let chosen = app.prefs.borrow().language.clone();
+    let index = i18n::LANGUAGES.iter().position(|(code, _)| Some(*code) == chosen.as_deref());
+    language.set_selected(index.map_or(0, |i| i as u32 + 1));
+    {
+        let app = app.clone();
+        language.connect_selected_notify(move |row| {
+            let choice = (row.selected() as usize).checked_sub(1).and_then(|i| i18n::LANGUAGES.get(i));
+            let mut prefs = app.prefs.borrow_mut();
+            prefs.language = choice.map(|(code, _)| code.to_string());
+            prefs.save();
+        });
+    }
+    language_group.add(&language);
+    page.add(&language_group);
+
     // --- colour scheme ---
-    let scheme_group = adw::PreferencesGroup::builder().title("Theme").build();
-    let theme = adw::ComboRow::builder().title("Colour scheme").build();
-    theme.set_model(Some(&gtk::StringList::new(&["Follow system", "Light", "Dark"])));
+    let scheme_group = adw::PreferencesGroup::builder().title(t("Theme")).build();
+    let theme = adw::ComboRow::builder().title(t("Colour scheme")).build();
+    theme.set_model(Some(&gtk::StringList::new(&[i18n::t("Follow system"), t("Light"), t("Dark")])));
     theme.set_selected(match app.prefs.borrow().dark_mode {
         None => 0,
         Some(false) => 1,
@@ -789,45 +815,45 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
 
     // --- colours ---
     let colours = adw::PreferencesGroup::builder()
-        .title("Colours")
+        .title(t("Colours"))
         .description(
-            "The accent seeds a full Material 3 tonal palette — surfaces, containers and states are all derived from it. Background and text override the two roles that palette would otherwise pick for you.",
+            t("The accent seeds a full Material 3 tonal palette — surfaces, containers and states are all derived from it. Background and text override the two roles that palette would otherwise pick for you."),
         )
         .build();
     colours.add(&color_row(
         app,
         ColorSlot::Accent,
-        "Accent",
-        "Seeds the whole palette.",
+        t("Accent"),
+        t("Seeds the whole palette."),
     ));
     colours.add(&color_row(
         app,
         ColorSlot::Background,
-        "Background",
-        "Window surface. Cards and popovers are stepped off it.",
+        t("Background"),
+        t("Window surface. Cards and popovers are stepped off it."),
     ));
     colours.add(&color_row(
         app,
         ColorSlot::Foreground,
-        "Text",
-        "Foreground colour on those surfaces.",
+        t("Text"),
+        t("Foreground colour on those surfaces."),
     ));
     page.add(&colours);
 
     // --- sizes ---
     let sizes = adw::PreferencesGroup::builder()
-        .title("Size")
+        .title(t("Size"))
         .description(
-            "Text scales the font only. Interface scales everything — spacing and controls as well — through the toolkit's own density setting, so it stacks on top.",
+            t("Text scales the font only. Interface scales everything — spacing and controls as well — through the toolkit's own density setting, so it stacks on top."),
         )
         .build();
-    sizes.add(&scale_row(app, ScaleSlot::Text, "Text size"));
-    sizes.add(&scale_row(app, ScaleSlot::Ui, "Interface size"));
+    sizes.add(&scale_row(app, ScaleSlot::Text, t("Text size")));
+    sizes.add(&scale_row(app, ScaleSlot::Ui, t("Interface size")));
     page.add(&sizes);
 
     // --- font ---
-    let typography = adw::PreferencesGroup::builder().title("Typography").build();
-    let font = adw::ComboRow::builder().title("Font").build();
+    let typography = adw::PreferencesGroup::builder().title(t("Typography")).build();
+    let font = adw::ComboRow::builder().title(t("Font")).build();
 
     rebuild_font_model(&app, app.active_custom_font_id().as_deref(), &font);
 
@@ -844,9 +870,9 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
             if idx == 0 {
                 // "Load a custom font…" — open file picker.
                 pick_font(&app, font_for_closure);
-            } else if idx <= BUILT_IN_FONTS.len() {
+            } else if idx <= built_in_fonts().len() {
                 // Built-in font selected (idx 1..=5 → index 0..4).
-                let choice = BUILT_IN_FONTS
+                let choice = built_in_fonts()
                     .get(idx - 1)
                     .and_then(|(_, value)| value.map(str::to_string));
                 {
@@ -862,7 +888,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
             } else {
                 // Custom font selected (idx > BUILT_IN_FONTS.len(); index 0 is "Load…").
                 let custom_fonts = app.list_custom_fonts();
-                let custom_idx = idx - 1 - BUILT_IN_FONTS.len();
+                let custom_idx = idx - 1 - built_in_fonts().len();
                 if let Some(cf) = custom_fonts.get(custom_idx) {
                     app.set_active_custom_font(Some(&cf.id));
                     apply_theme(&app);
@@ -873,7 +899,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
 
     // "Load…" button next to the font selector.
     let load_button = gtk::Button::builder()
-        .label("Load…")
+        .label(t("Load…"))
         .valign(gtk::Align::Center)
         .build();
     {
@@ -892,22 +918,22 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
 
     // --- wallpaper ---
     let wallpaper_group = adw::PreferencesGroup::builder()
-        .title("Chat wallpaper")
-        .description("Drawn behind the message bubbles.")
+        .title(t("Chat wallpaper"))
+        .description(t("Drawn behind the message bubbles."))
         .build();
     let wallpaper = adw::ActionRow::builder()
-        .title("Background image")
+        .title(t("Background image"))
         .subtitle(
             app.prefs
                 .borrow()
                 .chat_wallpaper
                 .clone()
-                .unwrap_or_else(|| "None".to_string())
+                .unwrap_or_else(|| t("None").to_string())
                 .as_str(),
         )
         .build();
     let choose_wallpaper = gtk::Button::builder()
-        .label("Choose…")
+        .label(t("Choose…"))
         .valign(gtk::Align::Center)
         .build();
     {
@@ -923,7 +949,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
     wallpaper.add_suffix(&choose_wallpaper);
     let clear_wallpaper = gtk::Button::builder()
         .icon_name("edit-undo-symbolic")
-        .tooltip_text("Remove")
+        .tooltip_text(t("Remove"))
         .valign(gtk::Align::Center)
         .build();
     clear_wallpaper.add_css_class("flat");
@@ -937,7 +963,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
                 prefs.save();
             }
             if let Some(wallpaper) = wallpaper.upgrade() {
-                wallpaper.set_subtitle("None");
+                wallpaper.set_subtitle(t("None"));
             }
             apply_theme(&app);
         });
@@ -952,7 +978,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
 fn pick_wallpaper(app: &Rc<App>, row: &adw::ActionRow) {
     let Some(window) = app.window() else { return };
     let dialog = gtk::FileDialog::builder().modal(false)
-        .title("Choose a chat wallpaper")
+        .title(t("Choose a chat wallpaper"))
         .build();
     let app = app.clone();
     let row = row.clone();
@@ -974,7 +1000,7 @@ fn pick_wallpaper(app: &Rc<App>, row: &adw::ActionRow) {
 fn pick_font(app: &Rc<App>, font_row: &adw::ComboRow) {
     let Some(window) = app.window() else { return };
     let dialog = gtk::FileDialog::builder().modal(false)
-        .title("Choose a font file")
+        .title(t("Choose a font file"))
         .build();
 
     let app = app.clone();
@@ -992,7 +1018,7 @@ fn pick_font(app: &Rc<App>, font_row: &adw::ComboRow) {
             .to_string();
 
         if let Err(e) = app.import_font(&path, &display_name) {
-            app.toast(&format!("Failed to load font: {e}"));
+            app.toast(&tf!("Failed to load font: {}", e));
             return;
         }
 
@@ -1055,7 +1081,7 @@ fn color_row(app: &Rc<App>, slot: ColorSlot, title: &str, subtitle: &str) -> adw
 
     let reset = gtk::Button::builder()
         .icon_name("edit-undo-symbolic")
-        .tooltip_text("Back to the palette default")
+        .tooltip_text(t("Back to the palette default"))
         .valign(gtk::Align::Center)
         .build();
     reset.add_css_class("flat");
@@ -1123,13 +1149,13 @@ fn scale_row(app: &Rc<App>, slot: ScaleSlot, title: &str) -> adw::ActionRow {
 
 fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
-        .title("Security")
+        .title(t("Security"))
         .icon_name("channel-secure-symbolic")
         .build();
 
-    let identity = adw::PreferencesGroup::builder().title("This device").build();
+    let identity = adw::PreferencesGroup::builder().title(t("This device")).build();
     let safety_number = adw::ActionRow::builder()
-        .title("Safety number")
+        .title(t("Safety number"))
         .build();
     {
         // The code comes from the core — fetched off the GTK thread, set on
@@ -1141,8 +1167,8 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     }
     identity.add(&safety_number);
     let devices = adw::ActionRow::builder()
-        .title("Linked devices")
-        .subtitle("Every device on your account, and which one this is.")
+        .title(t("Linked devices"))
+        .subtitle(t("Every device on your account, and which one this is."))
         .activatable(true)
         .build();
     {
@@ -1151,8 +1177,8 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     }
     identity.add(&devices);
     let hide_content = adw::SwitchRow::builder()
-        .title("Hide message content in notifications")
-        .subtitle("Notifications say \"New message\" without the sender or the text.")
+        .title(t("Hide message content in notifications"))
+        .subtitle(t("Notifications say \"New message\" without the sender or the text."))
         .active(app.prefs.borrow().hide_notification_content)
         .build();
     {
@@ -1166,12 +1192,12 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     identity.add(&hide_content);
     page.add(&identity);
 
-    let profile = adw::PreferencesGroup::builder().title("Profile").build();
+    let profile = adw::PreferencesGroup::builder().title(t("Profile")).build();
 
     // Changing the name notifies every contact over the same ratchet channel
     // the profile picture uses, so offline contacts get it when they return.
     let name_row = adw::EntryRow::builder()
-        .title("Account name")
+        .title(t("Account name"))
         .show_apply_button(true)
         .build();
     {
@@ -1194,7 +1220,7 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
             app::run_in_background(
                 move || core::set_display_name(&name),
                 move |result| match result {
-                    Ok(()) => app.toast("Name changed. Contacts are being notified."),
+                    Ok(()) => app.toast(t("Name changed. Contacts are being notified.")),
                     Err(error) => app.toast(&error),
                 },
             );
@@ -1203,12 +1229,12 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     profile.add(&name_row);
 
     let picture = adw::ActionRow::builder()
-        .title("Profile picture")
-        .subtitle("Sent to every contact you have paired with.")
+        .title(t("Profile picture"))
+        .subtitle(t("Sent to every contact you have paired with."))
         .build();
 
     let choose = gtk::Button::builder()
-        .label("Choose…")
+        .label(t("Choose…"))
         .valign(gtk::Align::Center)
         .build();
     {
@@ -1218,7 +1244,7 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     picture.add_suffix(&choose);
 
     let clear = gtk::Button::builder()
-        .label("Remove")
+        .label(t("Remove"))
         .valign(gtk::Align::Center)
         .build();
     {
@@ -1230,7 +1256,7 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
             app::run_in_background(
                 move || core::set_own_profile_picture(None),
                 move |result| match result {
-                    Ok(()) => app.toast("Profile picture removed."),
+                    Ok(()) => app.toast(t("Profile picture removed.")),
                     Err(error) => app.toast(&error),
                 },
             );
@@ -1240,19 +1266,19 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     profile.add(&picture);
     page.add(&profile);
 
-    let vault_description = format!(
+    let vault_description = tf!(
         "This device's own keys live in a file in your data directory, sealed with a key that \
          exists only inside {}. Typeon will not start if that store is unavailable.",
         app.keyring_backend.display_name()
     );
     let vault = adw::PreferencesGroup::builder()
-        .title("Local vault")
+        .title(t("Local vault"))
         .description(vault_description.as_str())
         .build();
 
     vault.add(
         &adw::ActionRow::builder()
-            .title("Sealed by")
+            .title(t("Sealed by"))
             .subtitle(app.keyring_backend.display_name())
             .build(),
     );
@@ -1260,14 +1286,14 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     let protected = secrets::is_passphrase_protected(&app.data_dir);
     let passphrase = adw::ActionRow::builder()
         .title(if protected {
-            "Change or remove the extra passphrase"
+            t("Change or remove the extra passphrase")
         } else {
-            "Add an extra passphrase"
+            t("Add an extra passphrase")
         })
         .subtitle(if protected {
-            "Wallet key plus a passphrase — both are needed to open the vault."
+            t("Wallet key plus a passphrase — both are needed to open the vault.")
         } else {
-            "Wallet key only. Adding a passphrase asks for it on every launch."
+            t("Wallet key only. Adding a passphrase asks for it on every launch.")
         })
         .activatable(true)
         .build();
@@ -1280,11 +1306,11 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     vault.add(&passphrase);
 
     let recovery = adw::ActionRow::builder()
-        .title("Export a recovery file")
+        .title(t("Export a recovery file"))
         .subtitle(
-            "A passphrase-protected file with every long-term key of this device. This computer \
+            t("A passphrase-protected file with every long-term key of this device. This computer \
              cannot restore from it: if it is lost, link it to your phone again. Keep the file \
-             as safe as the keys themselves, or do not make one.",
+             as safe as the keys themselves, or do not make one."),
         )
         .activatable(true)
         .build();
@@ -1296,13 +1322,13 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     page.add(&vault);
 
     let danger = adw::PreferencesGroup::builder()
-        .title("Account")
+        .title(t("Account"))
         .description(
-            "Logging out erases this device's identity, message archive and attachments from this computer. It does not touch your other devices, and it cannot be undone without a recovery file.",
+            t("Logging out erases this device's identity, message archive and attachments from this computer. It does not touch your other devices, and it cannot be undone without a recovery file."),
         )
         .build();
     let logout = adw::ActionRow::builder()
-        .title("Log out and erase this device")
+        .title(t("Log out and erase this device"))
         .activatable(true)
         .build();
     logout.add_css_class("error");
@@ -1312,8 +1338,8 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
     }
     danger.add(&logout);
     let delete_account = adw::ActionRow::builder()
-        .title("Delete account")
-        .subtitle("Tells every contact and group the account is gone, wipes your linked devices, then erases this device")
+        .title(t("Delete account"))
+        .subtitle(t("Tells every contact and group the account is gone, wipes your linked devices, then erases this device"))
         .activatable(true)
         .build();
     delete_account.add_css_class("error");
@@ -1346,18 +1372,18 @@ fn confirm_delete_account(app: &Rc<App>) {
         },
         move |root| {
             if !root {
-                app.toast("Only the primary device can delete the account.");
+                app.toast(t("Only the primary device can delete the account."));
                 return;
             }
             let app_for_action = app.clone();
             dialogs::confirm(
                 &app,
-                "Delete your account?",
-                "All your contacts and groups are told this account was deleted, and they can no longer message you. Your linked devices are wiped too. This cannot be undone.",
-                "Delete account",
+                t("Delete your account?"),
+                t("All your contacts and groups are told this account was deleted, and they can no longer message you. Your linked devices are wiped too. This cannot be undone."),
+                t("Delete account"),
                 true,
                 move || {
-                    app_for_action.toast("Notifying your contacts…");
+                    app_for_action.toast(t("Notifying your contacts…"));
                     let app_done = app_for_action.clone();
                     app::run_in_background(
                         || {
@@ -1376,7 +1402,7 @@ fn confirm_delete_account(app: &Rc<App>) {
                             if sent {
                                 erase_profile_and_quit(&app_done);
                             } else {
-                                app_done.toast("Could not delete the account. Nothing was erased.");
+                                app_done.toast(t("Could not delete the account. Nothing was erased."));
                             }
                         },
                     );
@@ -1419,7 +1445,7 @@ fn erase_now(app: &Rc<App>) {
             }
             // The phone's revoke can arrive meanwhile and erase it first (`self_revoked`).
             if let Err(error) = removed.or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
-                app.toast(&format!("Could not erase the data directory: {error}"));
+                app.toast(&tf!("Could not erase the data directory: {}", error));
                 return;
             }
             // The core still holds the identity in memory, so stop the process.
@@ -1433,9 +1459,9 @@ fn confirm_logout(app: &Rc<App>) {
     let app_for_action = app.clone();
     dialogs::confirm(
         app,
-        "Erase this device?",
-        "The identity, every message and every downloaded attachment on this computer are deleted, along with the key held in your system keyring. Your other devices keep working, and contacts keep talking to them. Without a recovery file this cannot be undone.",
-        "Erase",
+        t("Erase this device?"),
+        t("The identity, every message and every downloaded attachment on this computer are deleted, along with the key held in your system keyring. Your other devices keep working, and contacts keep talking to them. Without a recovery file this cannot be undone."),
+        t("Erase"),
         true,
         move || erase_profile_and_quit(&app_for_action),
     );
@@ -1445,7 +1471,7 @@ fn confirm_logout(app: &Rc<App>) {
 
 fn pick_profile_picture(app: &Rc<App>) {
     let Some(window) = app.window() else { return };
-    let dialog = gtk::FileDialog::builder().modal(false).title("Choose a profile picture").build();
+    let dialog = gtk::FileDialog::builder().modal(false).title(t("Choose a profile picture")).build();
     let app = app.clone();
     dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
         let Ok(file) = result else { return };
@@ -1457,10 +1483,10 @@ fn pick_profile_picture(app: &Rc<App>) {
         app::run_in_background(
             move || match util::scaled_jpeg(&source, 720, 85) {
                 Some(jpeg) => core::set_own_profile_picture(Some(jpeg)),
-                None => Err("That file is not an image Typeon can read.".to_string()),
+                None => Err(t("That file is not an image Typeon can read.").to_string()),
             },
             move |result| match result {
-                Ok(()) => app_inner.toast("Profile picture updated."),
+                Ok(()) => app_inner.toast(t("Profile picture updated.")),
                 Err(error) => app_inner.toast(&error),
             },
         );
@@ -1471,9 +1497,9 @@ fn change_passphrase(app: &Rc<App>, currently_protected: bool) {
     let Some(window) = app.window() else { return };
 
     let current = gtk::PasswordEntry::builder().show_peek_icon(true).build();
-    current.set_placeholder_text(Some("Current passphrase"));
+    current.set_placeholder_text(Some(t("Current passphrase")));
     let next = gtk::PasswordEntry::builder().show_peek_icon(true).build();
-    next.set_placeholder_text(Some("New passphrase (empty removes it)"));
+    next.set_placeholder_text(Some(t("New passphrase (empty removes it)")));
 
     let fields = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1486,16 +1512,16 @@ fn change_passphrase(app: &Rc<App>, currently_protected: bool) {
 
     let dialog = adw::MessageDialog::new(
         Some(&window),
-        Some("Extra passphrase"),
+        Some(t("Extra passphrase")),
         Some(
-            "This is a second factor on top of the system keyring, not a replacement for it — \
+            t("This is a second factor on top of the system keyring, not a replacement for it — \
              the vault stays sealed either way. Leaving the new passphrase empty goes back to \
-             keyring-only, with no prompt on launch.",
+             keyring-only, with no prompt on launch."),
         ),
     );
     dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&fields)));
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("apply", "Apply");
+    dialog.add_response("cancel", t("Cancel"));
+    dialog.add_response("apply", t("Apply"));
     dialog.set_default_response(Some("apply"));
     dialog.set_close_response("cancel");
     dialog.set_response_appearance("apply", adw::ResponseAppearance::Suggested);
@@ -1519,7 +1545,7 @@ fn change_passphrase(app: &Rc<App>, currently_protected: bool) {
         app::run_in_background(
             move || onboarding::reseal_vault(&data_dir, &old, &new),
             move |result| match result {
-                Ok(()) => app.toast(if removing { "Passphrase removed." } else { "Passphrase updated." }),
+                Ok(()) => app.toast(if removing { t("Passphrase removed.") } else { t("Passphrase updated.") }),
                 Err(error) => app.toast(&error),
             },
         );
@@ -1537,12 +1563,12 @@ fn export_recovery(app: &Rc<App>) {
         .build();
     let dialog = adw::MessageDialog::new(
         Some(&window),
-        Some("Export a recovery file"),
-        Some("Choose a passphrase. The file is hardened with Argon2id and is useless without it."),
+        Some(t("Export a recovery file")),
+        Some(t("Choose a passphrase. The file is hardened with Argon2id and is useless without it.")),
     );
     dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&entry)));
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("export", "Export");
+    dialog.add_response("cancel", t("Cancel"));
+    dialog.add_response("export", t("Export"));
     dialog.set_default_response(Some("export"));
     dialog.set_close_response("cancel");
     dialog.set_response_appearance("export", adw::ResponseAppearance::Suggested);
@@ -1553,12 +1579,12 @@ fn export_recovery(app: &Rc<App>) {
         }
         let passphrase = Zeroizing::new(entry.text().to_string());
         if passphrase.is_empty() {
-            app_for_prompt.toast("A recovery file without a passphrase would protect nothing.");
+            app_for_prompt.toast(t("A recovery file without a passphrase would protect nothing."));
             return;
         }
         // The core refuses it too, but its export call returns no reason.
         if passphrase.chars().count() < p2p_messenger::RECOVERY_PASSPHRASE_MIN_CHARS {
-            app_for_prompt.toast("The passphrase must have at least 12 characters.");
+            app_for_prompt.toast(t("The passphrase must have at least 12 characters."));
             return;
         }
         let app = app_for_prompt.clone();
@@ -1568,11 +1594,11 @@ fn export_recovery(app: &Rc<App>) {
             move || (core::export_recovery(&passphrase), core::last_recovery_trimmed()),
             move |(bytes, trimmed)| {
                 if bytes.is_empty() {
-                    app.toast("Export failed.");
+                    app.toast(t("Export failed."));
                     return;
                 }
                 if trimmed > 0 {
-                    app.toast(&format!("The history was too large: only the newest {trimmed} messages are in this file."));
+                    app.toast(&tf!("The history was too large: only the newest messages are in this file. Messages: {}", trimmed));
                 }
                 save_recovery_bytes(&app, bytes);
             },
@@ -1584,7 +1610,7 @@ fn export_recovery(app: &Rc<App>) {
 fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
     let Some(window) = app.window() else { return };
     let dialog = gtk::FileDialog::builder().modal(false)
-        .title("Save recovery file")
+        .title(t("Save recovery file"))
         .initial_name("typeon-recovery.bin")
         .build();
     let app = app.clone();
@@ -1611,8 +1637,8 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
         // FAT and exFAT have no Unix permissions, so the file cannot be
         // private there. The key set is not written to such a location, not
         // even with a warning, however it is passphrase-wrapped.
-        let refused = "Recovery file not written: that location cannot make it private. \
-                       Choose a folder inside your home directory.";
+        let refused = t("Recovery file not written: that location cannot make it private. \
+                       Choose a folder inside your home directory.");
         // Only a file this `create_new` call actually created may ever be
         // deleted again.
         let mut created = false;
@@ -1659,13 +1685,13 @@ fn save_recovery_bytes(app: &Rc<App>, mut bytes: Vec<u8>) {
                 // A failed stat proves nothing about the mode: keep the file.
                 let private = crate::util::is_private(&path);
                 if private {
-                    app.toast(&format!("Recovery file written to {}", path.display()));
+                    app.toast(&tf!("Recovery file written to {}", path.display()));
                 } else {
                     let _ = std::fs::remove_file(&path);
                     app.toast(refused);
                 }
             }
-            Err(error) => app.toast(&format!("Could not write the file: {}", error)),
+            Err(error) => app.toast(&tf!("Could not write the file: {}", error)),
         }
     });
 }

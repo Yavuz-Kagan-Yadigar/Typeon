@@ -280,7 +280,7 @@ impl ChatView {
         }
         if let Some(relayer) = entry.relayed_by.as_ref().filter(|_| self.is_group()) {
             let relayed = gtk::Label::builder()
-                .label(format!("Relayed by {} · unverified", self.app().identity_name(relayer)).as_str())
+                .label(tf!("Relayed by {} · unverified", self.app().identity_name(relayer)).as_str())
                 .xalign(0.0)
                 .build();
             relayed.add_css_class("caption");
@@ -288,7 +288,7 @@ impl ChatView {
             column.append(&relayed);
         }
 
-        // Disappearing: only the placeholder (see `DISAPPEAR_HIDDEN`), no quote, file or forwarded mark around it.
+        // Disappearing: only the placeholder (see `display_text`), no quote, file or forwarded mark around it.
         let hidden = entry.expire.is_some();
         if let Some(preview) = entry.reply_preview.as_ref().filter(|_| !hidden) {
             let who = entry
@@ -313,7 +313,7 @@ impl ChatView {
         // block of its own, like on the phone: darker rounded box over the text.
         let (forwarded, own_text) = util::split_forwarded(&entry.text);
         if forwarded && !entry.deleted && !hidden {
-            let label = gtk::Label::builder().label("↪ Forwarded").xalign(0.0).build();
+            let label = gtk::Label::builder().label(t("↪ Forwarded")).xalign(0.0).build();
             label.add_css_class("caption");
             label.add_css_class("dim-label");
             label.add_css_class("forwarded-label");
@@ -646,13 +646,12 @@ pub(super) fn seam_radius(delta: i32, height: i32) -> i32 {
 }
 
 /// A disappearing message is never shown on the desktop, which has no FLAG_SECURE equivalent. The phone shows it; the desktop shows only this placeholder.
-pub(super) const DISAPPEAR_HIDDEN: &str = "Disappearing message, view on primary device";
 
 pub(super) fn display_text(entry: &Entry) -> String {
     if entry.deleted {
-        "Message deleted".to_string()
+        glib::markup_escape_text(t("Message deleted")).to_string()
     } else if entry.expire.is_some() {
-        format!("<i>{DISAPPEAR_HIDDEN}</i>")
+        format!("<i>{}</i>", glib::markup_escape_text(t("Disappearing message, view on primary device")))
     } else {
         let text = crate::util::split_forwarded(&entry.text).1;
         crate::util::quote_markup(crate::util::split_leading_quote(text).1)
@@ -674,7 +673,7 @@ pub(super) fn format_meta(timestamp: u64, status: Option<&str>, edited: bool) ->
         _ => "",
     };
     if edited {
-        format!("edited · {}{}", time, tick)
+        glib::markup_escape_text(&tf!("edited · {}{}", time, tick)).to_string()
     } else {
         format!("{}{}", time, tick)
     }

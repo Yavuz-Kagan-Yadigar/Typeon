@@ -22,7 +22,8 @@ install, so this file is the shared copy for opencode, and for Claude on Windows
 - Code review: judge the code, not its comments. Comments are not evidence.
 - The GitHub remote (`origin`) is **public**. Never commit or push private paths: `.claude/`, `reviews/`, `trafficvis/`, `inspection-*/`, `HANDOFF.local.md`, the `Mesaj`/`Pil`/`Test-Bulgulari` notes (all gitignored). Commit or push only when the owner asks.
 - `FLAG_SECURE` is not set on ordinary client chat, list or settings screens (owner rule). It is set only on link/QR/camera/lock screens, below API 33, and while a disappearing message is shown (`P2PApplication.setSecure`, release builds only).
-- New Android text goes into both `res/values/strings.xml` and `res/values-tr/strings.xml`.
+- New Android text goes into `res/values/strings.xml` and every translation: `values-{tr,es,ru,uk,hi,ar,zh-rCN}/strings.xml` (both Android apps). Translate by context, not word for word. `typeon-server` stays English.
+- New desktop text (`Linux/`, also Windows) goes through `t("…")` or `tf!("… {}", x)` (`Linux/src/i18n.rs`; the English text is the key) with an entry in every `Linux/src/lang/*.json`. Use whole sentences; do not join translated fragments. A missing entry shows English.
 - On a release: bump the version with `tools/bump-version.sh`, copy every artifact into `dist/` and refresh `dist/SHA256SUMS`. Gradle leaves release APKs unsigned: sign them with `./sign-release.sh`. The update signature (`SHA256SUMS.sig`) is made by the owner with `tools/sign-update.sh`; give the owner the command, never touch the key.
 - Never write passwords, keys or device secrets into the repo or this file.
 

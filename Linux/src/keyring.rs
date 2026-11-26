@@ -25,6 +25,7 @@
 //! field would spread a lifetime parameter across the whole app for no gain —
 //! these calls happen a handful of times at startup, not in a loop.
 
+use crate::i18n::t;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -67,7 +68,7 @@ impl Backend {
         match self {
             Backend::KdeWallet => "KDE Wallet",
             Backend::GnomeKeyring => "GNOME Keyring",
-            Backend::Unknown => "the system keyring",
+            Backend::Unknown => t("the system keyring"),
         }
     }
 }
@@ -87,33 +88,37 @@ pub enum Unavailable {
 impl Unavailable {
     pub fn heading(&self) -> String {
         match self {
-            Unavailable::NoSessionBus(_) => "No D-Bus session".to_string(),
-            Unavailable::NotInstalled => "No system keyring found".to_string(),
+            Unavailable::NoSessionBus(_) => t("No D-Bus session").to_string(),
+            Unavailable::NotInstalled => t("No system keyring found").to_string(),
             Unavailable::NotRunning { installed, .. } => {
-                format!("{} is not responding", installed.display_name())
+                tf!("{} is not responding", installed.display_name())
             }
         }
     }
 
     pub fn detail(&self) -> String {
         match self {
-            Unavailable::NoSessionBus(error) => format!(
+            Unavailable::NoSessionBus(error) => tf!(
                 "Typeon could not reach the D-Bus session bus, so it has no way to get at a \
-                 secret store.\n\nDetails: {error}"
+                 secret store.\n\nDetails: {}",
+                error
             ),
-            Unavailable::NotInstalled => format!(
+            Unavailable::NotInstalled => tf!(
                 "Typeon keeps this device's secret keys sealed with a key held by your desktop's \
                  secret store, and will not run without one. Neither KDE Wallet nor GNOME \
                  Keyring is installed.\n\nInstall one of them, then start Typeon \
                  again:\n\n    sudo zypper install kwalletd6\n    sudo zypper install \
-                 gnome-keyring\n\n(Looked for an owner of {SECRETS_NAME}.)"
+                 gnome-keyring\n\n(Looked for an owner of {}.)",
+                SECRETS_NAME
             ),
-            Unavailable::NotRunning { installed, detail } => format!(
+            Unavailable::NotRunning { installed, detail } => tf!(
                 "{} is installed but did not provide the Secret Service interface \
-                 ({SECRETS_NAME}).\n\nUnlocking the wallet once is usually enough — open it from \
+                 ({}).\n\nUnlocking the wallet once is usually enough — open it from \
                  your desktop settings, or log out and back in — then start Typeon \
-                 again.\n\nDetails: {detail}",
-                installed.display_name()
+                 again.\n\nDetails: {}",
+                installed.display_name(),
+                SECRETS_NAME,
+                detail
             ),
         }
     }
@@ -161,7 +166,7 @@ fn activate_backend(dbus: &DBusProxy, installed: Backend) -> Result<(), Unavaila
         return Err(Unavailable::NotInstalled);
     }
 
-    let mut last_error = String::from("no backend could be started");
+    let mut last_error = String::from(t("no backend could be started"));
     let mut started = false;
     for name in &candidates {
         let Ok(well_known) = WellKnownName::try_from(name.as_str()) else {
@@ -184,7 +189,7 @@ fn activate_backend(dbus: &DBusProxy, installed: Backend) -> Result<(), Unavaila
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        last_error = format!("started, but never claimed {SECRETS_NAME}");
+        last_error = tf!("started, but never claimed {}", SECRETS_NAME);
     }
 
     Err(match installed {
@@ -205,7 +210,7 @@ pub fn load_key(data_dir: &str) -> Result<Option<[u8; 32]>, String> {
     let collection = unlocked_collection(&service)?;
     let items = collection
         .search_items(attributes(data_dir))
-        .map_err(|error| format!("could not search the wallet: {error}"))?;
+        .map_err(|error| tf!("could not search the wallet: {}", error))?;
 
     let Some(item) = items.first() else {
         return Ok(None);
@@ -213,15 +218,15 @@ pub fn load_key(data_dir: &str) -> Result<Option<[u8; 32]>, String> {
     // The collection is unlocked above, but an individual item can carry its
     // own lock; reading a locked one fails in a way that looks like data loss.
     item.ensure_unlocked()
-        .map_err(|error| format!("the vault key entry stayed locked: {error}"))?;
+        .map_err(|error| tf!("the vault key entry stayed locked: {}", error))?;
     let mut secret = item
         .get_secret()
-        .map_err(|error| format!("could not read the vault key: {error}"))?;
+        .map_err(|error| tf!("could not read the vault key: {}", error))?;
 
     let key: Result<[u8; 32], String> = secret
         .as_slice()
         .try_into()
-        .map_err(|_| "the stored vault key is not 32 bytes".to_string());
+        .map_err(|_| t("the stored vault key is not 32 bytes").to_string());
     secret.zeroize();
     key.map(Some)
 }
@@ -239,7 +244,7 @@ pub fn store_key(data_dir: &str, key: &[u8; 32]) -> Result<(), String> {
             true,
             "application/octet-stream",
         )
-        .map_err(|error| format!("could not write the vault key: {error}"))?;
+        .map_err(|error| tf!("could not write the vault key: {}", error))?;
     Ok(())
 }
 
@@ -250,17 +255,17 @@ pub fn delete_key(data_dir: &str) -> Result<(), String> {
     let collection = unlocked_collection(&service)?;
     let items = collection
         .search_items(attributes(data_dir))
-        .map_err(|error| format!("could not search the wallet: {error}"))?;
+        .map_err(|error| tf!("could not search the wallet: {}", error))?;
     for item in &items {
         item.delete()
-            .map_err(|error| format!("could not remove the vault key: {error}"))?;
+            .map_err(|error| tf!("could not remove the vault key: {}", error))?;
     }
     Ok(())
 }
 
 fn connect<'a>() -> Result<SecretService<'a>, String> {
     SecretService::connect(EncryptionType::Dh)
-        .map_err(|error| format!("could not reach the system keyring: {error}"))
+        .map_err(|error| tf!("could not reach the system keyring: {}", error))
 }
 
 /// The default collection, unlocked — prompting the user if the wallet is
@@ -271,10 +276,10 @@ fn unlocked_collection<'a>(
 ) -> Result<secret_service::blocking::Collection<'a>, String> {
     let collection = service
         .get_default_collection()
-        .map_err(|error| format!("no default wallet collection: {error}"))?;
+        .map_err(|error| tf!("no default wallet collection: {}", error))?;
     collection
         .unlock()
-        .map_err(|error| format!("the wallet stayed locked: {error}"))?;
+        .map_err(|error| tf!("the wallet stayed locked: {}", error))?;
     Ok(collection)
 }
 

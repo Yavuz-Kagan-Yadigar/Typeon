@@ -201,7 +201,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, wparam: usize, lpa
             WM_LBUTTONUP => tray_dispatch(TrayAction::Open),
             WM_RBUTTONUP => {
                 let menu = CreatePopupMenu();
-                let (open, quit) = (wide("Open Typeon"), wide("Quit"));
+                let (open, quit) = (wide(crate::i18n::t("Open Typeon")), wide(crate::i18n::t("Quit")));
                 AppendMenuW(menu, MF_STRING, MENU_OPEN, open.as_ptr());
                 AppendMenuW(menu, MF_STRING, MENU_QUIT, quit.as_ptr());
                 let mut at = POINT { x: 0, y: 0 };

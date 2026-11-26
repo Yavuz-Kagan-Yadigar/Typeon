@@ -20,6 +20,7 @@ use gtk::glib;
 
 use crate::app::{self, App};
 use crate::core;
+use crate::i18n::t;
 use crate::qr;
 use crate::secrets::{self, Vault};
 use crate::ui;
@@ -79,18 +80,18 @@ pub fn start(app: &Rc<App>, host: &adw::ToastOverlay) {
                 Err(false) => fatal(
                     &app_after,
                     &host_after,
-                    "Could not open the database",
-                    "The vault opened but the database did not. Check that the data directory is \
+                    t("Could not open the database"),
+                    t("The vault opened but the database did not. Check that the data directory is \
                      writable and has free space. If the database was made with another vault it \
-                     cannot be read any more.",
+                     cannot be read any more."),
                     false,
                 ),
                 Err(true) => fatal(
                     &app_after,
                     &host_after,
-                    "Could not load this device's keys",
-                    "The vault opened but the core rejected the key bundle. The file is probably \
-                     damaged — remove the data directory and link this device again.",
+                    t("Could not load this device's keys"),
+                    t("The vault opened but the core rejected the key bundle. The file is probably \
+                     damaged — remove the data directory and link this device again."),
                     false,
                 ),
             },
@@ -101,14 +102,14 @@ pub fn start(app: &Rc<App>, host: &adw::ToastOverlay) {
 // --- route 1: first run ---
 
 fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
-    let name_row = adw::EntryRow::builder().title("Device name").build();
+    let name_row = adw::EntryRow::builder().title(t("Device name")).build();
     name_row.set_text(&hostname_guess());
 
     let passphrase_row = adw::PasswordEntryRow::builder()
-        .title("Extra passphrase (optional)")
+        .title(t("Extra passphrase (optional)"))
         .build();
 
-    let description = format!(
+    let description = tf!(
         "This device's keys are sealed with a key held in {}, so copying the file off this \
          machine is not enough to open it. Leave the passphrase empty for a phone-like launch \
          with no prompt; setting one adds a second factor on top of the wallet (Argon2id) and \
@@ -126,7 +127,7 @@ fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     // no recovery-file restore here, both would make this computer a primary
     // that the other devices then depend on while it is switched off.
     let link = gtk::Button::builder()
-        .label("Link to my phone")
+        .label(t("Link to my phone"))
         .build();
     link.add_css_class("suggested-action");
     link.add_css_class("pill");
@@ -156,10 +157,10 @@ fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
 
     let page = adw::StatusPage::builder()
         .icon_name("system-users-symbolic")
-        .title("Welcome to Typeon")
+        .title(t("Welcome to Typeon"))
         .description(
-            "This computer joins the account on your phone as a linked device. Create the \
-             account on the phone first.",
+            t("This computer joins the account on your phone as a linked device. Create the \
+             account on the phone first."),
         )
         .child(&clamped)
         .build();
@@ -249,11 +250,11 @@ fn start_fresh_identity(
     let core_name = name.clone();
     app::run_in_background(
         move || -> Result<([u8; 32], Vec<u8>), String> {
-            let storage_key = open_fresh_database(&data_dir).ok_or("Could not open the database.")?;
-            core::create_identity(&core_name).map_err(|error| format!("Could not create device keys: {}", error))?;
+            let storage_key = open_fresh_database(&data_dir).ok_or(t("Could not open the database."))?;
+            core::create_identity(&core_name).map_err(|error| tf!("Could not create device keys: {}", error))?;
             let bundle = core::take_pending_secret_bundle();
             if bundle.is_empty() {
-                return Err("The core returned no key bundle — nothing was saved.".to_string());
+                return Err(t("The core returned no key bundle — nothing was saved.").to_string());
             }
             Ok((storage_key, bundle))
         },
@@ -288,7 +289,7 @@ fn start_fresh_identity(
                             // Without a persisted vault the identity would be lost on exit, so the
                             // buttons come back and the user has to try again.
                             set_actions_sensitive(&button, true);
-                            app.toast(&format!("Could not write the vault: {}", error));
+                            app.toast(&tf!("Could not write the vault: {}", error));
                             return;
                         }
                     };
@@ -315,10 +316,11 @@ fn unlock(app: &Rc<App>, host: &adw::ToastOverlay, on_open: impl FnOnce(Vault) +
                 Err(error) => fatal(
                     &app,
                     &host,
-                    "Could not read the vault",
-                    &format!(
-                        "{error}\n\nThis is often temporary: the system keyring may not be running \
-                         or unlocked yet. Unlock it, then try again."
+                    t("Could not read the vault"),
+                    &tf!(
+                        "{}\n\nThis is often temporary: the system keyring may not be running \
+                         or unlocked yet. Unlock it, then try again.",
+                        error
                     ),
                     true,
                 ),
@@ -338,12 +340,12 @@ fn prompt_passphrase(app: &Rc<App>, on_open: impl FnOnce(Vault) + 'static) {
     let Some(window) = app.window() else { return };
     let dialog = adw::MessageDialog::new(
         Some(&window),
-        Some("Unlock Typeon"),
-        Some("This device's keys are sealed with your passphrase."),
+        Some(t("Unlock Typeon")),
+        Some(t("This device's keys are sealed with your passphrase.")),
     );
     dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&entry)));
-    dialog.add_response("quit", "Quit");
-    dialog.add_response("unlock", "Unlock");
+    dialog.add_response("quit", t("Quit"));
+    dialog.add_response("unlock", t("Unlock"));
     dialog.set_default_response(Some("unlock"));
     dialog.set_close_response("quit");
     dialog.set_response_appearance("unlock", adw::ResponseAppearance::Suggested);
@@ -417,7 +419,7 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
         *app.own_identity_id.borrow_mut() = identity_id;
     }
 
-    host.set_child(Some(&framed(&spinner_page("Starting the network…"))));
+    host.set_child(Some(&framed(&spinner_page(t("Starting the network…")))));
 
     let (node_mode, tor_enabled, storage_limit, tor_mode, tor_bridges) = {
         let prefs = app.prefs.borrow();
@@ -437,12 +439,12 @@ fn finish_boot(app: &Rc<App>, host: &adw::ToastOverlay, vault: Vault) {
     app::run_in_background(
         // Bridges first. Fails closed: a bridge mode that cannot be set never starts a direct connection.
         move || {
-            core::set_tor_transport(&tor_mode, &tor_bridges).map_err(|e| format!("Tor bridges: {e}"))?;
+            core::set_tor_transport(&tor_mode, &tor_bridges).map_err(|e| tf!("Tor bridges: {}", e))?;
             core::start_network(node_mode, tor_enabled)
         },
         move |result| {
             if let Err(error) = result {
-                app.toast(&format!("Network start failed: {}. Restart Typeon to try again.", error));
+                app.toast(&tf!("Network start failed: {}. Restart Typeon to try again.", error));
             }
             core::set_history_storage_limit_bytes(storage_limit);
             app.refresh_caches();
@@ -484,7 +486,7 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
         .build();
 
     let status = gtk::Label::builder()
-        .label("Preparing a link code…")
+        .label(t("Preparing a link code…"))
         .wrap(true)
         .justify(gtk::Justification::Center)
         .build();
@@ -503,14 +505,14 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     content.append(&status);
     // A pending link can be months old (the phone side long gone): without
     // this the only way back to the setup choices was deleting files by hand.
-    content.append(&erase_button(app, "Cancel linking and start over"));
+    content.append(&erase_button(app, t("Cancel linking and start over")));
 
     let page = adw::StatusPage::builder()
-        .title("Scan this from your phone")
+        .title(t("Scan this from your phone"))
         .description(
-            "On the device that already has your account, open Typeon → Settings → Linked \
+            t("On the device that already has your account, open Typeon → Settings → Linked \
              devices → Link a device, and scan this code. Your phone keeps its secret key; this \
-             computer gets its own.",
+             computer gets its own."),
         )
         .child(&content)
         .build();
@@ -594,8 +596,8 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                             attempts.set(attempts.get() + 1);
                             if attempts.get() >= 60 {
                                 status.set_label(
-                                    "The network is not reachable yet — no listening address was \
-                                     established. Check your connection, then restart Typeon.",
+                                    t("The network is not reachable yet — no listening address was \
+                                     established. Check your connection, then restart Typeon."),
                                 );
                             }
                         }
@@ -614,12 +616,12 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                             qr_slot.append(&widget);
                             *shown.borrow_mut() = payload;
                             // The phone shows the same code in its confirm dialog.
-                            status.set_label(&format!(
+                            status.set_label(&tf!(
                                 "Waiting for your phone to scan this…\n\nCompare code: {}\nYour phone shows the same code before you approve.",
                                 code
                             ));
                         }
-                        None => status.set_label("Could not render the link code."),
+                        None => status.set_label(t("Could not render the link code.")),
                     }
                 },
             );
@@ -662,7 +664,7 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                     prefs.save();
                 }
                 app.refresh_caches();
-                app.toast("This computer is now linked to your account.");
+                app.toast(t("This computer is now linked to your account."));
                 ui::window::build_main(&app, &host);
                 },
             );
@@ -700,14 +702,14 @@ fn spinner_page(message: &str) -> gtk::Widget {
 /// `retry`: the error may be temporary, so "Try again" runs the launch
 /// sequence again and is the first action offered.
 fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str, retry: bool) {
-    let quit = gtk::Button::builder().label("Quit").build();
+    let quit = gtk::Button::builder().label(t("Quit")).build();
     quit.add_css_class("pill");
     {
         let application = app.application.clone();
         quit.connect_clicked(move |_| application.quit());
     }
 
-    let logout = erase_button(app, "Log out and erase this device");
+    let logout = erase_button(app, t("Log out and erase this device"));
 
     let actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -715,7 +717,7 @@ fn fatal(app: &Rc<App>, host: &adw::ToastOverlay, title: &str, detail: &str, ret
         .halign(gtk::Align::Center)
         .build();
     if retry {
-        let again = gtk::Button::builder().label("Try again").build();
+        let again = gtk::Button::builder().label(t("Try again")).build();
         again.add_css_class("pill");
         again.add_css_class("suggested-action");
         let (app, host) = (app.clone(), host.clone());
@@ -759,11 +761,11 @@ fn erase_button(app: &Rc<App>, label: &str) -> gtk::Button {
             let on_confirm_app = app.clone();
             crate::ui::dialogs::confirm(
                 &app,
-                "Erase this device?",
-                "This device's identity, every message and every downloaded attachment on this \
+                t("Erase this device?"),
+                t("This device's identity, every message and every downloaded attachment on this \
                  computer are deleted, along with the key held in your system keyring. Your other \
-                 devices keep working. Without a recovery file this cannot be undone.",
-                "Erase",
+                 devices keep working. Without a recovery file this cannot be undone."),
+                t("Erase"),
                 true,
                 move || {
                     // `.clone()`, not a move: `dialogs::confirm` takes an

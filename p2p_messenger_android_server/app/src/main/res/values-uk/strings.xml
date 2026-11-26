@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon Сервер</string>
+    <string name="intro">Зберігає повідомлення для ваших контактів, поки вони не в мережі, і доставляє їх, коли вони повертаються. Прочитати їх сервер не може: повідомлення надходять уже наскрізно зашифрованими та запечатаними вдруге.</string>
+
+    <string name="lbl_run_server">Запустити сервер</string>
+    <string name="state_stopped">Зупинено</string>
+    <string name="state_running_fmt">Працює · Tor: %1$s</string>
+    <string name="state_no_address">Адреси ще немає — Tor запускається (30–60 с під час першого запуску). Запрошення без адреси не має сенсу.</string>
+
+    <string name="lbl_address">Адреса</string>
+    <string name="lbl_invite">Код приєднання</string>
+    <string name="lbl_invite_desc">Один код для всіх, дійсний 3 дні: відскануйте його на телефоні в Налаштування → Сервери або скопіюйте і вставте там. Необмежена кількість людей може приєднатися з цим самим кодом, нічого не питаючи у вас. Через 3 дні тут сам собою з’явиться новий код. Якщо код витече, оновіть його; пристрої, які вже зареєструвалися, продовжують працювати.</string>
+    <string name="action_new_invite">Оновити код</string>
+    <string name="action_copy_invite">Копіювати код</string>
+    <string name="msg_invite_copied">Код запрошення скопійовано</string>
+    <string name="msg_no_invite_yet">Адреси ще немає — дочекайтеся запуску Tor</string>
+    <string name="confirm_rotate_join_code">Поточний код перестане працювати одразу. Ті, хто має старий QR-код або посилання, не зможуть приєднатися, доки ви не передасте їм новий. Пристрої, які вже зареєструвалися, не зачіпаються.</string>
+
+    <string name="lbl_devices">Зареєстровані пристрої</string>
+    <string name="device_row_fmt">%1$s… · %2$s</string>
+    <string name="action_revoke">Відкликати</string>
+    <string name="dlg_revoke_title">Відкликати цей пристрій?</string>
+    <string name="dlg_revoke_body">Він більше не зможе залишати або отримувати повідомлення і не зможе зареєструватися знову, доки ви його не розблокуєте. Його месенджер продовжить працювати — просто перейде на доставку напряму між пристроями. Відкликання також замінює публічний код приєднання; передайте новий іншим.</string>
+
+    <string name="lbl_stats">Активність</string>
+    <string name="stats_fmt">Пристроїв: %1$d\nЗбережено: %2$d · Отримано: %3$d · Віддано частин файлів: %4$d\nДиск: %5$s</string>
+
+    <string name="lbl_options">Параметри</string>
+    <string name="lbl_tor_always">Цей сервер завжди розміщує onion-службу. Це єдиний спосіб, яким телефон за NAT оператора взагалі доступний — без переадресації портів, домену чи сертифіката — тож це не те, що можна вимкнути.</string>
+    <string name="lbl_node">Також працювати як ретранслятор</string>
+    <string name="lbl_node_desc">Допомагає незнайомим користувачам з’єднуватися між собою. Не залежить від поштової скриньки: передає живий трафік наосліп і нічого не зберігає.</string>
+    <string name="action_battery">Виняток з оптимізації батареї</string>
+    <string name="msg_battery_already">Виняток уже ввімкнено</string>
+    <string name="msg_battery_manual">Недоступно на цьому пристрої — налаштуйте вручну в Налаштування → Батарея.</string>
+
+    <string name="notif_channel">Typeon Сервер</string>
+    <string name="notif_starting">Запуск…</string>
+    <string name="notif_running">Сервер працює</string>
+
+    <string name="footer_note">Android може зупинити foreground-службу за нестачі пам’яті. Цей застосунок призначено для запасного телефону, що лишається під’єднаним до зарядки; для сервера, який не повинен нічого пропускати, запустіть демон typeon-server на невеликому VPS.</string>
+    <string name="lbl_storage">Розташування сховища</string>
+    <string name="lbl_storage_desc">Вкладення зберігаються тут. Ідентичність і стан Tor завжди лишаються у внутрішній пам’яті.</string>
+    <string name="action_choose_storage">Вибрати сховище</string>
+    <string name="dlg_storage_title">Перенести сховище сервера</string>
+    <string name="dlg_storage_moving">Перенесення даних…</string>
+    <string name="msg_storage_moved">Сховище перенесено. Сервер перезапускається.</string>
+    <string name="msg_storage_failed">Не вдалося перенести: %1$s</string>
+    <string name="msg_storage_same">Уже використовується це розташування.</string>
+    <string name="lbl_internal">Внутрішня пам’ять</string>
+    <string name="lbl_sdcard">SD-картка</string>
+    <string name="lbl_free_suffix">вільно</string>
+    <string name="lbl_external">Зовнішнє сховище</string>
+    <string name="action_block">Заблокувати</string>
+    <string name="action_unblock">Розблокувати</string>
+    <string name="dlg_block_title">Заблокувати цей пристрій?</string>
+    <string name="dlg_block_body">Заблокований пристрій не зможе повернутися навіть із новим кодом запрошення, а публічний код приєднання буде замінено. Блокування зупиняє лише цей ключ реєстрації: хто перевстановить застосунок, отримає нову ідентичність, тож щоб справді заблокувати людину, оновіть код приєднання і не передавайте новий. Блокування можна зняти пізніше.</string>
+    <string name="err_storage_no_space">У призначенні недостатньо вільного місця</string>
+    <string name="err_storage_mkdir">Не вдалося створити папку призначення</string>
+    <string name="err_unknown">Невідома помилка</string>
+    <string name="err_storage_unavailable">Розташування сховища недоступне</string>
+    <string name="msg_storage_busy">Перенесення сховища вже виконується</string>
+    <string name="err_internal">Помилка: внутрішня помилка</string>
+    <string name="err_server_closing">Помилка: попередній сервер ще завершує роботу, спробуйте трохи пізніше</string>
+    <string name="err_server_loop_stuck">Помилка: сервер не зупинився протягом 20 секунд</string>
+    <string name="err_server_not_running">Помилка: сервер не працює</string>
+    <string name="err_no_address">Помилка: у сервера ще немає доступної адреси (можливо, Tor запускається)</string>
+    <string name="err_invalid_id">Помилка: недійсний ідентифікатор</string>
+    <string name="err_record_not_found">Помилка: запис не знайдено</string>
+    <string name="btn_pin">PIN застосунку</string>
+    <string name="pin_unlock_title">Typeon Сервер заблоковано</string>
+    <string name="pin_hint">PIN</string>
+    <string name="pin_unlock">Розблокувати</string>
+    <string name="pin_exit">Вийти</string>
+    <string name="pin_wrong">Невірний PIN</string>
+    <string name="pin_wait_fmt">Забагато спроб. Спробуйте знову через %1$d с</string>
+    <string name="pin_settings_title">PIN застосунку</string>
+    <string name="pin_set_msg">Спершу встановіть PIN. Він захищає код приєднання, список пристроїв і налаштування. Поки застосунок заблоковано, сервер продовжує працювати.</string>
+    <string name="pin_change_msg">Введіть поточний PIN і новий.</string>
+    <string name="pin_current_hint">Поточний PIN</string>
+    <string name="pin_new_hint">Новий PIN</string>
+    <string name="pin_too_short_fmt">PIN має містити щонайменше %1$d символів</string>
+    <string name="pin_saved">PIN збережено</string>
+    <string name="lbl_beta_updates">Бета-оновлення</string>
+    <string name="lbl_beta_updates_desc">Сервер оновлюється сам раз на добу з релізів GitHub через Tor. Увімкнено: також встановлювати бета-версії.</string>
+    <string name="action_check_updates">Перевірити оновлення</string>
+    <string name="update_status">Встановлено: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">Ще не перевірялося</string>
+    <string name="update_state_latest">Актуальна версія</string>
+    <string name="update_state_waiting">Нова версія ще збирається</string>
+    <string name="update_state_downloading">Завантаження… %1$s МБ</string>
+    <string name="update_state_ready">Завантажено, встановлюємо</string>
+    <string name="update_state_error">Остання перевірка не вдалася: %1$s</string>
+    <string name="update_ready_title">Оновлення готове</string>
+    <string name="update_ready_text">Торкніться, щоб встановити Typeon Сервер %1$s</string>
+</resources>

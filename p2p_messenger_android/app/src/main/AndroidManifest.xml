@@ -191,7 +191,7 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Per-app language (English/Turkish, see SettingsFragment): lets
+        <!-- Per-app language (see SettingsFragment): lets
              AppCompatDelegate.setApplicationLocales persist and re-apply
              the chosen locale automatically across restarts. -->
         <service

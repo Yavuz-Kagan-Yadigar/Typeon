@@ -27,19 +27,19 @@ pub(super) fn build_header(
 
     let mut entries: Vec<(&str, Box<dyn Fn(&Rc<ChatView>)>)> = Vec::new();
     if view.is_group() {
-        entries.push(("Members", Box::new(group_members)));
-        entries.push(("Invite a contact", Box::new(group_invite)));
-        entries.push(("Set group picture", Box::new(group_picture)));
+        entries.push((t("Members"), Box::new(group_members)));
+        entries.push((t("Invite a contact"), Box::new(group_invite)));
+        entries.push((t("Set group picture"), Box::new(group_picture)));
     }
     entries.push((
-        "Attachments",
+        t("Attachments"),
         Box::new(|view: &Rc<ChatView>| attachments_overview(view)),
     ));
     {
         let bar = search_bar.clone();
         let entry = search_entry.clone();
         entries.push((
-            "Search in chat",
+            t("Search in chat"),
             Box::new(move |_: &Rc<ChatView>| {
                 let opening = !bar.reveals_child();
                 bar.set_reveal_child(opening);
@@ -74,7 +74,7 @@ pub(super) fn build_header(
     header.pack_end(view.whiteboard.toggle_button());
     header.pack_end(&disappear_button(view));
     let mut call_buttons = Vec::new();
-    for (icon, tip, video) in [("camera-video-symbolic", "Video call", true), ("call-start-symbolic", "Voice call", false)] {
+    for (icon, tip, video) in [("camera-video-symbolic", t("Video call"), true), ("call-start-symbolic", t("Voice call"), false)] {
         let button = gtk::Button::builder().icon_name(icon).tooltip_text(tip).build();
         let view = view.clone();
         button.connect_clicked(move |_| crate::ui::call::place(&view.main.app, &view.conversation, video));
@@ -94,8 +94,8 @@ fn attend_pill(view: &Rc<ChatView>, group_id: String, call_buttons: Vec<gtk::But
     let icon = gtk::Image::from_icon_name("call-start-symbolic");
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     content.append(&icon);
-    content.append(&gtk::Label::new(Some("Attend")));
-    let pill = gtk::Button::builder().child(&content).tooltip_text("Join the call running in this group").visible(false).build();
+    content.append(&gtk::Label::new(Some(t("Attend"))));
+    let pill = gtk::Button::builder().child(&content).tooltip_text(t("Join the call running in this group")).visible(false).build();
     pill.add_css_class("pill");
     pill.add_css_class("suggested-action");
     let video = Rc::new(Cell::new(false));
@@ -179,11 +179,11 @@ impl ChatView {
                 crate::app::run_in_background(
                     move || {
                         if core::is_peer_connected(&fingerprint) {
-                            "Connected"
+                            t("Connected")
                         } else if core::has_active_session(&fingerprint) {
-                            "Offline · messages will be delivered later"
+                            t("Offline · messages will be delivered later")
                         } else {
-                            "Connecting…"
+                            t("Connecting…")
                         }
                     },
                     move |label| {
@@ -204,7 +204,7 @@ impl ChatView {
                     .unwrap_or(0);
                 if !self.account_deleted.get() {
                     self.subtitle
-                        .set_label(&format!("{} member{}", count, if count == 1 { "" } else { "s" }));
+                        .set_label(&if count == 1 { tf!("{} member", count) } else { tf!("{} members", count) });
                 }
             }
         }

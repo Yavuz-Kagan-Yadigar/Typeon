@@ -1,0 +1,684 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon</string>
+    <string name="action_settings">Налаштування</string>
+    <string name="action_scan_qr">Сканувати QR</string>
+    <string name="action_show_qr">Мій QR</string>
+    <string name="action_new_chat">Нова розмова</string>
+    <string name="hint_message">Повідомлення</string>
+    <string name="btn_send">Надіслати</string>
+    <!-- Текст кнопки надсилання; btn_send лишається як contentDescription для доступності. -->
+    <string name="lbl_send_symbol">»</string>
+    <string name="action_scroll_to_bottom">Донизу</string>
+    <string name="lbl_language">Мова</string>
+    <string name="lbl_identity_code">Код ідентичності</string>
+    <string name="lbl_device_fingerprint">Відбиток пристрою</string>
+    <string name="lbl_node_address">Адреса вузла</string>
+    <string name="lbl_copy">Копіювати</string>
+    <string name="lbl_copied">Скопійовано!</string>
+    <string name="msg_no_contacts">Контактів поки немає. Відскануйте QR-код або додайте вручну, щоб почати.</string>
+    <string name="hint_search_chats">Пошук у розмовах і групах</string>
+    <string name="hint_search_messages">Пошук повідомлень</string>
+    <string name="action_search_messages">Пошук</string>
+    <string name="action_search_prev">Попередній збіг</string>
+    <string name="action_search_next">Наступний збіг</string>
+    <string name="lbl_search_no_matches">Збігів немає</string>
+    <string name="msg_security_warning">Попередження безпеки: виявлено неперевірений пристрій!</string>
+    <string name="msg_device_added">Новий пристрій додав</string>
+    <string name="msg_read">Переглянуто</string>
+    <string name="title_chats">Чати</string>
+    <string name="title_contacts">Контакти</string>
+    <string name="title_settings">Налаштування</string>
+    <string name="title_group_chats">Групи</string>
+    <string name="lbl_create_group">Створити групу</string>
+    <string name="lbl_group_name">Назва групи</string>
+    <string name="lbl_members">Учасники</string>
+    <string name="lbl_add_member">Додати учасника</string>
+    <string name="lbl_leave_group">Залишити групу</string>
+    <string name="lbl_verify_identity">Перевірити ідентичність</string>
+    <string name="lbl_safety_number">Код безпеки</string>
+    <string name="lbl_node_mode">Режим вузла</string>
+    <!-- Текст уточнено після аудиту безпеки: раніше він був хибним. Режим вузла лише допомагав
+         маршрутизації DHT і не був справжнім ретранслятором (див. SECURITY.md, Cross-network connectivity). -->
+    <string name="lbl_node_mode_desc">Допомагає іншим підключатися, передаючи їхній зашифрований трафік далі. Вміст він прочитати не може. Але він витрачає ваш інтернет-трафік і пропускну здатність, а також бачить, хто через вас підключається.</string>
+    <string name="lbl_history_storage_limit">Ліміт сховища вкладень</string>
+    <string name="lbl_history_storage_limit_desc">Коли режим вузла увімкнено, пристрій зберігає кожен файл, що проходить через нього. Якщо загальний обсяг перевищує цей ліміт, спершу видаляються найстаріші файли.</string>
+    <string name="lbl_relay_address">Відома адреса ретранслятора</string>
+    <string name="lbl_relay_address_desc">Потрібна лише тоді, коли двоє людей у різних мережах підключаються вперше. Вставте адресу пристрою, якому довіряєте (з увімкненим режимом вузла), або свою.</string>
+    <string name="lbl_relay_address_hint">/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…</string>
+    <string name="action_add_relay_address">Додати</string>
+    <string name="msg_relay_address_added">Адресу ретранслятора додано</string>
+    <!-- Сервери (store-and-forward) -->
+    <string name="lbl_servers">Сервери</string>
+    <string name="lbl_servers_desc">Сервер зберігає ваші повідомлення, поки співрозмовник не в мережі, а потім доставляє їх, коли він знову з’являється. Прочитати їх сервер не може, бо вони залишаються зашифрованими.</string>
+    <string name="action_add_server">Сканувати QR сервера</string>
+    <string name="action_add_server_paste">Вставити код</string>
+    <string name="dlg_add_server_title">Додати сервер</string>
+    <string name="dlg_add_server_hint">typeon-server:/dns/…onion/tcp/…/p2p/…#token</string>
+    <string name="lbl_display_name">Ім’я облікового запису</string>
+    <string name="lbl_display_name_desc">Ім’я, яке бачать ваші контакти. Після зміни контакти оновлюються автоматично. Ті, хто зараз не в мережі, отримають його, коли знову з’являться.</string>
+    <string name="action_change_display_name">Змінити ім’я</string>
+    <string name="dlg_change_display_name_title">Ім’я облікового запису</string>
+    <string name="msg_display_name_changed">Ім’я змінено. Контактам надсилається сповіщення.</string>
+    <string name="msg_contact_renamed">%1$s тепер називається %2$s</string>
+    <string name="msg_server_added">Сервер додано. Підключення…</string>
+    <string name="msg_join_link_confirm">Додати цей сервер?\n\n%1$s</string>
+    <string name="msg_join_link_needs_identity">Спершу створіть обліковий запис, а потім знову відкрийте посилання.</string>
+    <string name="lbl_app_version">Версія %1$s</string>
+    <string name="msg_server_removed">Сервер видалено</string>
+    <string name="lbl_server_route">Надсилати повідомлення через цей сервер</string>
+    <string name="lbl_server_history">Зберігати історію на цьому сервері</string>
+    <string name="lbl_server_history_warn">Дозволяє новому пристрою завантажити ваші старі повідомлення. На відміну від живих повідомлень, ця резервна копія не має прямої безпеки: той, хто отримає ключ архіву, зможе прочитати все, що завантажено досі.</string>
+    <string name="msg_server_history_upload">Ваші останні повідомлення буде завантажено на сервер у захищеному вигляді, тож сервер не зможе їх прочитати.</string>
+    <string name="action_remove_server">Видалити</string>
+    <string name="confirm_remove_server">Видалити сервер %1$s? Щоб приєднатися знову, знадобиться новий код приєднання.</string>
+    <string name="state_server_connected">Підключено</string>
+    <string name="state_server_connecting">Підключення…</string>
+    <string name="state_server_not_enrolled">Не зареєстровано</string>
+    <string name="action_restore_history">Завантажити мою історію з цього сервера</string>
+    <string name="msg_restore_started">Завантаження. Старіші повідомлення з’являтимуться в міру надходження.</string>
+    <string name="error_key_unreadable">Збережений ключ не вдалося прочитати. Історія повідомлень і стан сеансу на цьому пристрої не зберігаються.</string>
+    <string name="msg_restore_incomplete">Сервер надіслав не всю історію. Спробуйте пізніше.</string>
+
+    <!-- Сервіс Tor onion -->
+    <!-- Контакт, доданий через групу і поручений засновником, ще не перевірявся особисто за QR-кодом. -->
+    <string name="contact_added_via_group">Додано через групу — не перевірено особисто</string>
+
+    <!-- Засновник може видалити групу для всіх. -->
+    <string name="action_delete_group">Видалити групу (для всіх)</string>
+    <string name="confirm_delete_group">Цю групу буде видалено для ВСІХ учасників, і це не можна скасувати. Ви впевнені?</string>
+    <string name="msg_group_deleted">Групу видалено</string>
+    <string name="action_leave_group">Вийти з групи</string>
+    <string name="confirm_leave_group">Ви вийдете з цієї групи, і щоб повернутися, знадобиться нове запрошення. Ви впевнені?</string>
+    <string name="msg_left_group">Ви вийшли з групи</string>
+    <string name="status_no_internet">Немає підключення до інтернету</string>
+    <string name="status_unknown">Статус невідомий</string>
+    <string name="status_tor_bootstrapping">Підключення через Tor…</string>
+    <string name="status_tor_failed">Не вдалося підключитися через Tor — повторюємо…</string>
+    <string name="status_connected_tor">Підключено через Tor</string>
+    <string name="status_connected_tor_node">Підключено через Tor (вузол)</string>
+    <string name="status_connected_node">Підключено (вузол)</string>
+    <string name="status_connected">Підключено</string>
+    <string name="status_reconnecting">Повторне підключення…</string>
+
+    <!-- Попередній перегляд вкладення у списку чатів. -->
+    <string name="lbl_last_photo">📷 Фото</string>
+    <string name="lbl_last_sticker">🙂 Стікер</string>
+    <string name="lbl_last_video">🎬 Відео</string>
+    <string name="lbl_last_voice">🎤 Голосове повідомлення</string>
+    <string name="lbl_last_file">📎 Файл</string>
+    <!-- Лічильник часу завантаження. -->
+    <string name="lbl_eta_seconds">Залишилось ~%d с</string>
+    <string name="lbl_eta_minutes">Залишилось ~%1$d хв %2$d с</string>
+
+    <string name="lbl_tor">Доступність через Tor</string>
+    <string name="lbl_tor_desc">Більшість мобільних і домашніх мереж не дають статичної (фіксованої) IP-адреси. Увімкніть це, щоб зв’язуватися з людьми в інших мережах. Це трохи витрачає батарею, а перше підключення займає кілька секунд. Співрозмовник теж має це увімкнути. Після зміни перезапустіть застосунок.</string>
+    <string name="tor_status_disabled">Tor: вимкнено</string>
+    <string name="tor_status_bootstrapping">Tor: підключення…</string>
+    <string name="tor_status_ready">Tor: готово — .onion-адресу активовано</string>
+    <string name="tor_status_failed">Tor: помилка (дивіться журнал)</string>
+    <string name="lbl_tor_connection">Підключення Tor</string>
+    <string name="action_tor_mode">Змінити</string>
+    <string name="tor_mode_direct">Напряму</string>
+    <string name="tor_mode_snowflake">Snowflake (лише якщо Tor заблоковано)</string>
+    <string name="tor_mode_obfs4">Містки (obfs4, лише якщо Tor заблоковано)</string>
+    <string name="tor_mode_unavailable">Недоступно в цій збірці</string>
+    <string name="tor_state_direct">Зараз: напряму</string>
+    <string name="tor_state_bridge">Зараз: використовується міст, бо Tor було заблоковано</string>
+    <string name="msg_tor_bridges_help">Отримайте власні містки на https://bridges.torproject.org/options і вставте їх нижче. Якщо поле порожнє, використовуються вбудовані публічні містки Tor.</string>
+    <string name="hint_tor_bridges">Вставте рядки містків obfs4, по одному в рядку</string>
+    <string name="msg_tor_mode_restart">Snowflake і містки використовуються лише тоді, коли Tor заблоковано: застосунок спершу пробує напряму і перемикається, якщо без Tor минула хвилина. Вони витрачають більше батареї, ніж прямий режим. Щоб застосувати зміну, застосунок перезапуститься.</string>
+    <string name="msg_tor_bridges_invalid">Недійсний міст: %1$s</string>
+    <string name="tor_restart_needed">Перезапустіть застосунок, щоб зміна набула чинності</string>
+    <string name="action_tor_reconnect">Перепідключити Tor / мережу</string>
+    <string name="title_tor_reconnect">Перепідключити мережу?</string>
+    <string name="msg_tor_reconnect">Застосунок перезапуститься, щоб від’єднати й знову підключити мережевий рівень (включно з Tor, якщо він увімкнений). Незбережений чернетковий текст буде втрачено.</string>
+    <string name="action_reconnect">Перепідключити</string>
+
+    <!-- Сполучення копіюванням і вставленням замість QR, а також передача адреси ретранслятора. Див. ContactsFragment. -->
+    <string name="action_copy_manual_code">Копіювати мій код</string>
+    <string name="action_copy_own_address">Копіювати мою адресу</string>
+    <string name="msg_manual_code_copied">Код пари скопійовано — вставте його в «Додати вручну» у співрозмовника</string>
+    <string name="msg_own_address_copied">Адресу скопійовано — вставте її в «Додати вручну» у співрозмовника</string>
+    <string name="error_address_not_ready">Адреса ще не готова, спробуйте трохи пізніше</string>
+    <string name="lbl_key_security">Безпека ключів</string>
+    <string name="lbl_keys_hardware_backed">✓ Ваші ключі захищено апаратним модулем безпеки пристрою (StrongBox/TEE)</string>
+    <string name="lbl_keys_software_backed">⚠ Ваші ключі захищено лише програмно (цей пристрій не підтримує апаратний модуль безпеки)</string>
+    <string name="lbl_recovery_export">Відновлення ідентичності</string>
+    <string name="lbl_recovery_export_desc">Збережіть файл із захистом паролем, який містить усі ваші ключі. Це єдиний спосіб повернути обліковий запис, якщо ви втратите цей телефон. Зберігайте його офлайн, наприклад на USB-флешці. Той, хто має цей файл і пароль, може видати себе за вас. Дуже велика історія зберігає лише найновіші повідомлення.</string>
+    <string name="action_export_recovery">Експортувати файл відновлення…</string>
+    <string name="lbl_recovery_password">Пароль</string>
+    <string name="lbl_recovery_password_confirm">Підтвердьте пароль</string>
+    <string name="error_recovery_password_mismatch">Паролі не збігаються</string>
+    <string name="error_recovery_password_empty">Введіть пароль</string>
+    <string name="msg_recovery_exporting">Експорт файлу відновлення…</string>
+    <string name="msg_recovery_export_success">Файл відновлення збережено</string>
+    <string name="msg_recovery_export_trimmed">Файл відновлення збережено. Він був завеликим: у ньому лише найновіші повідомлення (%1$d)</string>
+    <string name="error_recovery_export_failed">Не вдалося експортувати файл відновлення</string>
+
+    <!-- Протилежність експорту: відновлення з файлу відновлення (див. MainActivity importRecoveryFrom). -->
+    <string name="action_restore_from_recovery">Відновити з файлу відновлення</string>
+    <string name="lbl_recovery_import_desc">Введіть пароль, який ви використовували під час експорту цього файлу відновлення.</string>
+    <string name="msg_recovery_importing">Відновлення ідентичності…</string>
+    <string name="msg_recovery_import_success">Ідентичність відновлено</string>
+    <string name="lbl_text_scale">Розмір тексту</string>
+    <string name="lbl_ui_scale">Розмір інтерфейсу</string>
+    <string name="lbl_font_family">Шрифт</string>
+    <string name="lbl_scale_percent">%1$d%%</string>
+    <string name="lbl_font_default">Типовий</string>
+    <string name="lbl_font_sans_medium">Sans Medium</string>
+    <string name="lbl_font_sans_condensed">Sans Condensed</string>
+    <string name="lbl_font_serif">Serif</string>
+    <string name="lbl_font_monospace">Monospace</string>
+    <string name="lbl_font_sans_black">Sans Black</string>
+    <string name="lbl_font_import">Імпортувати файл .ttf…</string>
+    <string name="lbl_font_custom">Власний</string>
+    <string name="lbl_chat_appearance">Вигляд</string>
+    <string name="lbl_chat_bg_color">Колір фону</string>
+    <string name="lbl_accent_color">Акцентний колір</string>
+    <string name="lbl_chat_wallpaper">Шпалери</string>
+    <string name="action_choose">Вибрати</string>
+    <string name="action_reset">Скинути</string>
+    <string name="action_choose_wallpaper">Вибрати зображення</string>
+    <string name="lbl_wallpaper_blur">Розмиття шпалер</string>
+    <string name="lbl_wallpaper_darkness">Затемнення шпалер</string>
+    <string name="action_remove_wallpaper">Видалити</string>
+    <string name="title_pick_bg_color">Виберіть колір фону</string>
+    <string name="title_pick_accent_color">Виберіть акцентний колір</string>
+    <string name="content_desc_color_swatch">Зразок кольору</string>
+    <string name="content_desc_chat_wallpaper_preview">Попередній перегляд шпалер</string>
+    <string name="lbl_enable_notifications">Увімкнути сповіщення</string>
+    <string name="lbl_backup_identity">Резервна копія ідентичності</string>
+    <string name="lbl_recovery_file">Файл відновлення</string>
+    <string name="lbl_download">Завантажити</string>
+    <string name="lbl_status_online">У мережі</string>
+    <string name="lbl_status_offline">Не в мережі</string>
+    <string name="lbl_typing">друкує...</string>
+    <string name="lbl_typing_named">%s друкує...</string>
+    <string name="lbl_typing_several">Кілька людей друкують...</string>
+    <string name="error_camera_permission">Потрібен дозвіл на використання камери</string>
+    <string name="error_network">Помилка мережі. Перевірте підключення.</string>
+    <string name="error_send_failed">Не вдалося надіслати повідомлення</string>
+    <!-- Показується, коли initiate_handshake_with остаточно не вдається, наприклад через пошкоджені
+         або несумісні дані ключів чи через стару версію застосунку на одному з боків. Див. ChatActivity handshake_failed. -->
+    <string name="error_handshake_incompatible">Не вдається підключитися до цього контакту — несумісний формат ключів. Ймовірно, у співрозмовника інша версія застосунку. Спробуйте видалити контакт і знову з’єднатися в парі.</string>
+    <string name="confirm_revoke_device">Ви впевнені, що хочете відкликати цей пристрій? Він залишиться у вашому списку контактів, але ви більше не зможете надсилати й отримувати повідомлення з цього пристрою — історія не видаляється.</string>
+    <string name="confirm_block_contact">Заблокувати цей контакт?</string>
+
+    <string name="lbl_edited">(змінено)</string>
+    <string name="lbl_synced">(з синхронізації історії)</string>
+    <string name="lbl_relayed_unverified">Передано через %1$s · не перевірено</string>
+    <string name="lbl_you">Ви</string>
+    <string name="lbl_today">Сьогодні</string>
+    <string name="lbl_yesterday">Вчора</string>
+    <string name="msg_reply_target_not_loaded">Вихідне повідомлення не завантажено — прогорніть вгору, щоб його знайти</string>
+    <string name="lbl_sent_at">(надіслано: %s)</string>
+    <!-- Отримані повідомлення показують і час отримання на пристрої, і справжній час надсилання відправником,
+         наприклад «10:42 (надіслано: 10:41)». %1$s — час отримання, %2$s — час надсилання. -->
+    <string name="lbl_received_sent_at">%1$s (надіслано: %2$s)</string>
+    <string name="title_pending_messages">Повідомлення в очікуванні</string>
+    <string name="action_view_pending_messages">Повідомлення в очікуванні</string>
+    <string name="msg_no_pending_messages">Немає повідомлень, що чекають підтвердження доставки</string>
+    <string name="action_cancel_pending_message">Скасувати</string>
+    <string name="action_retry_pending_message">Повторити зараз</string>
+    <string name="msg_pending_message_retrying">Повторна спроба…</string>
+    <string name="lbl_pending_last_attempt">Остання спроба: %s</string>
+    <string name="msg_pending_message_cancelled">Скасовано — повторні спроби припинено</string>
+
+    <!-- Екран керування сховищем (Налаштування, Сховище): загальне використання, розмір вкладень у кожній розмові
+         і видалення вкладень по одному. -->
+    <string name="title_storage">Сховище</string>
+    <string name="action_view_storage">Сховище</string>
+    <string name="storage_total">Усього</string>
+    <string name="storage_database">База даних</string>
+    <string name="storage_attachments">Вкладення</string>
+    <string name="storage_decrypted_cache">Розшифрований кеш</string>
+    <string name="action_clear_decrypted_cache">Очистити розшифрований кеш</string>
+    <string name="msg_decrypted_cache_cleared">Розшифрований кеш очищено</string>
+    <string name="storage_chats_header">Розмови</string>
+    <string name="storage_no_chats">Вкладень поки немає</string>
+    <string name="storage_files_count">Файлів: %1$d · %2$s</string>
+    <string name="storage_no_attachments">У цій розмові немає вкладень</string>
+    <string name="action_select_all">Вибрати все</string>
+    <string name="action_delete_selected">Видалити вибране</string>
+    <string name="action_files_media">Файли і медіа</string>
+    <string name="storage_delete_confirm_title">Видалити вибрані вкладення?</string>
+    <string name="storage_delete_confirm_message">Видаляється лише копія на цьому пристрої. Відправника не повідомляють — вкладення можна завантажити знову.</string>
+    <string name="msg_attachments_removed">Вкладень видалено з цього пристрою: %1$d</string>
+    <string name="storage_attachment_type">%1$s · %2$s</string>
+    <string name="msg_storage_load_failed">Не вдалося прочитати інформацію про сховище</string>
+    <string name="content_desc_attachment_preview">Попередній перегляд вкладення</string>
+    <string name="msg_deleted">Це повідомлення видалено</string>
+    <string name="msg_connecting">Підключення…</string>
+    <string name="msg_securing_no_send">Захищаємо з’єднання з цим контактом — ви зможете надсилати повідомлення, щойно воно буде готове.</string>
+    <string name="msg_wait_secure_connection">Зачекайте, поки завершиться налаштування безпечного з’єднання.</string>
+    <string name="action_edit_message">Редагувати</string>
+    <string name="action_delete_message">Видалити</string>
+    <!-- Повторне надсилання невдалого повідомлення (значок ПОМИЛКА). У меню з довгого натискання з’являється лише для невдалих повідомлень. -->
+    <string name="action_resume_download">Продовжити</string>
+    <string name="action_retry_message">Повторити</string>
+    <string name="action_resend_message">Надіслати знову</string>
+    <string name="msg_resend_nothing">Вже доставлено, надсилати нічого</string>
+    <string name="msg_retrying_message">Повторна спроба…</string>
+    <string name="confirm_delete_message">Ви впевнені, що хочете видалити це повідомлення?</string>
+    <string name="lbl_edit_message_hint">Редагувати повідомлення</string>
+
+    <string name="title_groups">Групи</string>
+    <string name="msg_no_groups">Ви ще не створили жодної групи.</string>
+    <string name="action_create_group">Створити групу</string>
+    <string name="lbl_new_group_name_hint">Назва групи</string>
+    <string name="lbl_add_member_to_group">Додати учасника</string>
+    <string name="lbl_manage_members">Керувати учасниками</string>
+    <string name="lbl_founder_badge">%1$s (засновник)</string>
+    <string name="action_remove_member">Видалити</string>
+    <string name="confirm_remove_member">Вилучити %1$s з групи?</string>
+    <string name="msg_member_removed">Учасника вилучено</string>
+    <string name="msg_no_contacts_to_add">Немає контактів для додавання — спершу додайте контакт.</string>
+    <string name="msg_voice_not_supported_in_groups">Голосові повідомлення в групових чатах поки не підтримуються</string>
+
+    <plurals name="lbl_member_count">
+        <item quantity="one">%d учасник</item>
+        <item quantity="few">%d учасники</item>
+        <item quantity="many">%d учасників</item>
+        <item quantity="other">%d учасника</item>
+    </plurals>
+
+    <string name="content_desc_attach_file">Прикріпити файл</string>
+    <string name="msg_attachment_downloading">Завантаження…</string>
+    <string name="msg_attachment_failed">Помилка завантаження</string>
+    <string name="error_attachment_open_failed">Не вдалося відкрити файл</string>
+    <!-- %1$s = деталі помилки від ядра або системи. -->
+    <string name="error_with_message">Помилка: %1$s</string>
+
+    <string name="action_save_to_downloads">Зберегти в «Завантаження»</string>
+    <string name="action_save_as_jxl">Зберегти як JPEG XL</string>
+    <string name="action_copy_image">Копіювати зображення</string>
+    <string name="msg_saved_to_downloads">Збережено в Downloads/P2P</string>
+    <string name="action_open_with">Відкрити за допомогою…</string>
+    <string name="lbl_open_with_chooser">Відкрити за допомогою</string>
+    <string name="lbl_attachment_reply_preview">📎 %1$s</string>
+
+    <!-- Меню у списку чатів після довгого натискання. -->
+    <string name="action_clear_chat_history">Очистити історію розмови</string>
+    <string name="confirm_clear_chat_history">Локальну історію цієї розмови (повідомлення та вкладення) буде видалено. Контакт залишиться у вашому списку. Ви впевнені?</string>
+    <string name="action_delete_contact">Видалити контакт</string>
+    <string name="confirm_delete_contact_step1">Ви впевнені, що хочете видалити цей контакт? Історію розмови також буде видалено.</string>
+    <string name="confirm_delete_contact_step2">Цю дію НЕ МОЖНА СКАСУВАТИ — щоб знову писати цій людині, знадобиться відсканувати її QR-код. Видалити все одно?</string>
+    <string name="msg_chat_history_cleared">Історію розмови очищено</string>
+    <string name="msg_contact_deleted">Контакт видалено</string>
+    <!-- Виправлення після аудиту безпеки: видалення пристрою лише позначає його як недовірений, не видаляючи контакт
+         (див. Rust revoke_contact_device). -->
+    <string name="action_revoke_device">Відкликати цей пристрій</string>
+    <string name="msg_device_revoked">Пристрій відкликано — повідомлення від цього контакту більше не прийматимуться</string>
+
+    <!-- Запис голосових повідомлень. -->
+    <string name="content_desc_record_voice">Записати голосове повідомлення</string>
+    <string name="msg_recording_voice">Проведіть, щоб скасувати ▷</string>
+    <string name="msg_recording_cancelled">Запис скасовано</string>
+    <string name="error_recording_failed">Не вдалося почати запис аудіо</string>
+
+    <!-- Фото профілю. -->
+    <string name="content_desc_profile_picture">Фото профілю</string>
+    <string name="lbl_profile_picture">Фото профілю</string>
+    <string name="lbl_profile_picture_desc">Ваші контакти бачать це фото у списку чатів</string>
+    <string name="action_change_picture">Змінити фото</string>
+    <string name="action_remove_picture">Видалити фото</string>
+
+    <!-- Керування швидкістю відтворення для відео- та аудіоплеєрів. -->
+    <string name="lbl_playback_speed">Швидкість</string>
+
+    <!-- Рядки, що раніше були жорстко закодовані в MainActivity/ContactsFragment/QrScanActivity/fragment_*.xml
+         (перенесено сюди, щоб їх підхоплювали ресурси локалізації). -->
+    <string name="hint_username">Ім’я користувача</string>
+    <string name="title_welcome">Ласкаво просимо</string>
+    <string name="msg_enter_username">Введіть ім’я користувача, щоб створити свою ідентичність.</string>
+    <string name="action_create">Створити</string>
+    <string name="msg_identity_read_failed">Не вдалося прочитати ключі ідентичності. Якщо у вас є файл відновлення, можливо, його знадобиться використати.</string>
+    <string name="error_identity_persist_failed">Не вдалося зберегти ключі ідентичності. Налаштування почнеться спочатку — якщо у вас є файл відновлення, можливо, його знадобиться використати.</string>
+    <!-- %s = перші 8 символів нового ідентифікатора. -->
+    <string name="lbl_id_short">ID: %s…</string>
+    <!-- %s = короткий код ідентичності. -->
+    <string name="lbl_id_code">ID: %s</string>
+    <string name="title_reliable_delivery">Надійна доставка повідомлень</string>
+    <string name="msg_battery_optimization">Оптимізація батареї Android може затримувати фонову доставку повідомлень і повторні спроби цього застосунку. Дозвольте йому працювати без обмежень батареї для найнадійнішої роботи — це можна змінити пізніше в системних налаштуваннях.</string>
+    <string name="action_open_settings">Відкрити налаштування</string>
+    <string name="action_not_now">Не зараз</string>
+    <string name="title_security_warning_dialog">Попередження безпеки</string>
+    <string name="lbl_unknown">Невідомо</string>
+    <!-- %1$s = ім’я контакту (з’являється двічі), %2$s = короткий код нового пристрою. -->
+    <string name="msg_new_device_warning">Для %1$s виявлено новий, НЕПЕРЕВІРЕНИЙ пристрій.\n\nКод нового пристрою: %2$s\n\nНе приймайте цю зміну, поки не перевірите її з %1$s іншим каналом (телефонний дзвінок, особисто).</string>
+    <string name="action_verified_accept">Я перевірив, прийняти</string>
+    <string name="action_reject">Відхилити</string>
+    <string name="msg_connection_not_complete">Підключення ще не завершено, спробуйте трохи пізніше</string>
+    <!-- Формат назв полів навмисно не перекладається. -->
+    <string name="hint_manual_add_format" translatable="false">identity_id|device_fingerprint|nonce|device_name|rendezvous_node</string>
+    <string name="title_add_manually">Додати вручну</string>
+    <string name="action_add">Додати</string>
+    <string name="msg_added">Додано</string>
+    <!-- %s = системне повідомлення винятку. -->
+    <string name="error_camera_start_failed">Не вдалося запустити камеру: %s</string>
+    <string name="msg_connected">Підключено</string>
+    <!-- %s = назва файлу. -->
+    <string name="error_file_too_large_named">%s: перевищує ліміт 4 ГБ</string>
+    <string name="action_add_contact_qr">Додати контакт через QR</string>
+    <!-- Мітка буфера обміну для коду пари. -->
+    <string name="lbl_clipboard_pairing_code">Код пари Typeon</string>
+    <string name="lbl_scan_qr_instructions">Відскануйте QR-код для підключення</string>
+    <string name="lbl_initializing">Ініціалізація…</string>
+
+    <string name="lbl_time_just_now">Щойно</string>
+    <string name="lbl_time_minutes_ago">%d хв тому</string>
+    <string name="lbl_time_hours_ago">%d год тому</string>
+    <string name="lbl_time_days_ago">%d дн тому</string>
+
+    <string name="action_pin_chat">Закріпити чат</string>
+    <string name="action_unpin_chat">Відкріпити чат</string>
+
+    <!-- Кілька пристроїв (spec 1.5, 1.6, 1.7): під’єднання додаткового пристрою. -->
+    <string name="linked_devices_section_title">Пов’язані пристрої</string>
+    <string name="linked_devices_section_desc">Використовуйте цей обліковий запис на кількох пристроях. Кожен пристрій має власні ключі. Повідомлення надсилаються на всі ваші активні пристрої.</string>
+    <string name="linked_devices_manage">Керувати пристроями / Додати пристрій</string>
+    <string name="linked_devices_add">Додати пристрій (сканування)</string>
+    <string name="linked_devices_this_device">цей пристрій</string>
+    <string name="linked_devices_revoked">відкликано</string>
+    <string name="linked_devices_confirm_forget">Видалити цей відкликаний пристрій зі списку? Він залишиться відкликаним.</string>
+    <string name="action_remove_from_list">Видалити зі списку</string>
+    <string name="linked_devices_confirm_revoke">Відкликати цей пов’язаний пристрій? Він більше не зможе надсилати й отримувати повідомлення від імені цього облікового запису.</string>
+
+    <!-- Вихід з облікового запису (видаляє локальні дані). -->
+    <string name="logout_section_title">Вийти</string>
+    <string name="logout_section_desc">Видаляє цей обліковий запис із цього пристрою. Повідомлення, контакти та ключі, що зберігаються тут, буде остаточно видалено. Ваші інші пристрої та копії ваших повідомлень у інших людей не зачіпаються.</string>
+    <string name="action_logout">Вийти</string>
+    <string name="logout_confirm_title">Вийти?</string>
+    <string name="logout_confirm_message">Це видалить на цьому пристрої всі локальні повідомлення, контакти та ключі. Якщо ви не експортували файл відновлення, цей обліковий запис на цьому пристрої не можна буде відновити. Це не можна скасувати.</string>
+    <string name="action_logout_confirm">Вийти й видалити</string>
+    <string name="action_delete_account">Видалити обліковий запис</string>
+    <string name="delete_account_confirm_title">Видалити ваш обліковий запис?</string>
+    <string name="delete_account_confirm_message">Усім вашим контактам і групам буде повідомлено, що цей обліковий запис видалено, і вони більше не зможуть вам писати. Ваші пов’язані пристрої також буде очищено. Локальні повідомлення, контакти та ключі буде видалено. Це не можна скасувати.</string>
+    <string name="msg_deleting_account">Повідомляємо ваших контактів…</string>
+    <string name="error_delete_account_failed">Не вдалося повідомити контакти. Обліковий запис не видалено — спробуйте, коли з’явиться підключення.</string>
+    <string name="external_open_title">Відкрити поза Typeon?</string>
+    <string name="external_open_message">Застосунок, який відкриє цей файл, працює поза Typeon і Tor. Він може завантажити вміст з інтернету і розкрити вашу IP-адресу.</string>
+    <string name="external_open_continue">Відкрити все одно</string>
+    <string name="delete_account_pending_message">%1$d повідомлень про видалення ще не дійшло до ваших контактів. Продовжити чекати чи видалити все одно?</string>
+    <string name="delete_account_keep_waiting">Продовжити чекати</string>
+    <string name="delete_account_anyway">Видалити все одно</string>
+    <string name="msg_contact_deleted_account">Обліковий запис %1$s видалено</string>
+    <string name="notif_contact_deleted_account_hidden">Контакт видалив свій обліковий запис</string>
+    <string name="msg_account_deleted_no_send">Ця людина видалила свій обліковий запис. Повідомлення більше не можна надсилати.</string>
+    <string name="device_unlinked_notification">Цей пристрій від’єднано від вашого облікового запису. Його локальні дані стерто.</string>
+
+    <string name="link_device_as_secondary">Під’єднатися до наявного облікового запису</string>
+    <string name="link_device_title">Під’єднати цей пристрій</string>
+    <string name="link_device_instructions">На іншому (основному) пристрої відкрийте Налаштування → Пов’язані пристрої → «Додати пристрій (сканування)», а потім відскануйте код нижче. Не закривайте цей екран, доки під’єднання не завершиться.</string>
+    <string name="link_device_waiting">Очікуємо, поки ваш інший пристрій відсканує…</string>
+    <string name="link_device_network_not_ready">Мережа ще не готова. Переконайтеся, що ви в мережі, і спробуйте знову.</string>
+    <string name="link_device_success">Цей пристрій тепер під’єднано до вашого облікового запису.</string>
+    <string name="link_device_confirm">Під’єднати цей пристрій до вашого облікового запису? Він отримає ваші контакти, групи та історію.\n\n%1$s\n%2$s</string>
+    <string name="link_device_approved">Новий пристрій додано до вашого облікового запису.</string>
+    <string name="error_group_update_rejected">Оновлення групи від засновника відхилено і не застосовано.</string>
+    <string name="action_block">Заблокувати</string>
+    <string name="action_unblock">Розблокувати</string>
+    <string name="action_trust_contact">Позначити як перевірений</string>
+    <string name="msg_identity_blocked">Заблоковано. Нічого від цієї людини не надходитиме, доки ви її не розблокуєте.</string>
+    <string name="msg_identity_unblocked">Розблоковано.</string>
+    <string name="msg_contact_trusted">Позначено як перевірений.</string>
+    <string name="notif_new_device_warning">%1$s пише з неперевіреного пристрою (%2$s). Торкніться, щоб переглянути.</string>
+    <string name="confirm_block_title">Заблокувати цю людину?</string>
+    <string name="confirm_block_body">Жодне повідомлення чи файл з жодного пристрою %1$s не буде прийнято. Розблокувати можна пізніше в меню контакту або знову з’єднавшись особисто.</string>
+    <string name="confirm_trust_title">Позначити як перевірений?</string>
+    <string name="confirm_trust_body">Ви познайомилися з %1$s через групу, а не особисто. Робіть це, лише якщо ви підтвердили його код безпеки іншим способом.</string>
+    <string name="action_transfer_founder">Передати право власності</string>
+    <string name="msg_founder_transferred">Право власності на групу передано.</string>
+    <string name="confirm_transfer_founder">Передати право власності на групу %1$s? Ви більше не зможете додавати чи видаляти учасників або змінювати назву і фото.</string>
+    <string name="lbl_safety_code">Код безпеки: %1$s\n\nПорівняйте його з цією людиною іншим каналом — дзвінком або особисто. Якщо збігається, ключі справді його.</string>
+
+    <!-- Миттєве фото (камера). Див. ui.CameraCaptureActivity. -->
+    <string name="content_desc_take_photo">Зробити фото</string>
+    <string name="action_capture_photo">Зробити фото</string>
+    <string name="action_flip_camera">Перемкнути камеру</string>
+    <string name="action_retake_photo">Перезняти</string>
+
+    <!-- Показувати або приховувати текст повідомлень у сповіщеннях. -->
+    <string name="lbl_notif_show_message">Показувати повідомлення в сповіщеннях</string>
+    <string name="lbl_notif_show_message_desc">Коли вимкнено, сповіщення лише пишуть «Нове повідомлення». Відправник і текст залишаються прихованими.</string>
+
+    <!-- Пароль застосунку. -->
+    <string name="lbl_app_lock_section">Пароль застосунку</string>
+    <string name="lbl_app_lock_section_desc">Запитується щоразу, коли ви відкриваєте застосунок. Пароль можна змінити, але не можна видалити.</string>
+    <string name="action_change_app_password">Змінити пароль</string>
+    <string name="title_app_lock_create">Встановіть пароль</string>
+    <string name="msg_app_lock_create">Цей пароль шифрує ваші ключі та повідомлення на цьому пристрої. Якщо ви його забудете, нічого на цьому пристрої більше не відкриється. Збережіть файл відновлення.</string>
+    <string name="title_app_lock_unlock">Введіть пароль</string>
+    <string name="msg_app_lock_unlock">Введіть пароль застосунку, щоб продовжити.</string>
+    <string name="hint_app_lock_password">Пароль</string>
+    <string name="hint_app_lock_password_confirm">Підтвердьте пароль</string>
+    <string name="hint_app_lock_current">Поточний пароль</string>
+    <string name="hint_app_lock_new">Новий пароль</string>
+    <string name="action_app_lock_save">Зберегти</string>
+    <string name="action_app_lock_unlock">Розблокувати</string>
+    <string name="error_app_lock_empty">Пароль не може бути порожнім.</string>
+    <string name="error_app_lock_mismatch">Два паролі не збігаються.</string>
+    <string name="error_app_lock_wrong">Невірний пароль.</string>
+    <string name="error_app_lock_wait">Забагато невдалих спроб. Спробуйте знову через %1$d с.</string>
+    <string name="msg_app_lock_changed">Пароль змінено.</string>
+
+    <!-- Емодзі-реакції на повідомлення. -->
+    <string name="title_pick_reaction">Реакція</string>
+    <string name="action_react">Відреагувати</string>
+    <string name="action_remove_reaction">Прибрати мою реакцію</string>
+    <string name="title_reactions">Реакції</string>
+    <string name="title_seen_by">Переглянули</string>
+    <string name="title_attachment_caption">Додати підпис</string>
+    <string name="hint_attachment_caption">Підпис (необов’язково)</string>
+    <string name="attachment_hi_res">Без втрат</string>
+    <string name="image_edit_revert">Оригінал</string>
+    <string name="image_edit_undo">Відмінити</string>
+    <string name="image_edit_rotate_left">Повернути ліворуч</string>
+    <string name="image_edit_rotate_right">Повернути праворуч</string>
+    <string name="image_edit_crop">Обрізати</string>
+    <string name="image_edit_apply_crop">Застосувати обрізання</string>
+    <string name="image_edit_pen">Олівець</string>
+    <string name="image_edit_blur">Розмиття</string>
+    <string name="image_edit_color">Колір олівця</string>
+    <string name="image_edit_size">Розмір</string>
+    <string name="image_edit_no_memory">Недостатньо пам’яті для цього редагування</string>
+    <string name="image_edit_save_failed">Не вдалося зберегти редагування</string>
+    <string name="image_edit_reduced">Редагування у розмірі %1$d × %2$d, щоб вмістити в пам’ять</string>
+    <!-- Заголовки розділів екрана налаштувань -->
+    <string name="settings_section_profile">Профіль</string>
+    <string name="settings_section_privacy">Приватність і безпека</string>
+    <string name="settings_section_network">Мережа і з’єднання</string>
+    <string name="settings_section_devices">Пристрої і повідомлення</string>
+    <string name="settings_section_account">Обліковий запис</string>
+    <string name="settings_advanced">Додатково</string>
+    <string name="action_open">Відкрити</string>
+    <string name="msg_group_gone">Ця група більше недоступна</string>
+    <string name="msg_full_screen_intent">Щоб вхідні дзвінки показувалися на екрані блокування, Typeon потрібен дозвіл «Повноекранні сповіщення». Відкрийте налаштування і дозвольте його.</string>
+    <string name="desc_syncing">Оновлення</string>
+    <string name="msg_background_restricted">Роботу Typeon у фоновому режимі обмежено, тому повідомлення та дзвінки не можуть надходити, коли екран вимкнено. Відкрийте налаштування застосунку і для батареї виберіть «Без обмежень».</string>
+    <!-- Дзвінки -->
+    <string name="action_voice_call">Голосовий дзвінок</string>
+    <string name="action_video_call">Відеодзвінок</string>
+    <string name="action_attend_call">Приєднатися</string>
+    <string name="call_calling">Виклик…</string>
+    <string name="call_incoming_voice">Вхідний голосовий дзвінок</string>
+    <string name="call_incoming_video">Вхідний відеодзвінок</string>
+    <string name="call_connecting">Підключення…</string>
+    <string name="call_accept">Відповісти</string>
+    <string name="call_decline">Відхилити</string>
+    <string name="call_hangup">Завершити</string>
+    <string name="call_state_on">Увімкнено</string>
+    <string name="call_state_off">Без звуку</string>
+    <string name="call_mute">Вимкнути звук</string>
+    <string name="call_unmute">Увімкнути звук</string>
+    <string name="call_speaker">Динамік</string>
+    <string name="call_device_default">Системний за замовчуванням</string>
+    <string name="call_device_phone_mic">Мікрофон телефону</string>
+    <string name="call_device_wired">Дротова гарнітура</string>
+    <string name="call_pick_mic">Мікрофон</string>
+    <string name="call_pick_output">Вихід звуку</string>
+    <string name="call_earpiece">Слуховий динамік</string>
+    <string name="call_camera_off">Вимкнути камеру</string>
+    <string name="call_camera_on">Увімкнути камеру</string>
+    <string name="call_ended">Дзвінок завершено</string>
+    <string name="call_rejected">Дзвінок відхилено</string>
+    <string name="call_busy">Зайнято</string>
+    <string name="call_no_answer">Немає відповіді</string>
+    <string name="call_missed">Пропущений дзвінок</string>
+    <string name="call_via_p2p">напряму</string>
+    <string name="call_via_server">через сервер</string>
+    <string name="call_audio_failing">немає вхідного звуку</string>
+    <string name="call_mic_failing">мікрофон недоступний</string>
+    <string name="call_waiting_media">очікування медіа</string>
+    <string name="call_needs_android10">Для дзвінків потрібен Android 10 або новіший</string>
+    <string name="call_permission_needed">Для дзвінків потрібен дозвіл на мікрофон (для відео також на камеру)</string>
+    <string name="call_channel_name">Дзвінки</string>
+    <string name="call_notification_title">Дзвінок Typeon</string>
+    <string name="msg_share_pick_chat">Виберіть розмову, куди поділитися</string>
+    <string name="action_whiteboard">Дошка</string>
+    <string name="whiteboard_prev_page">Попередня сторінка</string>
+    <string name="whiteboard_next_page">Наступна сторінка</string>
+    <string name="whiteboard_pen">Олівець</string>
+    <string name="whiteboard_eraser">Гумка</string>
+    <string name="whiteboard_color">Колір</string>
+    <string name="whiteboard_export_pdf">Експортувати в PDF</string>
+    <string name="whiteboard_page_full">Ця сторінка заповнена. Сотріть щось або перейдіть на іншу сторінку.</string>
+    <string name="whiteboard_pdf_saved">Дошку збережено як PDF</string>
+    <string name="whiteboard_pdf_failed">Не вдалося зберегти PDF</string>
+    <string name="whiteboard_undo">Відмінити</string>
+    <string name="whiteboard_redo">Повторити</string>
+    <string name="whiteboard_pen_size">Товщина олівця</string>
+    <string name="msg_primary_device_only">Лише основний пристрій може додавати пристрої.</string>
+    <string name="lbl_material_you">Material You (системні кольори)</string>
+    <string name="lbl_text_color">Колір тексту</string>
+    <string name="title_pick_text_color">Виберіть колір тексту</string>
+    <string name="call_pip">PiP</string>
+    <string name="msg_primary_device_only_delete">Лише основний пристрій може видалити обліковий запис.</string>
+    <string name="msg_open_link_warning">%1$s\n\nЦе посилання відкриється у браузері поза Tor. Сайт побачить вашу справжню IP-адресу.</string>
+    <string name="confirm_send_shared">Надіслати файлів: %1$d до %2$s?</string>
+    <string name="error_app_lock_short">Пароль має містити щонайменше %1$d символів.</string>
+    <string name="channel_unlock">Розблокування</string>
+    <string name="title_overlay_permission">Запитувати пароль одразу</string>
+    <string name="msg_overlay_permission">Після перезапуску Typeon не може отримувати повідомлення, доки ви не введете пароль. Дозвольте «Показ поверх інших застосунків», щоб екран пароля відкривався сам, а не чекав у сповіщенні.</string>
+    <string name="msg_unlock_to_receive">Введіть пароль, щоб отримувати повідомлення.</string>
+    <string name="msg_tamper_closed">Typeon закрито, а його ключі стерто з пам’яті: всередині застосунку виявлено відладчик або інструмент перехоплення. Видаліть його і знову відкрийте Typeon.</string>
+    <string name="error_recovery_password_short">Пароль відновлення має містити щонайменше %1$d символів.</string>
+    <string name="action_fetch_older_history">Завантажити старішу історію</string>
+    <string name="msg_fetch_history_requested">Запит надіслано…</string>
+    <string name="link_device_code_shown">Порівняйте код: %1$s\nВаш інший пристрій показує той самий код до того, як ви підтвердите.</string>
+    <string name="link_device_code_check">Порівняйте код: %1$s\nПідтверджуйте, лише якщо новий пристрій показує той самий код.</string>
+    <string name="notif_new_message">Нове повідомлення</string>
+    <string name="notif_new_drawing">Нове малювання</string>
+    <string name="notif_new_drawing_from">Нове малювання від %1$s</string>
+    <string name="title_scan_qr">Сканувати QR</string>
+    <string name="tor_off_no_network">Tor вимкнено: мережа не запуститься без Tor.</string>
+    <string name="msg_pairing_contact_limit">Сполучення не вдалося: ваш список контактів заповнений.</string>
+    <string name="notif_fg_text">Безпечне P2P-з’єднання активне</string>
+    <string name="channel_service_name">Фоновий сервіс</string>
+    <string name="channel_messages_name">Повідомлення</string>
+    <string name="channel_mentions_name">Згадки</string>
+    <string name="notif_mention_title">%1$s згадує вас у %2$s</string>
+    <string name="notif_mention_hidden">Вас згадали в групі</string>
+    <string name="error_edit_failed">Не вдалося змінити повідомлення</string>
+    <string name="error_delete_failed">Не вдалося видалити повідомлення</string>
+    <string name="action_discard">Відкинути</string>
+    <string name="msg_recording_in_background">Голосовий запис ще триває. Надіслати чи відкинути?</string>
+    <string name="notif_fg_server_down">Сервер недоступний — повідомлення йдуть лише напряму</string>
+    <string name="notif_fg_recording">Запис голосового повідомлення</string>
+    <string name="msg_media_scrub_failed">Не вдалося видалити дані про розташування чи пристрій із цього файлу. Надіслати все одно?</string>
+    <string name="action_send_anyway">Надіслати все одно</string>
+    <string name="title_confirm_contact">Додати цей контакт?</string>
+    <string name="msg_confirm_contact">Додати контакт із цього QR-коду?</string>
+    <string name="msg_loading">Завантаження…</string>
+    <string name="action_resend_group">Надіслати групу всім знову</string>
+    <string name="msg_group_resent">Групу знову надіслано всім</string>
+    <string name="err_core_locked">Застосунок заблоковано. Розблокуйте його і спробуйте знову.</string>
+    <string name="err_core_not_founder">Це може зробити лише засновник групи.</string>
+    <string name="err_core_already">Це вже зроблено.</string>
+    <string name="err_core_blocked">Цей контакт заблоковано.</string>
+    <string name="err_core_too_large">Занадто велике.</string>
+    <string name="err_core_no_session">Безпечного сеансу з цим контактом ще немає.</string>
+    <string name="err_core_invalid">Некоректні дані або код.</string>
+    <string name="err_core_not_allowed">Не дозволено.</string>
+    <string name="err_core_not_found">Не знайдено.</string>
+    <string name="err_core_internal">У застосунку щось пішло не так.</string>
+    <string name="msg_confirm_contact_named">Додати %1$s?\n\nКод безпеки: %2$s\n\nПорівняйте цей код із контактом, перш ніж прийняти.</string>
+    <!-- Стікери. -->
+    <string name="content_desc_stickers">Стікери</string>
+    <string name="action_sticker_add">Додати</string>
+    <string name="action_sticker_import_whatsapp">Імпортувати з WhatsApp</string>
+    <string name="action_add_to_my_stickers">Додати до моїх стікерів</string>
+    <string name="msg_confirm_delete_sticker">Видалити вибрані стікери?</string>
+    <string name="msg_sticker_saved">Додано до ваших стікерів</string>
+    <string name="msg_sticker_import_failed">Не вдалося додати стікер</string>
+    <string name="msg_sticker_importing">Імпорт стікерів… %1$d/%2$d</string>
+    <string name="action_sticker_favorite">В обране</string>
+    <string name="action_sticker_unfavorite">Прибрати з обраного</string>
+    <string name="action_sticker_folder_create">Нова папка</string>
+    <string name="action_sticker_add_to_folder">Додати до папки</string>
+    <string name="action_sticker_remove_from_folder">Вилучити з папки</string>
+    <string name="action_sticker_folder_rename">Перейменувати папку</string>
+    <string name="action_sticker_folder_delete">Видалити папку</string>
+    <string name="hint_sticker_folder_name">Назва папки</string>
+    <string name="msg_confirm_delete_sticker_folder">Видалити папку «%1$s»? Її стікери залишаться.</string>
+    <string name="msg_sticker_added_to_folder">Додано до %1$s</string>
+    <string name="msg_sticker_imported">Додано стікерів: %1$d</string>
+    <string name="storage_voice">Голосові повідомлення</string>
+    <string name="storage_stickers">Стікери</string>
+    <string name="storage_prune_button">Видалити старіші повідомлення</string>
+    <string name="storage_prune_sizes">Повідомлення (%1$d): %2$s → %3$s · Вкладення: %4$s → %5$s</string>
+    <string name="storage_prune_confirm_title">Видалити старіші повідомлення?</string>
+    <string name="storage_prune_confirm_message">Усі повідомлення та вкладення в цій розмові до %1$s буде видалено з цього пристрою. Співрозмовника це не торкнеться. Це не можна скасувати.</string>
+    <string name="storage_prune_done">Видалено</string>
+    <string name="action_forward">Переслати</string>
+    <string name="lbl_forwarded">Переслано</string>
+    <string name="msg_forward_pick_chat">Виберіть розмову для пересилання</string>
+    <string name="confirm_forward">Переслати %1$s?</string>
+    <string name="action_select">Вибрати</string>
+    <string name="msg_select_same_kind">Разом можна вибрати лише повідомлення одного типу</string>
+    <plurals name="confirm_delete_messages">
+        <item quantity="one">Видалити це повідомлення?</item>
+        <item quantity="few">Видалити ці %d повідомлення?</item>
+        <item quantity="many">Видалити ці %d повідомлень?</item>
+        <item quantity="other">Видалити ці %d повідомлення?</item>
+    </plurals>
+    <plurals name="forward_not_sent">
+        <item quantity="one">1 переслане повідомлення не надіслано</item>
+        <item quantity="few">%d пересланих повідомлення не надіслано</item>
+        <item quantity="many">%d пересланих повідомлень не надіслано</item>
+        <item quantity="other">%d пересланого повідомлення не надіслано</item>
+    </plurals>
+    <string name="lbl_beta_updates">Бета-оновлення</string>
+    <string name="lbl_beta_updates_desc">Typeon оновлюється сам раз на добу з релізів GitHub через Tor. Увімкнено: також встановлювати бета-версії.</string>
+    <string name="action_check_updates">Перевірити оновлення</string>
+    <string name="update_status">Встановлено: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">Ще не перевірялося</string>
+    <string name="update_state_latest">Актуальна версія</string>
+    <string name="update_state_waiting">Нова версія ще збирається</string>
+    <string name="update_state_downloading">Завантаження… %1$s МБ</string>
+    <string name="update_state_ready">Завантажено, встановлюємо</string>
+    <string name="update_state_error">Остання перевірка не вдалася: %1$s</string>
+    <string name="update_ready_title">Оновлення готове</string>
+    <string name="update_ready_text">Торкніться, щоб встановити Typeon %1$s</string>
+    <!-- Зникаючі повідомлення (ui/Disappear.kt). -->
+    <string name="disappear_title">Зникаючі повідомлення</string>
+    <string name="disappear_hint">Усе, що ви надсилаєте в цій розмові, зникає після прочитання. Це не можна копіювати, пересилати чи зберігати, а на Android скріншоти заблоковано.</string>
+    <string name="disappear_turn_on">Увімкнути</string>
+    <string name="disappear_turned_off">Зникаючі повідомлення вимкнено</string>
+    <string name="disappear_cannot_open">Зникаючий файл цього типу не можна відкрити: показуються лише зображення і відео</string>
+    <string name="disappear_notification">Зникаюче повідомлення</string>
+    <string name="disappear_left_s">⏱ %1$d с</string>
+    <string name="disappear_left_min">⏱ %1$d хв</string>
+    <string name="disappear_left_h">⏱ %1$d год</string>
+    <string name="disappear_left_d">⏱ %1$d дн</string>
+    <string-array name="disappear_stop_labels">
+        <item>30 секунд</item>
+        <item>5 хвилин</item>
+        <item>1 година</item>
+        <item>8 годин</item>
+        <item>1 день</item>
+        <item>1 тиждень</item>
+        <item>4 тижні</item>
+    </string-array>
+</resources>

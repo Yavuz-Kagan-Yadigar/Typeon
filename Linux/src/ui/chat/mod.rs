@@ -22,6 +22,7 @@ use gtk::glib;
 
 use crate::app::{self, App, Event};
 use crate::core;
+use crate::i18n::t;
 use crate::ui::dialogs;
 use crate::ui::window::{Conversation, MainUi};
 use crate::util;
@@ -53,7 +54,9 @@ const PAGE_SIZE: u32 = 100;
 /// two pages. Past it, loading an older page drops the newest bubbles (see
 /// `trim_newest`); reaching the bottom reloads them from the archive.
 const MAX_BUBBLES: usize = 200;
-const FETCH_HISTORY_LABEL: &str = "Fetch older history";
+fn fetch_history_label() -> &'static str {
+    t("Fetch older history")
+}
 /// Hard cap on bubble width, in pixels.
 /// A wrapping GtkLabel's `max-width-chars` turned out not to bound the
 /// allocation here — measured naturals of ~310px were still being allocated
@@ -410,7 +413,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
     // only when the user has scrolled to the top. It is the only place the
     // chat asks the network for history; scrolling reads the local archive.
     let fetch_history = gtk::Button::builder()
-        .label(FETCH_HISTORY_LABEL)
+        .label(fetch_history_label())
         .halign(gtk::Align::Center)
         .margin_top(8)
         .build();
@@ -500,7 +503,7 @@ pub fn build(main: &Rc<MainUi>, conversation: &Conversation) -> adw::NavigationP
         disappear_mode: Cell::new(0),
         send_button: gtk::Button::builder()
             .icon_name("document-send-symbolic")
-            .tooltip_text("Send")
+            .tooltip_text(t("Send"))
             .valign(gtk::Align::End)
             .build(),
         shade_pending: Cell::new(false),

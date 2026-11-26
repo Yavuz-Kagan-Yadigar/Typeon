@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon Server</string>
+    <string name="intro">يحتفظ برسائل جهات اتصالك أثناء عدم اتصالهم، ثم يسلّمها عند عودتهم للاتصال. لا يستطيع قراءتها: تصل مشفّرة من الطرف إلى الطرف، ومختومة مرة ثانية.</string>
+
+    <string name="lbl_run_server">تشغيل الخادم</string>
+    <string name="state_stopped">متوقف</string>
+    <string name="state_running_fmt">يعمل · Tor: %1$s</string>
+    <string name="state_no_address">لا يوجد عنوان بعد — Tor ما زال يبدأ التشغيل (30 إلى 60 ثانية في أول تشغيل). لا فائدة من الدعوة دونه.</string>
+
+    <string name="lbl_address">العنوان</string>
+    <string name="lbl_invite">رمز الانضمام</string>
+    <string name="lbl_invite_desc">رمز واحد للجميع، صالح لمدة 3 أيام: امسحه من الإعدادات ← الخوادم على الهاتف، أو انسخه والصقه هناك. يمكن لعدد غير محدود من الأشخاص الانضمام بالرمز نفسه دون أن تُطلب منك أي شيء. بعد 3 أيام يظهر رمز جديد هنا تلقائيًا. غيّره إذا تسرّب؛ الأجهزة المسجّلة بالفعل تواصل العمل.</string>
+    <string name="action_new_invite">تغيير الرمز</string>
+    <string name="action_copy_invite">نسخ الرمز</string>
+    <string name="msg_invite_copied">تم نسخ رمز الدعوة</string>
+    <string name="msg_no_invite_yet">لا يوجد عنوان بعد — انتظر حتى ينتهي Tor من البدء</string>
+    <string name="confirm_rotate_join_code">سيتوقف الرمز الحالي عن العمل فورًا. من يحمل رمز QR أو الرابط القديم لن يتمكن من الانضمام حتى تعطيه الرمز الجديد. الأجهزة المسجّلة بالفعل لن تتأثر.</string>
+
+    <string name="lbl_devices">الأجهزة المسجّلة</string>
+    <string name="device_row_fmt">%1$s… · %2$s</string>
+    <string name="action_revoke">إلغاء</string>
+    <string name="dlg_revoke_title">هل تريد إلغاء هذا الجهاز؟</string>
+    <string name="dlg_revoke_body">سيتوقف عن الإيداع أو الجلب، ولن يستطيع التسجيل من جديد حتى تفكّ حظره. يستمر تطبيق المراسلة في العمل، لكنه يعود إلى التسليم المباشر بين الأجهزة. الإلغاء يستبدل أيضًا رمز الانضمام العام، فأعطِ الرمز الجديد للآخرين.</string>
+
+    <string name="lbl_stats">النشاط</string>
+    <string name="stats_fmt">الأجهزة: %1$d\nمخزَّنة: %2$d · مُسلَّمة: %3$d · أجزاء ملفات مُرسلة: %4$d\nالقرص: %5$s</string>
+
+    <string name="lbl_options">الخيارات</string>
+    <string name="lbl_tor_always">يستضيف هذا الخادم دائمًا خدمة onion. هذه هي الطريقة الوحيدة التي يمكن بها الوصول إلى هاتف خلف NAT لدى مزود الاتصال — بلا توجيه منافذ، بلا نطاق، بلا شهادة — لذلك لا يمكن إيقافها.</string>
+    <string name="lbl_node">العمل أيضًا كموجّه</string>
+    <string name="lbl_node_desc">يساعد المستخدمين غير المرتبطين على الاتصال ببعضهم. مستقل عن صندوق الرسائل: ينقل الحركة المباشرة دون أن يفحصها، ولا يخزّن شيئًا.</string>
+    <string name="action_battery">استثناء من تحسين البطارية</string>
+    <string name="msg_battery_already">مستثنى بالفعل</string>
+    <string name="msg_battery_manual">غير متوفر على هذا الجهاز — اضبطه يدويًا من الإعدادات ← البطارية.</string>
+
+    <string name="notif_channel">Typeon Server</string>
+    <string name="notif_starting">جارٍ البدء…</string>
+    <string name="notif_running">الخادم يعمل</string>
+
+    <string name="footer_note">قد يوقف Android خدمة المقدمة تحت ضغط الذاكرة. هذا التطبيق مخصص لهاتف احتياطي يبقى موصولًا بالكهرباء؛ أما الخادم الذي لا يجب أن يفوته شيء أبدًا، فشغّل خدمة typeon-server على VPS صغير.</string>
+    <string name="lbl_storage">مكان التخزين</string>
+    <string name="lbl_storage_desc">تُحفظ المرفقات هنا. تبقى الهوية وحالة Tor دائمًا في التخزين الداخلي.</string>
+    <string name="action_choose_storage">اختيار التخزين</string>
+    <string name="dlg_storage_title">نقل تخزين الخادم</string>
+    <string name="dlg_storage_moving">جارٍ نقل البيانات…</string>
+    <string name="msg_storage_moved">تم نقل التخزين. جارٍ إعادة تشغيل الخادم.</string>
+    <string name="msg_storage_failed">تعذّر النقل: %1$s</string>
+    <string name="msg_storage_same">هذا المكان مستخدم بالفعل.</string>
+    <string name="lbl_internal">التخزين الداخلي</string>
+    <string name="lbl_sdcard">بطاقة SD</string>
+    <string name="lbl_free_suffix">متاح</string>
+    <string name="lbl_external">التخزين الخارجي</string>
+    <string name="action_block">حظر</string>
+    <string name="action_unblock">إلغاء الحظر</string>
+    <string name="dlg_block_title">هل تريد حظر هذا الجهاز؟</string>
+    <string name="dlg_block_body">الجهاز المحظور لا يستطيع العودة حتى برمز دعوة جديد، ويُستبدل رمز الانضمام العام. الحظر يوقف مفتاح التسجيل هذا فقط: من يعيد تثبيت التطبيق يحصل على هوية جديدة، ولذلك لمنع شخص فعليًا غيّر رمز الانضمام ولا تعطِ الرمز الجديد. يمكنك التراجع عن الحظر لاحقًا.</string>
+    <string name="err_storage_no_space">المساحة الحرة غير كافية في الوجهة</string>
+    <string name="err_storage_mkdir">تعذّر إنشاء مجلد الوجهة</string>
+    <string name="err_unknown">خطأ غير معروف</string>
+    <string name="err_storage_unavailable">مكان التخزين غير متاح</string>
+    <string name="msg_storage_busy">عملية نقل التخزين قيد التنفيذ بالفعل</string>
+    <string name="err_internal">خطأ: خطأ داخلي</string>
+    <string name="err_server_closing">خطأ: الخادم السابق ما زال يُغلق، حاول مرة أخرى بعد قليل</string>
+    <string name="err_server_loop_stuck">خطأ: لم يتوقف الخادم خلال 20 ثانية</string>
+    <string name="err_server_not_running">خطأ: الخادم لا يعمل</string>
+    <string name="err_no_address">خطأ: ليس للخادم عنوان قابل للوصول بعد (قد يكون Tor في مرحلة البدء)</string>
+    <string name="err_invalid_id">خطأ: معرّف غير صالح</string>
+    <string name="err_record_not_found">خطأ: السجل غير موجود</string>
+    <string name="btn_pin">رمز PIN للتطبيق</string>
+    <string name="pin_unlock_title">Typeon Server مقفل</string>
+    <string name="pin_hint">PIN</string>
+    <string name="pin_unlock">فتح القفل</string>
+    <string name="pin_exit">خروج</string>
+    <string name="pin_wrong">رمز PIN غير صحيح</string>
+    <string name="pin_wait_fmt">محاولات كثيرة. حاول مرة أخرى بعد %1$d ث</string>
+    <string name="pin_settings_title">رمز PIN للتطبيق</string>
+    <string name="pin_set_msg">عيّن رمز PIN أولًا. يحمي رمز الانضمام وقائمة الأجهزة والإعدادات. يستمر الخادم في العمل أثناء قفل التطبيق.</string>
+    <string name="pin_change_msg">أدخل رمز PIN الحالي ثم رمزًا جديدًا.</string>
+    <string name="pin_current_hint">رمز PIN الحالي</string>
+    <string name="pin_new_hint">رمز PIN الجديد</string>
+    <string name="pin_too_short_fmt">يجب أن يحتوي رمز PIN على %1$d أحرف على الأقل</string>
+    <string name="pin_saved">تم حفظ رمز PIN</string>
+    <string name="lbl_beta_updates">التحديثات التجريبية</string>
+    <string name="lbl_beta_updates_desc">يُحدّث الخادم نفسه مرة واحدة يوميًا من إصدارات GitHub عبر Tor. عند التفعيل: تُثبَّت أيضًا الإصدارات التجريبية.</string>
+    <string name="action_check_updates">التحقق من التحديثات</string>
+    <string name="update_status">المثبّت: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">لم يتم التحقق بعد</string>
+    <string name="update_state_latest">محدَّث</string>
+    <string name="update_state_waiting">الإصدار الجديد ما زال قيد البناء</string>
+    <string name="update_state_downloading">جارٍ التنزيل… %1$s ميغابايت</string>
+    <string name="update_state_ready">تم التنزيل، جارٍ التثبيت</string>
+    <string name="update_state_error">فشل آخر تحقق: %1$s</string>
+    <string name="update_ready_title">التحديث جاهز</string>
+    <string name="update_ready_text">اضغط لتثبيت Typeon Server %1$s</string>
+</resources>

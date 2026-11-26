@@ -38,7 +38,7 @@ impl ChatView {
         *self.search_matches.borrow_mut() = matches;
 
         if found == 0 {
-            count.set_label("No matches");
+            count.set_label(t("No matches"));
         } else {
             self.focus_search_match(count);
         }
@@ -65,7 +65,7 @@ impl ChatView {
             return;
         };
         drop(matches);
-        count.set_label(&format!("{} of {}", index + 1, total));
+        count.set_label(&tf!("{} of {}", index + 1, total));
 
         let bubbles = self.bubbles.borrow();
         let Some(bubble) = bubbles.get(&id) else { return };
@@ -90,7 +90,7 @@ impl ChatView {
     pub(super) fn scroll_to_message(&self, id: &str) {
         let bubbles = self.bubbles.borrow();
         let Some(bubble) = bubbles.get(id) else {
-            self.app().toast("Original message isn't loaded. Scroll up to find it.");
+            self.app().toast(t("Original message isn't loaded. Scroll up to find it."));
             return;
         };
         let root = bubble.root.clone();
@@ -131,7 +131,7 @@ impl ChatView {
 /// over every stored row on every keystroke.
 pub(super) fn build_search_bar(view: &Rc<ChatView>) -> (gtk::Revealer, gtk::SearchEntry) {
     let entry = gtk::SearchEntry::builder()
-        .placeholder_text("Search in this conversation")
+        .placeholder_text(t("Search in this conversation"))
         .hexpand(true)
         .build();
 
@@ -141,17 +141,17 @@ pub(super) fn build_search_bar(view: &Rc<ChatView>) -> (gtk::Revealer, gtk::Sear
 
     let previous = gtk::Button::builder()
         .icon_name("go-up-symbolic")
-        .tooltip_text("Previous match")
+        .tooltip_text(t("Previous match"))
         .build();
     previous.add_css_class("flat");
     let next = gtk::Button::builder()
         .icon_name("go-down-symbolic")
-        .tooltip_text("Next match")
+        .tooltip_text(t("Next match"))
         .build();
     next.add_css_class("flat");
     let close = gtk::Button::builder()
         .icon_name("window-close-symbolic")
-        .tooltip_text("Close search")
+        .tooltip_text(t("Close search"))
         .build();
     close.add_css_class("flat");
 

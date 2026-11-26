@@ -1,6 +1,7 @@
 //! Small shared helpers: clock, time formatting, image decode/encode, MIME
 //! guessing, byte sizes.
 
+use crate::i18n::t;
 use gtk::gdk;
 use gtk::gdk_pixbuf;
 use gtk::glib;
@@ -212,7 +213,7 @@ pub fn format_list_time(timestamp_ms: u64) -> String {
     let yesterday = now.add_days(-1).ok();
     if let Some(yesterday) = yesterday {
         if when.year() == yesterday.year() && when.day_of_year() == yesterday.day_of_year() {
-            return "Yesterday".to_string();
+            return t("Yesterday").to_string();
         }
     }
     when.format("%d.%m.%Y").map(|s| s.to_string()).unwrap_or_default()
@@ -290,9 +291,9 @@ pub fn format_eta(started_at_ms: u64, bytes_done: u64, total_size: u64) -> Optio
     }
     let eta_seconds = (remaining as f64 / bytes_per_ms / 1000.0) as u64;
     Some(if eta_seconds >= 60 {
-        format!("{}:{:02} left", eta_seconds / 60, eta_seconds % 60)
+        tf!("{} left", format!("{}:{:02}", eta_seconds / 60, eta_seconds % 60))
     } else {
-        format!("{}s left", eta_seconds.max(1))
+        tf!("{}s left", eta_seconds.max(1))
     })
 }
 
@@ -369,17 +370,17 @@ pub fn is_audio(mime: &str) -> bool {
 /// mirrors `P2PService.attachmentNotificationLabel`.
 pub fn attachment_label(mime: &str, file_name: &str, sticker: bool) -> String {
     if sticker {
-        "🙂 Sticker".to_string()
+        t("🙂 Sticker").to_string()
     } else if is_image(mime) {
-        "📷 Photo".to_string()
+        t("📷 Photo").to_string()
     } else if is_video(mime) {
-        "🎬 Video".to_string()
+        t("🎬 Video").to_string()
     } else if is_audio(mime) {
-        "🎤 Voice message".to_string()
+        t("🎤 Voice message").to_string()
     } else if !file_name.is_empty() {
         format!("📎 {}", file_name)
     } else {
-        "📎 File".to_string()
+        t("📎 File").to_string()
     }
 }
 

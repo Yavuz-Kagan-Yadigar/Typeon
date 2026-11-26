@@ -7,15 +7,17 @@
 use super::*;
 
 /// The timer choices, in seconds, with their labels (the same stops as the phone).
-const DISAPPEAR_STOPS: [(u32, &str); 7] = [
-    (30, "30 seconds"),
-    (5 * 60, "5 minutes"),
-    (3600, "1 hour"),
-    (8 * 3600, "8 hours"),
-    (24 * 3600, "1 day"),
-    (7 * 24 * 3600, "1 week"),
-    (28 * 24 * 3600, "4 weeks"),
-];
+fn disappear_stops() -> [(u32, &'static str); 7] {
+    [
+        (30, t("30 seconds")),
+        (5 * 60, t("5 minutes")),
+        (3600, t("1 hour")),
+        (8 * 3600, t("8 hours")),
+        (24 * 3600, t("1 day")),
+        (7 * 24 * 3600, t("1 week")),
+        (28 * 24 * 3600, t("4 weeks")),
+    ]
+}
 /// Steps of the edge pulse; theme.rs has a `dpulse-N` class for each.
 pub(crate) const DISAPPEAR_PULSE_STEPS: i32 = 8;
 
@@ -40,10 +42,10 @@ fn left_ms((secs, at): (u32, u64), now: u64) -> u64 {
 pub(super) fn format_left(ms: u64) -> String {
     let s = ms.div_ceil(1000);
     match s {
-        0..=59 => format!("⏱ {s} s"),
-        60..=3599 => format!("⏱ {} min", s.div_ceil(60)),
-        3600..=86_399 => format!("⏱ {} h", s.div_ceil(3600)),
-        _ => format!("⏱ {} days", s.div_ceil(86_400)),
+        0..=59 => tf!("⏱ {} s", s),
+        60..=3599 => tf!("⏱ {} min", s.div_ceil(60)),
+        3600..=86_399 => tf!("⏱ {} h", s.div_ceil(3600)),
+        _ => tf!("⏱ {} days", s.div_ceil(86_400)),
     }
 }
 
@@ -76,13 +78,13 @@ pub(super) fn load_disappear_mode(view: &Rc<ChatView>) {
 
 /// The chat header's clock: turns the mode off at once when it is on, else opens the disappearing-mode picker.
 pub(super) fn disappear_button(view: &Rc<ChatView>) -> gtk::Button {
-    let button = gtk::Button::builder().icon_name("alarm-symbolic").tooltip_text("Disappearing messages").build();
+    let button = gtk::Button::builder().icon_name("alarm-symbolic").tooltip_text(t("Disappearing messages")).build();
     let view = Rc::downgrade(view);
     button.connect_clicked(move |button| {
         let Some(view) = view.upgrade() else { return };
         if view.disappear_mode.get() > 0 {
             view.set_disappear_mode(0);
-            view.app().toast("Disappearing messages off");
+            view.app().toast(t("Disappearing messages off"));
         } else {
             view.pick_disappear_mode(button);
         }
@@ -92,14 +94,14 @@ pub(super) fn disappear_button(view: &Rc<ChatView>) -> gtk::Button {
 
 /// The Send button tells whether the chat's messages disappear.
 fn show_mode(button: &gtk::Button, secs: u32) {
-    match DISAPPEAR_STOPS.iter().find(|(s, _)| *s == secs) {
+    match disappear_stops().iter().find(|(s, _)| *s == secs) {
         Some((_, label)) => {
             button.set_icon_name("alarm-symbolic");
-            button.set_tooltip_text(Some(&format!("Send · disappears {label} after it is read")));
+            button.set_tooltip_text(Some(&tf!("Send · disappears {} after it is read", label)));
         }
         None => {
             button.set_icon_name("document-send-symbolic");
-            button.set_tooltip_text(Some("Send"));
+            button.set_tooltip_text(Some(t("Send")));
         }
     }
 }
@@ -124,7 +126,7 @@ impl ChatView {
         }
     }
 
-    /// The picker (mode off only, see `disappear_button`): a slider over `DISAPPEAR_STOPS`, Turn on (and send what is typed).
+    /// The picker (mode off only, see `disappear_button`): a slider over `disappear_stops`, Turn on (and send what is typed).
     fn pick_disappear_mode(self: &Rc<Self>, anchor: &gtk::Button) {
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -135,27 +137,27 @@ impl ChatView {
             .margin_end(8)
             .width_request(280)
             .build();
-        let title = gtk::Label::builder().label("Disappearing messages").xalign(0.0).build();
+        let title = gtk::Label::builder().label(t("Disappearing messages")).xalign(0.0).build();
         title.add_css_class("heading");
-        let stop = LAST_STOP.with(Cell::get).min(DISAPPEAR_STOPS.len() - 1);
-        let value = gtk::Label::builder().label(DISAPPEAR_STOPS[stop].1).xalign(0.0).build();
+        let stop = LAST_STOP.with(Cell::get).min(disappear_stops().len() - 1);
+        let value = gtk::Label::builder().label(disappear_stops()[stop].1).xalign(0.0).build();
         value.add_css_class("disappear-time");
-        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (DISAPPEAR_STOPS.len() - 1) as f64, 1.0);
+        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, (disappear_stops().len() - 1) as f64, 1.0);
         scale.set_draw_value(false);
         scale.set_round_digits(0);
-        for i in 0..DISAPPEAR_STOPS.len() {
+        for i in 0..disappear_stops().len() {
             scale.add_mark(i as f64, gtk::PositionType::Bottom, None);
         }
         scale.set_value(stop as f64);
         {
             let value = value.clone();
             scale.connect_value_changed(move |scale| {
-                let i = (scale.value().round() as usize).min(DISAPPEAR_STOPS.len() - 1);
-                value.set_label(DISAPPEAR_STOPS[i].1);
+                let i = (scale.value().round() as usize).min(disappear_stops().len() - 1);
+                value.set_label(disappear_stops()[i].1);
             });
         }
         let hint = gtk::Label::builder()
-            .label("Everything you send in this chat disappears after it is read. It can't be copied or forwarded. Desktops show only a placeholder: it is read on the phone.")
+            .label(t("Everything you send in this chat disappears after it is read. It can't be copied or forwarded. Desktops show only a placeholder: it is read on the phone."))
             .xalign(0.0)
             .wrap(true)
             .max_width_chars(36)
@@ -163,7 +165,7 @@ impl ChatView {
         hint.add_css_class("caption");
         hint.add_css_class("dim-label");
         let buttons = gtk::Box::builder().spacing(6).halign(gtk::Align::End).build();
-        let on = gtk::Button::builder().label("Turn on").build();
+        let on = gtk::Button::builder().label(t("Turn on")).build();
         on.add_css_class("suggested-action");
         buttons.append(&on);
         content.append(&title);
@@ -181,13 +183,13 @@ impl ChatView {
         {
             let (view, popover, scale) = (Rc::downgrade(self), popover.downgrade(), scale.clone());
             on.connect_clicked(move |_| {
-                let i = (scale.value().round() as usize).min(DISAPPEAR_STOPS.len() - 1);
+                let i = (scale.value().round() as usize).min(disappear_stops().len() - 1);
                 LAST_STOP.with(|last| last.set(i));
                 if let Some(popover) = popover.upgrade() {
                     popover.popdown();
                 }
                 if let Some(view) = view.upgrade() {
-                    view.set_disappear_mode(DISAPPEAR_STOPS[i].0);
+                    view.set_disappear_mode(disappear_stops()[i].0);
                 }
             });
         }

@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon Server</string>
+    <string name="intro">在联系人离线时为其保存消息，待其重新上线后投递。服务器无法读取这些消息：它们到达时已完成端到端加密，并再次封存。</string>
+
+    <string name="lbl_run_server">运行服务器</string>
+    <string name="state_stopped">已停止</string>
+    <string name="state_running_fmt">运行中 · Tor：%1$s</string>
+    <string name="state_no_address">尚无地址 — Tor 仍在启动（首次运行需 30–60 秒）。没有地址时，邀请码无法使用。</string>
+
+    <string name="lbl_address">地址</string>
+    <string name="lbl_invite">加入码</string>
+    <string name="lbl_invite_desc">所有人共用一个码，有效期 3 天：在手机的「设置 → 服务器」中扫描，或复制粘贴即可。无需向你请求任何东西，不限人数使用同一个码加入。3 天后，此处会自动生成新码。如果泄露，请更换；已注册的设备不受影响，仍可正常使用。</string>
+    <string name="action_new_invite">更换码</string>
+    <string name="action_copy_invite">复制码</string>
+    <string name="msg_invite_copied">邀请码已复制</string>
+    <string name="msg_no_invite_yet">尚无地址 — 请等待 Tor 启动完成</string>
+    <string name="confirm_rotate_join_code">当前的码将立即失效。持有旧二维码或链接的人，在你把新码交给他们之前将无法加入。已注册的设备不受影响。</string>
+
+    <string name="lbl_devices">已注册设备</string>
+    <string name="device_row_fmt">%1$s… · %2$s</string>
+    <string name="action_revoke">撤销</string>
+    <string name="dlg_revoke_title">撤销此设备？</string>
+    <string name="dlg_revoke_body">该设备将无法再存入或取回消息，在你解除屏蔽之前也无法重新注册。其 Typeon 仍可使用，只是会改用点对点投递。撤销时还会更换公开加入码，请把新码告知其他人。</string>
+
+    <string name="lbl_stats">运行情况</string>
+    <string name="stats_fmt">设备：%1$d\n已存储：%2$d · 已取回：%3$d · 已提供的文件分片：%4$d\n磁盘：%5$s</string>
+
+    <string name="lbl_options">选项</string>
+    <string name="lbl_tor_always">本服务器始终托管一个 onion 服务。这是运营商 NAT 后面的手机唯一能被连接到的方式 — 无需端口转发、无需域名、无需证书 — 因此不能关闭。</string>
+    <string name="lbl_node">同时作为中继</string>
+    <string name="lbl_node_desc">帮助互不相识的用户互相连接。与消息邮箱无关：它只盲目转发实时流量，不存储任何内容。</string>
+    <string name="action_battery">豁免电池优化</string>
+    <string name="msg_battery_already">已豁免</string>
+    <string name="msg_battery_manual">此设备不支持 — 请在「设置 → 电池」中手动设置。</string>
+
+    <string name="notif_channel">Typeon Server</string>
+    <string name="notif_starting">正在启动…</string>
+    <string name="notif_running">服务器运行中</string>
+
+    <string name="footer_note">内存紧张时，Android 仍可能终止前台服务。本应用适合插着电源长期运行的备用手机；如果服务器绝对不能漏掉任何消息，请在小型 VPS 上运行 typeon-server 守护进程。</string>
+    <string name="lbl_storage">存储位置</string>
+    <string name="lbl_storage_desc">附件保存在此处。身份和 Tor 状态始终保存在内部存储中。</string>
+    <string name="action_choose_storage">选择存储</string>
+    <string name="dlg_storage_title">移动服务器存储</string>
+    <string name="dlg_storage_moving">正在移动数据…</string>
+    <string name="msg_storage_moved">存储已移动，正在重启服务器。</string>
+    <string name="msg_storage_failed">无法移动：%1$s</string>
+    <string name="msg_storage_same">已在使用此位置。</string>
+    <string name="lbl_internal">内部存储</string>
+    <string name="lbl_sdcard">SD 卡</string>
+    <string name="lbl_free_suffix">可用</string>
+    <string name="lbl_external">外部存储</string>
+    <string name="action_block">屏蔽</string>
+    <string name="action_unblock">取消屏蔽</string>
+    <string name="dlg_block_title">屏蔽此设备？</string>
+    <string name="dlg_block_body">被屏蔽的设备即使使用新的邀请码也无法重新加入，同时公开加入码会被更换。屏蔽只会阻止这一注册密钥：对方重装应用后会获得新身份，因此要真正禁止某人，请更换加入码，且不要把新码交给他。之后可以取消屏蔽。</string>
+    <string name="err_storage_no_space">目标位置可用空间不足</string>
+    <string name="err_storage_mkdir">无法创建目标文件夹</string>
+    <string name="err_unknown">未知错误</string>
+    <string name="err_storage_unavailable">存储位置不可用</string>
+    <string name="msg_storage_busy">已有存储迁移正在进行</string>
+    <string name="err_internal">错误：内部错误</string>
+    <string name="err_server_closing">错误：上一个服务器仍在关闭，请稍后再试</string>
+    <string name="err_server_loop_stuck">错误：服务器未能在 20 秒内停止</string>
+    <string name="err_server_not_running">错误：服务器未在运行</string>
+    <string name="err_no_address">错误：服务器尚无可访问的地址（Tor 可能仍在启动）</string>
+    <string name="err_invalid_id">错误：无效的 ID</string>
+    <string name="err_record_not_found">错误：未找到记录</string>
+    <string name="btn_pin">应用 PIN</string>
+    <string name="pin_unlock_title">Typeon Server 已锁定</string>
+    <string name="pin_hint">PIN</string>
+    <string name="pin_unlock">解锁</string>
+    <string name="pin_exit">退出</string>
+    <string name="pin_wrong">PIN 错误</string>
+    <string name="pin_wait_fmt">尝试次数过多，%1$d 秒后再试</string>
+    <string name="pin_settings_title">应用 PIN</string>
+    <string name="pin_set_msg">请先设置 PIN。它用于保护加入码、设备列表和设置。应用锁定时服务器仍会继续运行。</string>
+    <string name="pin_change_msg">请输入当前 PIN 和新的 PIN。</string>
+    <string name="pin_current_hint">当前 PIN</string>
+    <string name="pin_new_hint">新 PIN</string>
+    <string name="pin_too_short_fmt">PIN 至少需要 %1$d 个字符</string>
+    <string name="pin_saved">PIN 已保存</string>
+    <string name="lbl_beta_updates">测试版更新</string>
+    <string name="lbl_beta_updates_desc">服务器每天通过 Tor 从 GitHub Releases 自动更新一次。开启后也会安装测试版。</string>
+    <string name="action_check_updates">检查更新</string>
+    <string name="update_status">已安装：%1$s · GitHub：%2$s\n%3$s</string>
+    <string name="update_state_none">尚未检查</string>
+    <string name="update_state_latest">已是最新版本</string>
+    <string name="update_state_waiting">新版本仍在构建中</string>
+    <string name="update_state_downloading">下载中… %1$s MB</string>
+    <string name="update_state_ready">已下载，正在安装</string>
+    <string name="update_state_error">上次检查失败：%1$s</string>
+    <string name="update_ready_title">更新已就绪</string>
+    <string name="update_ready_text">点击安装 Typeon Server %1$s</string>
+</resources>

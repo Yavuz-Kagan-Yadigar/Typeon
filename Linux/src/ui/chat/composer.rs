@@ -14,7 +14,7 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
 
     let attach = gtk::Button::builder()
         .icon_name("mail-attachment-symbolic")
-        .tooltip_text("Send a file")
+        .tooltip_text(t("Send a file"))
         .valign(gtk::Align::End)
         .build();
     attach.add_css_class("flat");
@@ -25,7 +25,7 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
 
     let sticker = gtk::Button::builder()
         .icon_name("face-smile-symbolic")
-        .tooltip_text("Stickers")
+        .tooltip_text(t("Stickers"))
         .valign(gtk::Align::End)
         .build();
     sticker.add_css_class("flat");
@@ -36,7 +36,7 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
 
     let record = gtk::Button::builder()
         .icon_name("audio-input-microphone-symbolic")
-        .tooltip_text("Record a voice message")
+        .tooltip_text(t("Record a voice message"))
         .valign(gtk::Align::End)
         .build();
     record.add_css_class("flat");
@@ -49,7 +49,7 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
     // away without sending it first.
     let record_cancel = gtk::Button::builder()
         .icon_name("window-close-symbolic")
-        .tooltip_text("Discard this recording")
+        .tooltip_text(t("Discard this recording"))
         .valign(gtk::Align::End)
         .build();
     record_cancel.add_css_class("flat");
@@ -58,7 +58,7 @@ pub(super) fn composer_bar(view: &Rc<ChatView>) -> gtk::Box {
         // No capture backend (ffmpeg on Linux, GStreamer on Windows) — say so rather than failing on click.
         record.set_sensitive(false);
         record.set_tooltip_text(Some(
-            "Voice messages need ffmpeg installed (it captures through PipeWire).",
+            t("Voice messages need ffmpeg installed (it captures through PipeWire)."),
         ));
     } else {
         let view = view.clone();
@@ -199,7 +199,7 @@ impl ChatView {
         let done = move |view: Rc<Self>, result: Result<Entry, String>, text: String| match result {
             Ok(entry) => view.insert_entry(entry, true),
             Err(error) => {
-                view.app().toast(&format!("Could not send: {}", error));
+                view.app().toast(&tf!("Could not send: {}", error));
                 let buffer = view.composer.buffer();
                 let (start, end) = buffer.bounds();
                 if buffer.text(&start, &end, false).is_empty() {
@@ -268,7 +268,7 @@ impl ChatView {
         button.set_icon_name("audio-input-microphone-symbolic");
         button.remove_css_class("destructive-action");
         button.add_css_class("flat");
-        button.set_tooltip_text(Some("Record a voice message"));
+        button.set_tooltip_text(Some(t("Record a voice message")));
         timer.set_visible(false);
         cancel.set_visible(false);
     }
@@ -282,7 +282,7 @@ impl ChatView {
     ) {
         if let Some(recording) = self.recording.borrow_mut().take() {
             recording.cancel();
-            self.app().toast("Recording discarded.");
+            self.app().toast(t("Recording discarded."));
         }
         Self::reset_recording_ui(button, timer, cancel);
     }
@@ -302,7 +302,7 @@ impl ChatView {
                     button.set_icon_name("media-playback-stop-symbolic");
                     button.add_css_class("destructive-action");
                     button.remove_css_class("flat");
-                    button.set_tooltip_text(Some("Stop and send"));
+                    button.set_tooltip_text(Some(t("Stop and send")));
                     timer.set_visible(true);
                     timer.set_label("0:00");
                     cancel.set_visible(true);
@@ -329,7 +329,7 @@ impl ChatView {
                         glib::ControlFlow::Continue
                     });
                 }
-                Err(error) => self.app().toast(&format!("Could not record: {}", error)),
+                Err(error) => self.app().toast(&tf!("Could not record: {}", error)),
             }
             return;
         }
@@ -344,7 +344,7 @@ impl ChatView {
         // Under 0.8 s it is almost always a mis-click.
         if recording.elapsed_ms() < 800 {
             recording.cancel();
-            self.app().toast("Too short — hold on a moment longer.");
+            self.app().toast(t("Too short — hold on a moment longer."));
             return;
         }
 
@@ -367,7 +367,7 @@ impl ChatView {
                 let (path, duration_ms) = match finished {
                     Ok(done) => done,
                     Err(error) => {
-                        view.app().toast(&format!("Voice message failed: {}", error));
+                        view.app().toast(&tf!("Voice message failed: {}", error));
                         return;
                     }
                 };
@@ -382,7 +382,7 @@ impl ChatView {
                     let reply_preview = reply_preview.clone();
                     let reply_sender = reply_sender.clone();
                     let path = path.clone();
-                    app.toast("Sending voice message…");
+                    app.toast(t("Sending voice message…"));
                     app::run_in_background(
                         move || {
                             let source = path.to_string_lossy().to_string();
@@ -423,7 +423,7 @@ impl ChatView {
                                 view.clear_reply();
                                 view.show_sent_attachment(entry);
                             }
-                            Err(error) => app.toast(&format!("Voice message failed: {}", error)),
+                            Err(error) => app.toast(&tf!("Voice message failed: {}", error)),
                         },
                     );
                 });
@@ -442,11 +442,11 @@ impl ChatView {
             return;
         };
         let field = gtk::Entry::builder()
-            .placeholder_text("Add a caption (optional)")
+            .placeholder_text(t("Add a caption (optional)"))
             .activates_default(true)
             .build();
-        let dialog = adw::MessageDialog::new(Some(&window), Some("Add a caption?"), None);
-        let hi_res = gtk::CheckButton::with_label("Hi-res (lossless)");
+        let dialog = adw::MessageDialog::new(Some(&window), Some(t("Add a caption?")), None);
+        let hi_res = gtk::CheckButton::with_label(t("Hi-res (lossless)"));
         if offer_hi_res {
             let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
             column.append(&crate::ui::widgets::dialog_field(&field));
@@ -455,8 +455,8 @@ impl ChatView {
         } else {
             dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&field)));
         }
-        dialog.add_response("skip", "Skip");
-        dialog.add_response("send", "Send");
+        dialog.add_response("skip", t("Skip"));
+        dialog.add_response("send", t("Send"));
         dialog.set_default_response(Some("send"));
         dialog.set_close_response("skip");
         dialog.set_response_appearance("send", adw::ResponseAppearance::Suggested);
@@ -480,7 +480,7 @@ impl ChatView {
 
     pub(super) fn pick_attachment(self: &Rc<Self>) {
         let Some(window) = self.app().window() else { return };
-        let dialog = gtk::FileDialog::builder().modal(false).title("Send a file").build();
+        let dialog = gtk::FileDialog::builder().modal(false).title(t("Send a file")).build();
         let view = self.clone();
         dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
             let Ok(file) = result else { return };
@@ -516,7 +516,7 @@ impl ChatView {
         let conversation = self.conversation.clone();
         let view = self.clone();
         let app = self.app().clone();
-        app.toast(&format!("Encrypting {}…", file_name));
+        app.toast(&tf!("Encrypting {}…", file_name));
 
         // Encryption rewrites the whole file; on a 4 GB attachment this is very
         // much not instant.
@@ -567,7 +567,7 @@ impl ChatView {
                                 view.clear_reply();
                                 view.show_sent_attachment(entry);
                             }
-                            Err(error) => app_for_send.toast(&format!("Could not send the file: {}", error)),
+                            Err(error) => app_for_send.toast(&tf!("Could not send the file: {}", error)),
                         },
                     );
                 };
@@ -577,9 +577,9 @@ impl ChatView {
                     let send = std::cell::RefCell::new(Some(send));
                     dialogs::confirm(
                         &app,
-                        "Send with metadata?",
-                        "The metadata (location, device, time) of this file could not be removed. Send it anyway?",
-                        "Send anyway",
+                        t("Send with metadata?"),
+                        t("The metadata (location, device, time) of this file could not be removed. Send it anyway?"),
+                        t("Send anyway"),
                         true,
                         move || {
                             if let Some(send) = send.borrow_mut().take() {
@@ -619,7 +619,7 @@ impl ChatView {
             .min_content_height(320)
             .child(&grid)
             .build();
-        let add = gtk::Button::builder().label("Add from file…").build();
+        let add = gtk::Button::builder().label(t("Add from file…")).build();
         {
             let (view, popover) = (self.clone(), popover.clone());
             add.connect_clicked(move |_| {
@@ -627,15 +627,15 @@ impl ChatView {
                 view.import_sticker();
             });
         }
-        let fetch = gtk::Button::builder().label("Fetch stickers from phone").build();
+        let fetch = gtk::Button::builder().label(t("Fetch stickers from phone")).build();
         {
             let (app, popover) = (self.app().clone(), popover.clone());
             fetch.connect_clicked(move |_| {
                 popover.popdown();
                 let app = app.clone();
                 app::run_in_background(core::request_stickers_from_phone, move |result| match result {
-                    Ok(()) => app.toast("Asked your phone: stickers arrive in the background"),
-                    Err(error) => app.toast(&format!("Could not ask your phone: {}", error)),
+                    Ok(()) => app.toast(t("Asked your phone: stickers arrive in the background")),
+                    Err(error) => app.toast(&tf!("Could not ask your phone: {}", error)),
                 });
             });
         }
@@ -711,18 +711,18 @@ impl ChatView {
         let weak = Rc::downgrade(picker);
         match &open {
             None => {
-                let new = gtk::Button::builder().label("New folder…").build();
+                let new = gtk::Button::builder().label(t("New folder…")).build();
                 let (view, weak) = (self.clone(), weak.clone());
                 new.connect_clicked(move |_| {
                     let (view_for_name, weak) = (view.clone(), weak.clone());
-                    dialogs::prompt(view.app(), "New folder", "", "Folder name", "", "Create", move |name| {
+                    dialogs::prompt(view.app(), t("New folder"), "", t("Folder name"), "", t("Create"), move |name| {
                         let (view, weak) = (view_for_name.clone(), weak.clone());
                         app::run_in_background(move || core::create_sticker_folder(&name), move |result| match result {
                             Ok(_) => {
-                                view.app().toast("Folder created");
+                                view.app().toast(t("Folder created"));
                                 view.refill_sticker_picker(&weak);
                             }
-                            Err(error) => view.app().toast(&format!("Could not create the folder: {}", error)),
+                            Err(error) => view.app().toast(&tf!("Could not create the folder: {}", error)),
                         });
                     });
                 });
@@ -738,12 +738,12 @@ impl ChatView {
                         view.fill_sticker_picker(&picker);
                     });
                 }
-                let rename = gtk::Button::builder().label("Rename folder").build();
+                let rename = gtk::Button::builder().label(t("Rename folder")).build();
                 {
                     let (view, weak, folder) = (self.clone(), weak.clone(), folder.clone());
                     rename.connect_clicked(move |_| {
                         let (view_for_name, weak, id) = (view.clone(), weak.clone(), folder.id);
-                        dialogs::prompt(view.app(), "Rename folder", "", "Folder name", &folder.name, "Rename", move |name| {
+                        dialogs::prompt(view.app(), t("Rename folder"), "", t("Folder name"), &folder.name, t("Rename"), move |name| {
                             let (view, weak, shown) = (view_for_name.clone(), weak.clone(), name.clone());
                             app::run_in_background(move || core::rename_sticker_folder(id, &name), move |result| match result {
                                 Ok(()) => {
@@ -754,19 +754,19 @@ impl ChatView {
                                     }
                                     view.refill_sticker_picker(&weak);
                                 }
-                                Err(error) => view.app().toast(&format!("Could not rename the folder: {}", error)),
+                                Err(error) => view.app().toast(&tf!("Could not rename the folder: {}", error)),
                             });
                         });
                     });
                 }
-                let delete = gtk::Button::builder().label("Delete folder").build();
+                let delete = gtk::Button::builder().label(t("Delete folder")).build();
                 delete.add_css_class("destructive-action");
                 {
                     let (view, weak, folder) = (self.clone(), weak.clone(), folder.clone());
                     delete.connect_clicked(move |_| {
                         let (view_for_delete, weak, id) = (view.clone(), weak.clone(), folder.id);
-                        let body = format!("The folder \"{}\" is removed. Its stickers stay.", folder.name);
-                        dialogs::confirm(view.app(), "Delete this folder?", &body, "Delete", true, move || {
+                        let body = tf!("The folder \"{}\" is removed. Its stickers stay.", folder.name);
+                        dialogs::confirm(view.app(), t("Delete this folder?"), &body, t("Delete"), true, move || {
                             let (view, weak) = (view_for_delete.clone(), weak.clone());
                             app::run_in_background(move || core::delete_sticker_folder(id), move |result| match result {
                                 Ok(()) => {
@@ -775,7 +775,7 @@ impl ChatView {
                                     }
                                     view.refill_sticker_picker(&weak);
                                 }
-                                Err(error) => view.app().toast(&format!("Could not delete the folder: {}", error)),
+                                Err(error) => view.app().toast(&tf!("Could not delete the folder: {}", error)),
                             });
                         });
                     });
@@ -860,7 +860,7 @@ impl ChatView {
                         picker.folders.replace(folders);
                     }
                     StickerLoad::Empty => {
-                        let text = if open.is_some() { "No stickers in this folder" } else { "No stickers yet" };
+                        let text = if open.is_some() { t("No stickers in this folder") } else { t("No stickers yet") };
                         picker.grid.append(&gtk::Label::new(Some(text)));
                     }
                     StickerLoad::Sticker(id, favorite, Some(texture)) => {
@@ -963,7 +963,7 @@ impl ChatView {
             move || button.parent().unwrap_or_else(|| button.clone().upcast()).set_visible(false)
         };
 
-        let fav = crate::ui::widgets::menu_item("starred-symbolic", if favorite.get() { "Unfavorite" } else { "Favorite" });
+        let fav = crate::ui::widgets::menu_item("starred-symbolic", if favorite.get() { t("Unfavorite") } else { t("Favorite") });
         {
             let (id, favorite, menu, app) = (id.to_string(), favorite.clone(), menu.clone(), app.clone());
             fav.connect_clicked(move |_| {
@@ -975,14 +975,14 @@ impl ChatView {
                     move |result| match result {
                         // Shown first from the next opening on.
                         Ok(()) => favorite.set(want),
-                        Err(error) => app.toast(&format!("Could not change the sticker: {}", error)),
+                        Err(error) => app.toast(&tf!("Could not change the sticker: {}", error)),
                     },
                 );
             });
         }
         items.append(&fav);
 
-        let to_folder = crate::ui::widgets::menu_item("folder-symbolic", "Add to folder…");
+        let to_folder = crate::ui::widgets::menu_item("folder-symbolic", t("Add to folder…"));
         {
             let (view, picker, button, id, menu) = (self.clone(), picker.clone(), button.clone(), id.to_string(), menu.clone());
             to_folder.connect_clicked(move |_| {
@@ -993,7 +993,7 @@ impl ChatView {
         items.append(&to_folder);
 
         if let Some(folder) = picker.folder.borrow().clone() {
-            let out = crate::ui::widgets::menu_item("list-remove-symbolic", "Remove from folder");
+            let out = crate::ui::widgets::menu_item("list-remove-symbolic", t("Remove from folder"));
             let (id, menu, app, hide) = (id.to_string(), menu.clone(), app.clone(), hide.clone());
             out.connect_clicked(move |_| {
                 menu.popdown();
@@ -1002,27 +1002,27 @@ impl ChatView {
                     move || core::remove_stickers_from_folder(folder.id, &ids),
                     move |result| match result {
                         Ok(()) => hide(),
-                        Err(error) => app.toast(&format!("Could not remove the sticker from the folder: {}", error)),
+                        Err(error) => app.toast(&tf!("Could not remove the sticker from the folder: {}", error)),
                     },
                 );
             });
             items.append(&out);
         }
 
-        let delete = crate::ui::widgets::menu_item("edit-delete-symbolic", "Delete");
+        let delete = crate::ui::widgets::menu_item("edit-delete-symbolic", t("Delete"));
         delete.add_css_class("destructive-action");
         {
             let (id, menu) = (id.to_string(), menu.clone());
             delete.connect_clicked(move |_| {
                 menu.popdown();
                 let (id, app, hide) = (id.clone(), app.clone(), hide.clone());
-                dialogs::confirm(&app.clone(), "Delete this sticker?", "It is removed from all your devices.", "Delete", true, move || {
+                dialogs::confirm(&app.clone(), t("Delete this sticker?"), t("It is removed from all your devices."), t("Delete"), true, move || {
                     let (id, app, hide) = (id.clone(), app.clone(), hide.clone());
                     app::run_in_background(
                         move || core::delete_sticker(&id),
                         move |result| match result {
                             Ok(()) => hide(),
-                            Err(error) => app.toast(&format!("Could not delete the sticker: {}", error)),
+                            Err(error) => app.toast(&tf!("Could not delete the sticker: {}", error)),
                         },
                     );
                 });
@@ -1046,11 +1046,11 @@ impl ChatView {
                     move || core::add_stickers_to_folder(folder_id, &ids),
                     move |result| match result {
                         Ok(()) => {
-                            app.toast(&format!("Added to {}", name));
+                            app.toast(&tf!("Added to {}", name));
                             // The folder cell's count and preview are read at fill time.
                             view.refill_sticker_picker(&weak);
                         }
-                        Err(error) => app.toast(&format!("Could not add the sticker to the folder: {}", error)),
+                        Err(error) => app.toast(&tf!("Could not add the sticker to the folder: {}", error)),
                     },
                 );
             }
@@ -1064,18 +1064,18 @@ impl ChatView {
             });
             items.append(&item);
         }
-        let new = crate::ui::widgets::menu_item("folder-new-symbolic", "New folder…");
+        let new = crate::ui::widgets::menu_item("folder-new-symbolic", t("New folder…"));
         {
             let menu = menu.clone();
             new.connect_clicked(move |_| {
                 menu.popdown();
                 let (add, app_for_create) = (add.clone(), app.clone());
-                dialogs::prompt(&app, "New folder", "", "Folder name", "", "Create", move |name| {
+                dialogs::prompt(&app, t("New folder"), "", t("Folder name"), "", t("Create"), move |name| {
                     let (add, app) = (add.clone(), app_for_create.clone());
                     let folder_name = name.clone();
                     app::run_in_background(move || core::create_sticker_folder(&name), move |result| match result {
                         Ok(folder_id) => add(folder_id, folder_name),
-                        Err(error) => app.toast(&format!("Could not create the folder: {}", error)),
+                        Err(error) => app.toast(&tf!("Could not create the folder: {}", error)),
                     });
                 });
             });
@@ -1103,7 +1103,7 @@ impl ChatView {
                     view.clear_reply();
                     view.show_sent_attachment(entry);
                 }
-                Err(error) => view.app().toast(&format!("Could not send the sticker: {}", error)),
+                Err(error) => view.app().toast(&tf!("Could not send the sticker: {}", error)),
             },
         );
     }
@@ -1111,11 +1111,11 @@ impl ChatView {
     pub(super) fn import_sticker(self: &Rc<Self>) {
         let Some(window) = self.app().window() else { return };
         let filter = gtk::FileFilter::new();
-        filter.set_name(Some("Pictures"));
+        filter.set_name(Some(t("Pictures")));
         filter.add_pixbuf_formats();
         let filters = gio::ListStore::new::<gtk::FileFilter>();
         filters.append(&filter);
-        let dialog = gtk::FileDialog::builder().modal(false).title("Add a sticker").filters(&filters).build();
+        let dialog = gtk::FileDialog::builder().modal(false).title(t("Add a sticker")).filters(&filters).build();
         let app = self.app().clone();
         dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
             let Ok(file) = result else { return };
@@ -1123,12 +1123,12 @@ impl ChatView {
             app::run_in_background(
                 move || {
                     let (rgba, w, h) = util::image_rgba(&path.to_string_lossy(), 600)
-                        .ok_or_else(|| "this picture cannot be read".to_string())?;
+                        .ok_or_else(|| t("this picture cannot be read").to_string())?;
                     core::import_sticker_rgba(rgba, w, h)
                 },
                 move |result| match result {
-                    Ok(_) => app.toast("Added to your stickers"),
-                    Err(error) => app.toast(&format!("Could not add the sticker: {}", error)),
+                    Ok(_) => app.toast(t("Added to your stickers")),
+                    Err(error) => app.toast(&tf!("Could not add the sticker: {}", error)),
                 },
             );
         });

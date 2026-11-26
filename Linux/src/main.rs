@@ -14,6 +14,8 @@
 // and the `console` feature keep it so `RUST_LOG=info` output is visible.
 #![cfg_attr(all(windows, not(debug_assertions), not(feature = "console")), windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
 mod app;
 #[cfg_attr(windows, path = "audio_win.rs")]
 mod audio;
@@ -32,6 +34,7 @@ mod util;
 #[cfg(windows)]
 mod win;
 
+use i18n::t;
 use std::path::PathBuf;
 
 use adw::prelude::*;
@@ -186,14 +189,19 @@ fn activate(application: &adw::Application) {
         eprintln!("typeon: cannot create {}: {error}", data_dir.display());
         return;
     }
+    // Before the first translated text. Arabic also mirrors the layout.
+    if i18n::init(prefs::Prefs::load(&data_dir).language.as_deref()) == "ar" {
+        gtk::Widget::set_default_direction(gtk::TextDirection::Rtl);
+    }
+
     // Backstop for single-instance mode, which needs a session bus (GLib on
     // Windows falls back to non-unique without one). Two cores on one data
     // directory would share a PeerId and race on ratchet state and the archive.
     if !lock_data_dir(&data_dir) {
         show_blocking_error(
             application,
-            "Typeon is already running",
-            "Another Typeon process is using this profile. Open it from its window or the tray.",
+            t("Typeon is already running"),
+            t("Another Typeon process is using this profile. Open it from its window or the tray."),
         );
         return;
     }
@@ -225,8 +233,8 @@ fn activate(application: &adw::Application) {
         .resizable(false)
         .build();
     let splash_status = adw::StatusPage::builder()
-        .title("Starting Typeon")
-        .description("Checking the system keyring…")
+        .title(t("Starting Typeon"))
+        .description(t("Checking the system keyring…"))
         .build();
     let splash_spinner = gtk::Spinner::new();
     splash_spinner.set_spinning(true);
@@ -415,7 +423,7 @@ fn data_directory() -> PathBuf {
 /// instead of the main UI, never alongside it — closing it quits.
 fn show_blocking_error(application: &adw::Application, heading: &str, detail: &str) {
     let quit = gtk::Button::builder()
-        .label("Quit")
+        .label(t("Quit"))
         .halign(gtk::Align::Center)
         .build();
     quit.add_css_class("pill");

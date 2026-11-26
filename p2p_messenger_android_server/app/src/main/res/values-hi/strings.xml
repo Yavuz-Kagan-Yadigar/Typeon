@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon सर्वर</string>
+    <string name="intro">जब आपके संपर्क ऑफ़लाइन होते हैं, तब यह उनके संदेश रखता है, और वापस आने पर उन्हें पहुँचा देता है। यह उन्हें पढ़ नहीं सकता: वे यहाँ पहले से एंड-टू-एंड एन्क्रिप्टेड और दूसरी बार सील किए हुए पहुँचते हैं।</string>
+
+    <string name="lbl_run_server">सर्वर चलाएँ</string>
+    <string name="state_stopped">बंद</string>
+    <string name="state_running_fmt">चल रहा है · Tor: %1$s</string>
+    <string name="state_no_address">अभी तक कोई पता नहीं — Tor अभी शुरू हो रहा है (पहली बार 30–60 सेकंड)। पते के बिना आमंत्रण का कोई उपयोग नहीं।</string>
+
+    <string name="lbl_address">पता</string>
+    <string name="lbl_invite">जॉइन कोड</string>
+    <string name="lbl_invite_desc">सबके लिए एक ही कोड, 3 दिन तक मान्य: फ़ोन पर सेटिंग्स → सर्वर में इसे स्कैन करें, या कॉपी करके वहाँ चिपकाएँ। बिना आपसे कुछ पूछे अनगिनत लोग एक ही कोड से जुड़ सकते हैं। 3 दिन बाद यहाँ अपने-आप नया कोड बन जाएगा। कोड लीक हो जाए तो इसे बदलें; जो डिवाइस पहले से जुड़े हैं, उन पर असर नहीं होगा।</string>
+    <string name="action_new_invite">कोड बदलें</string>
+    <string name="action_copy_invite">कोड कॉपी करें</string>
+    <string name="msg_invite_copied">आमंत्रण कोड कॉपी हुआ</string>
+    <string name="msg_no_invite_yet">अभी तक कोई पता नहीं — Tor के शुरू होने का इंतज़ार करें</string>
+    <string name="confirm_rotate_join_code">मौजूदा कोड तुरंत काम करना बंद कर देगा। पुराना QR या लिंक रखने वाला कोई भी व्यक्ति तब तक नहीं जुड़ पाएगा जब तक आप उसे नया कोड न दें। जो डिवाइस पहले से जुड़े हैं, उन पर असर नहीं होगा।</string>
+
+    <string name="lbl_devices">जुड़े हुए डिवाइस</string>
+    <string name="device_row_fmt">%1$s… · %2$s</string>
+    <string name="action_revoke">रद्द करें</string>
+    <string name="dlg_revoke_title">यह डिवाइस रद्द करें?</string>
+    <string name="dlg_revoke_body">यह संदेश रखना या लेना बंद कर देगा, और आप इसे अनब्लॉक न करने तक फिर से नहीं जुड़ सकेगा। इसका मैसेंजर चलता रहेगा — बस वह सीधे पीयर-टू-पीयर डिलीवरी पर लौट जाएगा। रद्द करने से सार्वजनिक जॉइन कोड भी बदल जाता है; नया कोड दूसरों को दें।</string>
+
+    <string name="lbl_stats">गतिविधि</string>
+    <string name="stats_fmt">डिवाइस: %1$d\nसहेजे गए: %2$d · लिए गए: %3$d · दी गई फ़ाइल-हिस्से: %4$d\nडिस्क: %5$s</string>
+
+    <string name="lbl_options">विकल्प</string>
+    <string name="lbl_tor_always">यह सर्वर हमेशा एक onion service चलाता है। कैरियर NAT के पीछे के फ़ोन तक पहुँचने का यही एकमात्र तरीका है — कोई पोर्ट फ़ॉरवर्डिंग, डोमेन या सर्टिफ़िकेट नहीं चाहिए — इसलिए इसे बंद करने का विकल्प नहीं है।</string>
+    <string name="lbl_node">रिले के रूप में भी काम करें</string>
+    <string name="lbl_node_desc">अजनबी उपयोगकर्ताओं को एक-दूसरे से जुड़ने में मदद करता है। यह मेलबॉक्स से स्वतंत्र है: यह लाइव ट्रैफ़िक बिना देखे आगे भेजता है और कुछ भी सहेजता नहीं।</string>
+    <string name="action_battery">बैटरी अनुकूलन से छूट दें</string>
+    <string name="msg_battery_already">पहले से छूट प्राप्त</string>
+    <string name="msg_battery_manual">इस डिवाइस पर उपलब्ध नहीं — सेटिंग्स → बैटरी में हाथ से सेट करें।</string>
+
+    <string name="notif_channel">Typeon सर्वर</string>
+    <string name="notif_starting">शुरू हो रहा है…</string>
+    <string name="notif_running">सर्वर चल रहा है</string>
+
+    <string name="footer_note">मेमोरी कम होने पर Android फिर भी foreground service बंद कर सकता है। यह ऐप चार्जर पर लगे एक अतिरिक्त फ़ोन के लिए है; ऐसे सर्वर के लिए जो कुछ भी न चूके, छोटे VPS पर typeon-server daemon चलाएँ।</string>
+    <string name="lbl_storage">स्टोरेज का स्थान</string>
+    <string name="lbl_storage_desc">अटैचमेंट यहाँ सहेजे जाते हैं। पहचान और Tor की स्थिति हमेशा आंतरिक स्टोरेज में रहती है।</string>
+    <string name="action_choose_storage">स्टोरेज चुनें</string>
+    <string name="dlg_storage_title">सर्वर स्टोरेज बदलें</string>
+    <string name="dlg_storage_moving">डेटा ले जाया जा रहा है…</string>
+    <string name="msg_storage_moved">स्टोरेज बदल दिया गया। सर्वर फिर से शुरू हो रहा है।</string>
+    <string name="msg_storage_failed">स्थान नहीं बदला जा सका: %1$s</string>
+    <string name="msg_storage_same">यह स्थान पहले से इस्तेमाल हो रहा है।</string>
+    <string name="lbl_internal">आंतरिक स्टोरेज</string>
+    <string name="lbl_sdcard">SD कार्ड</string>
+    <string name="lbl_free_suffix">खाली</string>
+    <string name="lbl_external">बाहरी स्टोरेज</string>
+    <string name="action_block">ब्लॉक करें</string>
+    <string name="action_unblock">अनब्लॉक करें</string>
+    <string name="dlg_block_title">यह डिवाइस ब्लॉक करें?</string>
+    <string name="dlg_block_body">ब्लॉक किया गया डिवाइस नए आमंत्रण कोड से भी वापस नहीं आ सकता, और सार्वजनिक जॉइन कोड बदल जाता है। ब्लॉक केवल इस जुड़ाव की कुंजी को रोकता है: कोई ऐप दोबारा इंस्टॉल करे तो उसे नई पहचान मिल जाती है, इसलिए किसी को सचमुच रोकने के लिए जॉइन कोड बदलें और नया कोड न दें। ब्लॉक बाद में हटाया जा सकता है।</string>
+    <string name="err_storage_no_space">गंतव्य पर पर्याप्त खाली जगह नहीं है</string>
+    <string name="err_storage_mkdir">गंतव्य फ़ोल्डर नहीं बनाया जा सका</string>
+    <string name="err_unknown">अज्ञात त्रुटि</string>
+    <string name="err_storage_unavailable">स्टोरेज स्थान उपलब्ध नहीं है</string>
+    <string name="msg_storage_busy">स्टोरेज बदलने का काम पहले से चल रहा है</string>
+    <string name="err_internal">त्रुटि: आंतरिक त्रुटि</string>
+    <string name="err_server_closing">त्रुटि: पिछला सर्वर अभी भी बंद हो रहा है, थोड़ी देर बाद फिर कोशिश करें</string>
+    <string name="err_server_loop_stuck">त्रुटि: सर्वर 20 सेकंड में बंद नहीं हुआ</string>
+    <string name="err_server_not_running">त्रुटि: सर्वर चल नहीं रहा है</string>
+    <string name="err_no_address">त्रुटि: सर्वर का अभी कोई पहुँच योग्य पता नहीं है (Tor शुरू हो रहा होगा)</string>
+    <string name="err_invalid_id">त्रुटि: अमान्य आईडी</string>
+    <string name="err_record_not_found">त्रुटि: रिकॉर्ड नहीं मिला</string>
+    <string name="btn_pin">ऐप PIN</string>
+    <string name="pin_unlock_title">Typeon सर्वर लॉक है</string>
+    <string name="pin_hint">PIN</string>
+    <string name="pin_unlock">अनलॉक करें</string>
+    <string name="pin_exit">बाहर निकलें</string>
+    <string name="pin_wrong">गलत PIN</string>
+    <string name="pin_wait_fmt">बहुत सारी कोशिशें। %1$d सेकंड बाद फिर कोशिश करें</string>
+    <string name="pin_settings_title">ऐप PIN</string>
+    <string name="pin_set_msg">पहले एक PIN सेट करें। यह जॉइन कोड, डिवाइस सूची और सेटिंग्स की रक्षा करता है। ऐप लॉक होने पर भी सर्वर चलता रहता है।</string>
+    <string name="pin_change_msg">मौजूदा PIN और एक नया PIN लिखें।</string>
+    <string name="pin_current_hint">मौजूदा PIN</string>
+    <string name="pin_new_hint">नया PIN</string>
+    <string name="pin_too_short_fmt">PIN में कम से कम %1$d अक्षर होने चाहिए</string>
+    <string name="pin_saved">PIN सहेजा गया</string>
+    <string name="lbl_beta_updates">बीटा अपडेट</string>
+    <string name="lbl_beta_updates_desc">सर्वर रोज़ एक बार GitHub रिलीज़ से, Tor के ज़रिए खुद को अपडेट करता है। चालू होने पर: बीटा रिलीज़ भी इंस्टॉल होंगी।</string>
+    <string name="action_check_updates">अपडेट जाँचें</string>
+    <string name="update_status">इंस्टॉल: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">अभी तक जाँच नहीं हुई</string>
+    <string name="update_state_latest">नवीनतम</string>
+    <string name="update_state_waiting">नई रिलीज़ अभी बन रही है</string>
+    <string name="update_state_downloading">डाउनलोड हो रहा है… %1$s MB</string>
+    <string name="update_state_ready">डाउनलोड हो गया, इंस्टॉल हो रहा है</string>
+    <string name="update_state_error">पिछली जाँच विफल: %1$s</string>
+    <string name="update_ready_title">अपडेट तैयार है</string>
+    <string name="update_ready_text">Typeon सर्वर %1$s इंस्टॉल करने के लिए टैप करें</string>
+</resources>

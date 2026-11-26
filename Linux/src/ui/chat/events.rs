@@ -365,7 +365,7 @@ impl ChatView {
                 }
             }
             bubble.entry.borrow_mut().deleted = true;
-            bubble.text.set_markup("Message deleted");
+            bubble.text.set_markup(&glib::markup_escape_text(t("Message deleted")));
             self.search_lower.borrow_mut().clear();
             bubble.text.add_css_class("dim-label");
             bubble.text.set_visible(true);
@@ -476,8 +476,8 @@ impl ChatView {
                     .collect::<Vec<_>>()
                     .join("\n");
                 let Some(window) = view.app().window() else { return };
-                let dialog = adw::MessageDialog::new(Some(&window), Some("Seen by"), Some(if body.is_empty() { "Nobody yet" } else { body.as_str() }));
-                dialog.add_response("close", "Close");
+                let dialog = adw::MessageDialog::new(Some(&window), Some(t("Seen by")), Some(if body.is_empty() { t("Nobody yet") } else { body.as_str() }));
+                dialog.add_response("close", t("Close"));
                 dialog.set_close_response("close");
                 dialog.present();
             },
@@ -495,8 +495,8 @@ impl ChatView {
             return;
         }
         self.typing_indicator_label.set_label(&match who {
-            Some(name) if !name.is_empty() => format!("{} is typing…", name),
-            _ => "typing…".to_string(),
+            Some(name) if !name.is_empty() => tf!("{} is typing…", name),
+            _ => t("typing…").to_string(),
         });
         self.typing_indicator.set_reveal_child(true);
 

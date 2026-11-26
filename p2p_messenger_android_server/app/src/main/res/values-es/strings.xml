@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Typeon Server</string>
+    <string name="intro">Guarda los mensajes de tus contactos mientras están desconectados y se los entrega cuando vuelven a conectarse. No puede leerlos: llegan ya cifrados de extremo a extremo y sellados por segunda vez.</string>
+
+    <string name="lbl_run_server">Ejecutar el servidor</string>
+    <string name="state_stopped">Detenido</string>
+    <string name="state_running_fmt">En marcha · Tor: %1$s</string>
+    <string name="state_no_address">Aún no hay dirección — Tor se está iniciando (30–60 s la primera vez). Un código de invitación no sirve sin ella.</string>
+
+    <string name="lbl_address">Dirección</string>
+    <string name="lbl_invite">Código de acceso</string>
+    <string name="lbl_invite_desc">Un único código para todos, válido 3 días: escanéalo desde Ajustes → Servidores en un teléfono, o copíalo y pégalo allí. Un número ilimitado de personas puede unirse con el mismo código sin pedirte nada. Pasados 3 días, aquí aparecerá un código nuevo automáticamente. Cámbialo si se filtra; los dispositivos ya registrados seguirán funcionando.</string>
+    <string name="action_new_invite">Cambiar código</string>
+    <string name="action_copy_invite">Copiar código</string>
+    <string name="msg_invite_copied">Código de invitación copiado</string>
+    <string name="msg_no_invite_yet">Aún no hay dirección — espera a que Tor termine de iniciarse</string>
+    <string name="confirm_rotate_join_code">El código actual dejará de funcionar de inmediato. Quien tenga el QR o el enlace antiguos no podrá unirse hasta que le des el nuevo. Los dispositivos ya registrados no se ven afectados.</string>
+
+    <string name="lbl_devices">Dispositivos registrados</string>
+    <string name="device_row_fmt">%1$s… · %2$s</string>
+    <string name="action_revoke">Revocar</string>
+    <string name="dlg_revoke_title">¿Revocar este dispositivo?</string>
+    <string name="dlg_revoke_body">Dejará de poder depositar o recuperar mensajes, y no podrá volver a registrarse hasta que lo desbloquees. Su aplicación de mensajería seguirá funcionando, solo que pasará a entregar los mensajes de persona a persona. Revocar también sustituye el código público de acceso; entrega el nuevo a los demás.</string>
+
+    <string name="lbl_stats">Actividad</string>
+    <string name="stats_fmt">Dispositivos: %1$d\nAlmacenados: %2$d · Recuperados: %3$d · Fragmentos de archivo servidos: %4$d\nDisco: %5$s</string>
+
+    <string name="lbl_options">Opciones</string>
+    <string name="lbl_tor_always">Este servidor siempre aloja un servicio onion. Es la única forma de que un teléfono detrás de NAT de operadora sea accesible: sin redirección de puertos, sin dominio y sin certificado. Por eso no es algo que se pueda desactivar.</string>
+    <string name="lbl_node">Actuar también como relé</string>
+    <string name="lbl_node_desc">Ayuda a que usuarios no relacionados se conecten entre sí. Es independiente del buzón: transporta el tráfico en directo a ciegas y no guarda nada.</string>
+    <string name="action_battery">Excluir de la optimización de batería</string>
+    <string name="msg_battery_already">Ya está excluido</string>
+    <string name="msg_battery_manual">No disponible en este dispositivo — configúralo manualmente en Ajustes → Batería.</string>
+
+    <string name="notif_channel">Typeon Server</string>
+    <string name="notif_starting">Iniciando…</string>
+    <string name="notif_running">Servidor en marcha</string>
+
+    <string name="footer_note">Android puede seguir matando un servicio en primer plano bajo presión de memoria. Esta app está pensada para un teléfono de repuesto que se deja enchufado; para un servidor que nunca deba perder nada, ejecuta el daemon typeon-server en un VPS pequeño.</string>
+    <string name="lbl_storage">Ubicación del almacenamiento</string>
+    <string name="lbl_storage_desc">Los adjuntos se guardan aquí. La identidad y el estado de Tor siempre permanecen en el almacenamiento interno.</string>
+    <string name="action_choose_storage">Elegir almacenamiento</string>
+    <string name="dlg_storage_title">Mover el almacenamiento del servidor</string>
+    <string name="dlg_storage_moving">Moviendo datos…</string>
+    <string name="msg_storage_moved">Almacenamiento movido. Reiniciando el servidor.</string>
+    <string name="msg_storage_failed">No se pudo mover: %1$s</string>
+    <string name="msg_storage_same">Ya se usa esta ubicación.</string>
+    <string name="lbl_internal">Almacenamiento interno</string>
+    <string name="lbl_sdcard">Tarjeta SD</string>
+    <string name="lbl_free_suffix">libres</string>
+    <string name="lbl_external">Almacenamiento externo</string>
+    <string name="action_block">Bloquear</string>
+    <string name="action_unblock">Desbloquear</string>
+    <string name="dlg_block_title">¿Bloquear este dispositivo?</string>
+    <string name="dlg_block_body">Un dispositivo bloqueado no puede volver ni siquiera con un código de invitación nuevo, y el código público de acceso se sustituye. El bloqueo solo detiene esta clave de registro: quien reinstale la app obtiene una identidad nueva, así que para vetar de verdad a alguien, cambia el código de acceso y no entregues el nuevo. Puedes deshacer el bloqueo más adelante.</string>
+    <string name="err_storage_no_space">No hay suficiente espacio libre en el destino</string>
+    <string name="err_storage_mkdir">No se pudo crear la carpeta de destino</string>
+    <string name="err_unknown">Error desconocido</string>
+    <string name="err_storage_unavailable">La ubicación de almacenamiento no está disponible</string>
+    <string name="msg_storage_busy">Ya hay un traslado de almacenamiento en curso</string>
+    <string name="err_internal">Error: error interno</string>
+    <string name="err_server_closing">Error: el servidor anterior aún se está cerrando, inténtalo de nuevo en unos instantes</string>
+    <string name="err_server_loop_stuck">Error: el servidor no se detuvo en 20 segundos</string>
+    <string name="err_server_not_running">Error: el servidor no está en marcha</string>
+    <string name="err_no_address">Error: el servidor aún no tiene una dirección accesible (Tor puede estar iniciándose)</string>
+    <string name="err_invalid_id">Error: identificador no válido</string>
+    <string name="err_record_not_found">Error: registro no encontrado</string>
+    <string name="btn_pin">PIN de la app</string>
+    <string name="pin_unlock_title">Typeon Server está bloqueado</string>
+    <string name="pin_hint">PIN</string>
+    <string name="pin_unlock">Desbloquear</string>
+    <string name="pin_exit">Salir</string>
+    <string name="pin_wrong">PIN incorrecto</string>
+    <string name="pin_wait_fmt">Demasiados intentos. Inténtalo de nuevo en %1$d s</string>
+    <string name="pin_settings_title">PIN de la app</string>
+    <string name="pin_set_msg">Primero define un PIN. Protege el código de acceso, la lista de dispositivos y los ajustes. El servidor sigue funcionando mientras la app está bloqueada.</string>
+    <string name="pin_change_msg">Introduce el PIN actual y uno nuevo.</string>
+    <string name="pin_current_hint">PIN actual</string>
+    <string name="pin_new_hint">PIN nuevo</string>
+    <string name="pin_too_short_fmt">El PIN necesita al menos %1$d caracteres</string>
+    <string name="pin_saved">PIN guardado</string>
+    <string name="lbl_beta_updates">Actualizaciones beta</string>
+    <string name="lbl_beta_updates_desc">El servidor se actualiza solo una vez al día desde las versiones de GitHub, a través de Tor. Activado: instala también las versiones beta.</string>
+    <string name="action_check_updates">Buscar actualizaciones</string>
+    <string name="update_status">Instalada: %1$s · GitHub: %2$s\n%3$s</string>
+    <string name="update_state_none">Aún no se ha comprobado</string>
+    <string name="update_state_latest">Actualizado</string>
+    <string name="update_state_waiting">La nueva versión aún se está compilando</string>
+    <string name="update_state_downloading">Descargando… %1$s MB</string>
+    <string name="update_state_ready">Descargada, instalando</string>
+    <string name="update_state_error">La última comprobación falló: %1$s</string>
+    <string name="update_ready_title">Actualización lista</string>
+    <string name="update_ready_text">Toca para instalar Typeon Server %1$s</string>
+</resources>

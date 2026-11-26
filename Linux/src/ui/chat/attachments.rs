@@ -270,7 +270,7 @@ impl ChatView {
             move || core::attachment_plaintext_path(&file_id),
             move |result| match result {
                 Ok(path) => crate::ui::media::open(&app, &path, &mime, &name),
-                Err(error) => app.toast(&format!("Could not open the file: {}", error)),
+                Err(error) => app.toast(&tf!("Could not open the file: {}", error)),
             },
         );
     }
@@ -299,7 +299,7 @@ impl ChatView {
                     }
                     *state.status.borrow_mut() = "downloading".to_string();
                     if let Some(status) = &state.status_label {
-                        status.set_label("Downloading…");
+                        status.set_label(t("Downloading…"));
                     }
                     if let Some(progress) = &state.progress {
                         progress.set_visible(true);
@@ -310,7 +310,7 @@ impl ChatView {
                 // reflect that immediately or the row spins forever.
                 Err(error) => {
                     state.download_started_at.set(0);
-                    view.app().toast(&format!("Download failed: {}", error));
+                    view.app().toast(&tf!("Download failed: {}", error));
                 }
             },
         );
@@ -340,7 +340,7 @@ impl ChatView {
             move || core::attachment_plaintext_path(&file_id),
             move |result| match result {
                 Ok(path) => view.start_voice_playback(&state, &path),
-                Err(error) => view.app().toast(&format!("Could not play the voice message: {}", error)),
+                Err(error) => view.app().toast(&tf!("Could not play the voice message: {}", error)),
             },
         );
     }
@@ -376,7 +376,7 @@ impl ChatView {
     pub(super) fn start_voice_playback(self: &Rc<Self>, state: &Rc<AttachmentState>, path: &str) {
         let Some(voice) = &state.voice else { return };
         if !crate::ui::media::playable_media(path) {
-            self.app().toast("This voice message is not a playable audio file");
+            self.app().toast(t("This voice message is not a playable audio file"));
             return;
         }
         let media = gtk::MediaFile::for_filename(path);
@@ -411,7 +411,7 @@ impl ChatView {
             let app = self.app().clone();
             media.connect_error_notify(move |media| {
                 if media.error().is_some() {
-                    app.toast("Could not play the voice message.");
+                    app.toast(t("Could not play the voice message."));
                 }
             });
         }
@@ -451,7 +451,7 @@ impl ChatView {
             }
         }
         if let Some(status) = &state.status_label {
-            status.set_label(&format!(
+            status.set_label(&tf!(
                 "{} of {}",
                 util::human_size(done),
                 util::human_size(total)
@@ -507,9 +507,9 @@ impl ChatView {
         }
         if let Some(status) = &state.status_label {
             status.set_label(&match (new_status, detail) {
-                ("complete", _) => "Downloaded".to_string(),
-                ("failed", Some(reason)) => format!("Failed: {}", reason),
-                ("failed", None) => "Failed".to_string(),
+                ("complete", _) => t("Downloaded").to_string(),
+                ("failed", Some(reason)) => tf!("Failed: {}", reason),
+                ("failed", None) => t("Failed").to_string(),
                 (other, _) => other.to_string(),
             });
         }
@@ -535,16 +535,22 @@ pub(super) fn attachments_overview(view: &Rc<ChatView>) {
         },
         move |attachments| {
             let group = adw::PreferencesGroup::builder()
-                .title("Files in this conversation")
+                .title(t("Files in this conversation"))
                 .build();
             if attachments.is_empty() {
-                group.add(&adw::ActionRow::builder().title("Nothing shared yet").build());
+                group.add(&adw::ActionRow::builder().title(t("Nothing shared yet")).build());
             }
             for attachment in attachments {
                 let subtitle = format!(
                     "{} · {} · {}",
                     util::human_size(attachment.total_size),
-                    attachment.status,
+                    match attachment.status.as_str() {
+                        "offered" => t("offered"),
+                        "downloading" => t("downloading"),
+                        "complete" => t("complete"),
+                        "failed" => t("failed"),
+                        other => other,
+                    },
                     util::format_list_time(attachment.created_at)
                 );
                 group.add(
@@ -564,7 +570,7 @@ pub(super) fn attachments_overview(view: &Rc<ChatView>) {
             adw::Window::builder()
                 .modal(true)
                 .transient_for(&window)
-                .title("Attachments")
+                .title(t("Attachments"))
                 .default_width(480)
                 .default_height(480)
                 .content(&toolbar)
@@ -577,13 +583,13 @@ pub(super) fn attachments_overview(view: &Rc<ChatView>) {
 pub(super) fn attachment_status_text(attachment: &Attachment) -> String {
     match attachment.status.as_str() {
         "offered" => util::human_size(attachment.total_size),
-        "downloading" => format!(
+        "downloading" => tf!(
             "{} of {}",
             util::human_size(attachment.bytes_done),
             util::human_size(attachment.total_size)
         ),
-        "complete" => format!("{} · downloaded", util::human_size(attachment.total_size)),
-        "failed" => "Failed".to_string(),
+        "complete" => tf!("{} · downloaded", util::human_size(attachment.total_size)),
+        "failed" => t("Failed").to_string(),
         other => other.to_string(),
     }
 }
@@ -593,10 +599,10 @@ pub(super) fn attachment_status_text(attachment: &Attachment) -> String {
 /// from there (see `Attachment.bytes_done`), so the button says so.
 pub(super) fn action_label(status: &str, bytes_done: u64) -> String {
     match status {
-        "complete" => "Open".to_string(),
-        "failed" if bytes_done > 0 => "Resume".to_string(),
-        "failed" => "Retry".to_string(),
-        _ => "Download".to_string(),
+        "complete" => t("Open").to_string(),
+        "failed" if bytes_done > 0 => t("Resume").to_string(),
+        "failed" => t("Retry").to_string(),
+        _ => t("Download").to_string(),
     }
 }
 
@@ -626,8 +632,8 @@ pub(super) fn render_voice_state(state: &AttachmentState) {
         });
         voice.play_button.set_icon_name("media-playback-start-symbolic");
         voice.duration_label.set_label(&match status.as_str() {
-            "failed" => "Failed".to_string(),
-            "downloading" => "Downloading…".to_string(),
+            "failed" => t("Failed").to_string(),
+            "downloading" => t("Downloading…").to_string(),
             _ => {
                 let ms = voice.duration_ms.get();
                 if ms > 0 {

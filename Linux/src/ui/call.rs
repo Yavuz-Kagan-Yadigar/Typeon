@@ -13,6 +13,7 @@ use gtk::{gdk, gio, glib};
 use crate::app::{App, Event};
 use crate::call_media::{CallMedia, Frame};
 use crate::core::{self, CallState};
+use crate::i18n::t;
 use crate::ui::window::Conversation;
 
 thread_local! {
@@ -69,12 +70,12 @@ struct CallUi {
 /// From a chat header: ring the peer or every member of the group.
 pub fn place(app: &Rc<App>, conversation: &Conversation, video: bool) {
     if CURRENT.with(|c| c.borrow().is_some()) {
-        app.toast("A call is already in progress");
+        app.toast(t("A call is already in progress"));
         return;
     }
     let ui = CallUi::open(app, video);
     ui.starting.set(true);
-    ui.status.set_text("Calling…");
+    ui.status.set_text(t("Calling…"));
     ui.title.set_text(&conversation.title());
     let target = conversation.clone();
     let weak = Rc::downgrade(&ui);
@@ -84,7 +85,7 @@ pub fn place(app: &Rc<App>, conversation: &Conversation, video: bool) {
             Conversation::Group { group_id, .. } => core::start_group_call(&group_id, video),
         })
         .await
-        .unwrap_or_else(|_| Err("call failed".into()));
+        .unwrap_or_else(|_| Err(t("call failed").into()));
         // Hung up while the call was being created: the hang-up's `end_call`
         // may have run first and ended nothing, so end what was just made.
         let Some(ui) = weak.upgrade().filter(|ui| !ui.closing.get()) else {
@@ -125,15 +126,15 @@ pub fn on_event(app: &Rc<App>, event: &Event) {
     ui.state.replace("incoming".into());
     ui.seen.set(true);
     let name = event.string("name");
-    ui.title.set_text(if app.locked.get() { "Typeon is locked" } else { name.as_str() });
-    ui.status.set_text(if video { "Incoming video call" } else { "Incoming voice call" });
+    ui.title.set_text(if app.locked.get() { t("Typeon is locked") } else { name.as_str() });
+    ui.status.set_text(if video { t("Incoming video call") } else { t("Incoming voice call") });
     // Same setting as message notifications: no caller name on a lock screen.
     let hide = app.prefs.borrow().hide_notification_content || app.locked.get();
     crate::app::post_notification(
         &app.application,
         "call",
         if hide { "Typeon" } else { name.as_str() },
-        if video { "Incoming video call" } else { "Incoming voice call" },
+        if video { t("Incoming video call") } else { t("Incoming voice call") },
         gio::NotificationPriority::Urgent,
     );
 }
@@ -142,7 +143,7 @@ impl CallUi {
     fn open(app: &Rc<App>, video: bool) -> Rc<Self> {
         install_css();
         let window = adw::Window::builder()
-            .title("Call")
+            .title(t("Call"))
             .default_width(760)
             .default_height(560)
             .build();
@@ -188,16 +189,16 @@ impl CallUi {
         stage.set_margin_end(12);
         stage.set_margin_top(12);
 
-        let mute = gtk::ToggleButton::builder().icon_name("microphone-sensitivity-high-symbolic").tooltip_text("Mute").build();
-        let speaker = gtk::ToggleButton::builder().icon_name("audio-volume-high-symbolic").tooltip_text("Mute speaker").build();
+        let mute = gtk::ToggleButton::builder().icon_name("microphone-sensitivity-high-symbolic").tooltip_text(t("Mute")).build();
+        let speaker = gtk::ToggleButton::builder().icon_name("audio-volume-high-symbolic").tooltip_text(t("Mute speaker")).build();
         let audio = gtk::Box::new(gtk::Orientation::Horizontal, 18);
         audio.set_visible(false);
         audio.append(&device_pill(&mute, true));
         audio.append(&device_pill(&speaker, false));
-        let camera = gtk::ToggleButton::builder().icon_name("camera-video-symbolic").tooltip_text("Camera").active(true).visible(false).build();
-        let accept = gtk::Button::builder().icon_name("call-start-symbolic").tooltip_text("Answer").visible(false).build();
+        let camera = gtk::ToggleButton::builder().icon_name("camera-video-symbolic").tooltip_text(t("Camera")).active(true).visible(false).build();
+        let accept = gtk::Button::builder().icon_name("call-start-symbolic").tooltip_text(t("Answer")).visible(false).build();
         accept.add_css_class("call-accept");
-        let hangup = gtk::Button::builder().icon_name("call-stop-symbolic").tooltip_text("Hang up").build();
+        let hangup = gtk::Button::builder().icon_name("call-stop-symbolic").tooltip_text(t("Hang up")).build();
         hangup.add_css_class("call-hangup");
         for b in [camera.upcast_ref::<gtk::Widget>(), accept.upcast_ref(), hangup.upcast_ref()] {
             b.add_css_class("circular");
@@ -365,14 +366,14 @@ impl CallUi {
         // passphrase first (declining does not).
         let locked = self.app.locked.get();
         if locked {
-            self.title.set_text("Typeon is locked");
+            self.title.set_text(t("Typeon is locked"));
         } else if !s.name.is_empty() {
             self.title.set_text(&s.name);
         }
         match new {
-            "outgoing" => self.status.set_text("Calling…"),
+            "outgoing" => self.status.set_text(t("Calling…")),
             "incoming" => {
-                self.status.set_text(if self.video.get() { "Incoming video call" } else { "Incoming voice call" });
+                self.status.set_text(if self.video.get() { t("Incoming video call") } else { t("Incoming voice call") });
                 // No ringtone file in the runtime: the display bell, every 2 s.
                 let n = self.ring_beeps.get() + 1;
                 self.ring_beeps.set(n);
@@ -383,9 +384,9 @@ impl CallUi {
             "active" => {
                 let secs = s.now.saturating_sub(s.connected_at) / 1000;
                 let path = match &s.media {
-                    Some(m) if m.direct_links > 0 && m.via_direct > 0 => "peer-to-peer",
-                    Some(m) if m.relay_links > 0 => "via server",
-                    _ => "connecting",
+                    Some(m) if m.direct_links > 0 && m.via_direct > 0 => t("peer-to-peer"),
+                    Some(m) if m.relay_links > 0 => t("via server"),
+                    _ => t("connecting"),
                 };
                 self.status.set_text(&format!("{:02}:{:02} · {}", secs / 60, secs % 60, path));
                 self.sync_tiles(s);
@@ -395,10 +396,10 @@ impl CallUi {
         let incoming = new == "incoming";
         let active = new == "active";
         if incoming && locked {
-            self.status.set_text("Incoming call · unlock Typeon to answer");
+            self.status.set_text(t("Incoming call · unlock Typeon to answer"));
         }
         self.accept.set_visible(incoming && !locked);
-        self.hangup.set_tooltip_text(Some(if incoming { "Decline" } else { "Hang up" }));
+        self.hangup.set_tooltip_text(Some(if incoming { t("Decline") } else { t("Hang up") }));
         self.audio.set_visible(active);
         self.camera.set_visible(active && self.video.get());
     }
@@ -416,11 +417,11 @@ impl CallUi {
                     return; // our own call not created yet
                 }
                 self.status.set_text(match s.reason.as_str() {
-                    "rejected" => "Declined",
-                    "busy" => "Busy",
-                    "no_answer" => "No answer",
-                    "missed" => "Missed call",
-                    _ => "Call ended",
+                    "rejected" => t("Declined"),
+                    "busy" => t("Busy"),
+                    "no_answer" => t("No answer"),
+                    "missed" => t("Missed call"),
+                    _ => t("Call ended"),
                 });
                 self.accept.set_visible(false);
                 let weak = Rc::downgrade(self);
@@ -448,7 +449,7 @@ impl CallUi {
                 *self.media.borrow_mut() = Some(media);
             }
             Err(e) => {
-                self.app.toast(&format!("Audio/video unavailable: {e}"));
+                self.app.toast(&tf!("Audio/video unavailable: {}", e));
                 return;
             }
         }
@@ -621,9 +622,9 @@ fn new_tile(video: bool) -> Tile {
 /// the pick goes to the `call.mic` / `call.speaker` action.
 fn device_pill(toggle: &gtk::ToggleButton, input: bool) -> gtk::Box {
     let action = if input { "call.mic" } else { "call.speaker" };
-    let name = gtk::Label::builder().label("System default").xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(16).build();
+    let name = gtk::Label::builder().label(t("System default")).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(16).build();
     name.add_css_class("heading");
-    let status = gtk::Label::builder().label(if input { "On" } else { "Sound on" }).xalign(0.0).build();
+    let status = gtk::Label::builder().label(if input { t("On") } else { t("Sound on") }).xalign(0.0).build();
     status.add_css_class("caption");
     status.add_css_class("dim-label");
     let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -632,7 +633,7 @@ fn device_pill(toggle: &gtk::ToggleButton, input: bool) -> gtk::Box {
     text.append(&status);
     let surface = gtk::MenuButton::builder()
         .child(&text)
-        .tooltip_text(if input { "Microphone" } else { "Speaker" })
+        .tooltip_text(if input { t("Microphone") } else { t("Speaker") })
         .direction(gtk::ArrowType::Up)
         .always_show_arrow(false)
         .hexpand(true)
@@ -646,7 +647,7 @@ fn device_pill(toggle: &gtk::ToggleButton, input: bool) -> gtk::Box {
         move || {
             let label = match crate::call_media::chosen_device(input) {
                 Some(id) => known.borrow().iter().find(|(i, _)| *i == id).map(|(_, l)| l.clone()).unwrap_or(id),
-                None => "System default".to_string(),
+                None => t("System default").to_string(),
             };
             name.set_label(&label);
         }
@@ -659,7 +660,7 @@ fn device_pill(toggle: &gtk::ToggleButton, input: bool) -> gtk::Box {
                 menu.remove_all();
                 *known.borrow_mut() = crate::call_media::audio_devices(input);
                 show_name();
-                for (id, label) in std::iter::once((String::new(), "System default".to_string())).chain(known.borrow().iter().cloned()) {
+                for (id, label) in std::iter::once((String::new(), t("System default").to_string())).chain(known.borrow().iter().cloned()) {
                     let item = gio::MenuItem::new(Some(&label), None);
                     item.set_action_and_target_value(Some(action), Some(&id.to_variant()));
                     menu.append_item(&item);
@@ -670,10 +671,10 @@ fn device_pill(toggle: &gtk::ToggleButton, input: bool) -> gtk::Box {
     }
     toggle.connect_toggled(move |b| {
         status.set_label(match (input, b.is_active()) {
-            (true, false) => "On",
-            (true, true) => "Muted",
-            (false, false) => "Sound on",
-            (false, true) => "Sound off",
+            (true, false) => t("On"),
+            (true, true) => t("Muted"),
+            (false, false) => t("Sound on"),
+            (false, true) => t("Sound off"),
         });
     });
     toggle.add_css_class("circular");

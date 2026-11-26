@@ -19,7 +19,7 @@ impl ChatView {
             let anchor = anchor.clone();
             actions.push((
                 "face-smile-symbolic",
-                "React".to_string(),
+                t("React").to_string(),
                 false,
                 Box::new(move || view.pick_reaction(&anchor, &entry)),
             ));
@@ -30,7 +30,7 @@ impl ChatView {
             let entry = entry.clone();
             actions.push((
                 "view-list-symbolic",
-                "Reactions".to_string(),
+                t("Reactions").to_string(),
                 false,
                 Box::new(move || view.show_reactions(&entry)),
             ));
@@ -42,7 +42,7 @@ impl ChatView {
             let (file_id, name) = (attachment.file_id.clone(), attachment.file_name.clone());
             actions.push((
                 "document-save-symbolic",
-                "Save as JPEG XL".to_string(),
+                t("Save as JPEG XL").to_string(),
                 false,
                 Box::new(move || {
                     let (view, file_id, name) = (view.clone(), file_id.clone(), name.clone());
@@ -50,7 +50,7 @@ impl ChatView {
                         move || core::attachment_original_path(&file_id),
                         move |result| match result {
                             Ok(path) => crate::ui::media::save_copy(view.app(), &path, &name),
-                            Err(error) => view.app().toast(&format!("Could not save: {}", error)),
+                            Err(error) => view.app().toast(&tf!("Could not save: {}", error)),
                         },
                     );
                 }),
@@ -63,7 +63,7 @@ impl ChatView {
             let entry = entry.clone();
             actions.push((
                 "mail-forward-symbolic",
-                "Forward".to_string(),
+                t("Forward").to_string(),
                 false,
                 Box::new(move || view.forward(&entry)),
             ));
@@ -77,7 +77,7 @@ impl ChatView {
             let id = entry.id.clone();
             actions.push((
                 "view-refresh-symbolic",
-                "Send again".to_string(),
+                t("Send again").to_string(),
                 false,
                 Box::new(move || {
                     let Conversation::Group { group_id, .. } = &view.conversation else { return };
@@ -87,8 +87,8 @@ impl ChatView {
                         move || core::retry_group_message_copies(&gid, &lid),
                         move |result| match result {
                             1 => view.apply_status(&done_id, "sent"),
-                            0 => view.app().toast("Nothing to send again"),
-                            _ => view.app().toast("Could not send it again"),
+                            0 => view.app().toast(t("Nothing to send again")),
+                            _ => view.app().toast(t("Could not send it again")),
                         },
                     );
                 }),
@@ -101,7 +101,7 @@ impl ChatView {
                 let entry = entry.clone();
                 actions.push((
                     "mail-reply-sender-symbolic",
-                    "Reply".to_string(),
+                    t("Reply").to_string(),
                     false,
                     Box::new(move || view.start_reply(&entry)),
                 ));
@@ -111,7 +111,7 @@ impl ChatView {
                 let anchor = anchor.clone();
                 actions.push((
                     "edit-copy-symbolic",
-                    "Copy".to_string(),
+                    t("Copy").to_string(),
                     false,
                     Box::new(move || anchor.clipboard().set_text(&text)),
                 ));
@@ -123,15 +123,15 @@ impl ChatView {
             let file_id = attachment.file_id.clone();
             actions.push((
                 "list-add-symbolic",
-                "Add to my stickers".to_string(),
+                t("Add to my stickers").to_string(),
                 false,
                 Box::new(move || {
                     let (view, file_id) = (view.clone(), file_id.clone());
                     app::run_in_background(
                         move || core::save_received_sticker(&file_id),
                         move |result| match result {
-                            Ok(_) => view.app().toast("Added to your stickers"),
-                            Err(error) => view.app().toast(&format!("Could not add the sticker: {}", error)),
+                            Ok(_) => view.app().toast(t("Added to your stickers")),
+                            Err(error) => view.app().toast(&tf!("Could not add the sticker: {}", error)),
                         },
                     );
                 }),
@@ -146,7 +146,7 @@ impl ChatView {
                 let entry = entry.clone();
                 actions.push((
                     "document-edit-symbolic",
-                    "Edit".to_string(),
+                    t("Edit").to_string(),
                     false,
                     Box::new(move || view.edit_message(&entry)),
                 ));
@@ -157,7 +157,7 @@ impl ChatView {
                 let entry = entry.clone();
                 actions.push((
                     "edit-delete-symbolic",
-                    "Delete".to_string(),
+                    t("Delete").to_string(),
                     true,
                     Box::new(move || view.delete_message(&entry)),
                 ));
@@ -195,7 +195,7 @@ impl ChatView {
         if let Some(bar) = self.composer.parent().and_then(|scroller| scroller.parent()) {
             bar.set_sensitive(false);
         }
-        self.subtitle.set_label("Deleted their account · messages can't be sent");
+        self.subtitle.set_label(t("Deleted their account · messages can't be sent"));
     }
 
     /// Sends a copy of `entry` (text, or the file with its caption) to a chat
@@ -231,9 +231,9 @@ impl ChatView {
             .min_content_height(320)
             .child(&list)
             .build();
-        let dialog = adw::MessageDialog::new(Some(&window), Some("Forward to…"), None);
+        let dialog = adw::MessageDialog::new(Some(&window), Some(t("Forward to…")), None);
         dialog.set_extra_child(Some(&scroller));
-        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("cancel", t("Cancel"));
         dialog.set_close_response("cancel");
 
         let (app, entry, dialog_ref, view) = (self.app().clone(), entry.clone(), dialog.clone(), self.clone());
@@ -274,14 +274,14 @@ impl ChatView {
                 },
                 move |result| match result {
                     Ok(()) => {
-                        app.toast("Forwarded");
+                        app.toast(t("Forwarded"));
                         // No core event for a local send: show it in the open chat and the list.
                         if target_key == view.conversation.key() {
                             view.reload();
                         }
                         view.main.refresh_chats();
                     }
-                    Err(error) => app.toast(&format!("Could not forward: {}", error)),
+                    Err(error) => app.toast(&tf!("Could not forward: {}", error)),
                 },
             );
         });
@@ -297,10 +297,10 @@ impl ChatView {
             .text(&entry.text)
             .activates_default(true)
             .build();
-        let dialog = adw::MessageDialog::new(Some(&window), Some("Edit message"), None);
+        let dialog = adw::MessageDialog::new(Some(&window), Some(t("Edit message")), None);
         dialog.set_extra_child(Some(&crate::ui::widgets::dialog_field(&field)));
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("save", "Save");
+        dialog.add_response("cancel", t("Cancel"));
+        dialog.add_response("save", t("Save"));
         dialog.set_default_response(Some("save"));
         dialog.set_close_response("cancel");
         dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
@@ -328,7 +328,7 @@ impl ChatView {
                 },
                 move |outcome| match outcome {
                     Ok(()) => view.apply_edit(&done_id, &new_text),
-                    Err(error) => view.app().toast(&format!("Edit failed: {}", error)),
+                    Err(error) => view.app().toast(&tf!("Edit failed: {}", error)),
                 },
             );
         });
@@ -340,9 +340,9 @@ impl ChatView {
         let entry = entry.clone();
         dialogs::confirm(
             self.app(),
-            "Delete this message?",
-            "It is removed for everyone in this conversation.",
-            "Delete",
+            t("Delete this message?"),
+            t("It is removed for everyone in this conversation."),
+            t("Delete"),
             true,
             move || {
                 let (direct, target) = match &view.conversation {
@@ -361,7 +361,7 @@ impl ChatView {
                     },
                     move |outcome| match outcome {
                         Ok(()) => view.apply_delete(&done_id),
-                        Err(error) => view.app().toast(&format!("Delete failed: {}", error)),
+                        Err(error) => view.app().toast(&tf!("Delete failed: {}", error)),
                     },
                 );
             },
@@ -383,7 +383,7 @@ impl ChatView {
     /// reply back after a failed send.
     pub(super) fn set_reply(&self, id: String, preview: String, sender: Option<String>) {
         self.reply_label
-            .set_label(&format!("Replying to: {}", util::preview_text(&preview, 80)));
+            .set_label(&tf!("Replying to: {}", util::preview_text(&preview, 80)));
         self.reply_bar.set_reveal_child(true);
         self.reply_island.add_css_class("active");
         *self.reply_to.borrow_mut() = Some((id, preview, sender));

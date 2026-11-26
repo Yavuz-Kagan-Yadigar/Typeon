@@ -50,7 +50,7 @@ impl ChatView {
             let more = gtk::Button::from_icon_name("list-add-symbolic");
             more.add_css_class("flat");
             more.set_valign(gtk::Align::Center);
-            more.set_tooltip_text(Some("More emojis"));
+            more.set_tooltip_text(Some(t("More emojis")));
             {
                 let (view, popover, anchor, entry) = (view.clone(), popover.clone(), anchor.clone(), entry.clone());
                 more.connect_clicked(move |_| {
@@ -83,7 +83,7 @@ impl ChatView {
             },
             move |result| match result {
                 Ok(summary) => view.apply_reactions(&id, &summary),
-                Err(error) => view.app().toast(&format!("Reaction failed: {}", error)),
+                Err(error) => view.app().toast(&tf!("Reaction failed: {}", error)),
             },
         );
     }
@@ -103,17 +103,17 @@ impl ChatView {
         let body = rows
             .iter()
             .map(|r| {
-                let who = if r.is_me { "You".to_string() } else { self.app().identity_name(&r.identity_id) };
+                let who = if r.is_me { t("You").to_string() } else { self.app().identity_name(&r.identity_id) };
                 let who = if who.is_empty() { r.identity_id.chars().take(8).collect() } else { who };
                 format!("{}  {}", r.emoji, who)
             })
             .collect::<Vec<_>>()
             .join("\n");
         let Some(window) = self.app().window() else { return };
-        let dialog = adw::MessageDialog::new(Some(&window), Some("Reactions"), Some(if body.is_empty() { "No reactions" } else { body.as_str() }));
-        dialog.add_response("close", "Close");
+        let dialog = adw::MessageDialog::new(Some(&window), Some(t("Reactions")), Some(if body.is_empty() { t("No reactions") } else { body.as_str() }));
+        dialog.add_response("close", t("Close"));
         if rows.iter().any(|r| r.is_me) {
-            dialog.add_response("remove", "Remove my reaction");
+            dialog.add_response("remove", t("Remove my reaction"));
             dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         }
         dialog.set_close_response("close");

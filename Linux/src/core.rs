@@ -851,7 +851,7 @@ pub fn list_sticker_folders() -> Vec<StickerFolder> {
 
 /// Returns the new folder's id.
 pub fn create_sticker_folder(name: &str) -> Result<i64, String> {
-    parse(api::create_sticker_folder(name))?.parse().map_err(|e| format!("bad folder id: {e}"))
+    parse(api::create_sticker_folder(name))?.parse().map_err(|e| tf!("bad folder id: {}", e))
 }
 
 pub fn rename_sticker_folder(id: i64, name: &str) -> Result<(), String> {
@@ -956,7 +956,7 @@ pub fn restore_server_history() -> Result<u32, String> {
     }
     out.strip_prefix("OK:")
         .and_then(|n| n.trim().parse().ok())
-        .ok_or_else(|| format!("unexpected reply: {out}"))
+        .ok_or_else(|| tf!("unexpected reply: {}", out))
 }
 
 /// The archive root key the core currently holds, if any.
