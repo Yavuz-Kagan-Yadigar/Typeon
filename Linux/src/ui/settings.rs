@@ -634,7 +634,12 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
     error.add_css_class("error");
     let save = gtk::Button::builder().label("Save bridges").halign(gtk::Align::End).build();
     save.add_css_class("suggested-action");
-    let hint = gtk::Label::builder().label("Paste obfs4 bridge lines, one per line.").xalign(0.0).build();
+    let hint = gtk::Label::builder()
+        .label("Get your own bridges at <a href=\"https://bridges.torproject.org/options\">bridges.torproject.org</a> and paste them below, one per line. Left empty, Tor's built-in public bridges are used.")
+        .use_markup(true)
+        .wrap(true)
+        .xalign(0.0)
+        .build();
     hint.add_css_class("dim-label");
     let editor = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).build();
     editor.append(&hint);
@@ -686,7 +691,8 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
     }
     save.connect_clicked(move |_| {
         let lines = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_string();
-        match core::validate_bridge_lines(&lines) {
+        // Empty: Tor's built-in obfs4 bridges (core `OBFS4_BUILTIN_BRIDGES`).
+        match if lines.is_empty() { Ok(()) } else { core::validate_bridge_lines(&lines) } {
             Ok(()) => {
                 error.set_visible(false);
                 store("obfs4", Some(lines));

@@ -447,7 +447,7 @@ fn client_config(state_dir: &str, cache_dir: &str, hop: Hop) -> Result<arti_clie
         // bridge open (it fetches each one's descriptor over it), so guard netparams cannot limit it. The watcher moves
         // to the next line when one does not get ready. obfs4 channels are plain TCP: all lines at once.
         let lines: Vec<&String> = match hop {
-            Hop::Bridge(i) if pt.protocol == "snowflake" => vec![&pt.lines[i % pt.lines.len()]],
+            Hop::Bridge(i) if pt.one_at_a_time => vec![&pt.lines[i % pt.lines.len()]],
             _ => pt.lines.iter().collect(),
         };
         for line in lines {
@@ -478,6 +478,14 @@ pub const SNOWFLAKE_BRIDGES: &[&str] = &[
     "snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn",
 ];
 
+/// Tor's built-in obfs4 bridges (same moat `builtin` list, duplicates removed), used when the user pastes no
+/// lines of their own. Public on purpose: Tor hands these to everyone. Re-check on each release.
+pub const OBFS4_BUILTIN_BRIDGES: &[&str] = &[
+    "obfs4 51.222.13.177:80 5EDAC3B810E12B01F6FD8050D2FD3E277B289A08 cert=2uplIpLQ0q9+0qMFrK5pkaYRDOe460LL9WHBvatgkuRr/SL31wBOEupaMMJ6koRE6Ld0ew iat-mode=0",
+    "obfs4 37.218.245.14:38224 D9A82D2F9C2F65A18407B1D2B764F130847F8B5D cert=bjRaMrr1BRiAW8IE9U5z27fQaYgOhX1UCmOpg2pFpoMvo6ZgQMzLsaTzzQNTlm7hNcb+Sg iat-mode=0",
+    "obfs4 146.57.248.225:22 10A6CD36A537FCE513A322361547444B393989F0 cert=K1gDtDAIcUfeLqbstggjIw2rtgIKqdIhUlHp82XRqNSq/mtAjp1BIC9vHKJ2FAEpGssTPw iat-mode=0",
+];
+
 /// PT binary names. lyrebird implements both obfs4 and snowflake (the tor-expert-bundle ships no separate
 /// snowflake-client; its `transports.json` maps snowflake -> lyrebird). Android: in `nativeLibraryDir`
 /// (the only exec-allowed app path since API 29).
@@ -493,6 +501,9 @@ struct PtSetup {
     protocol: &'static str,
     binary: std::path::PathBuf,
     lines: Vec<String>,
+    /// One line at a time (`Hop::Bridge(i)`): Snowflake (a session per bridge is costly) and the built-in obfs4
+    /// list (shared by every user, so one bridge each spreads the load). The user's own obfs4 lines go all at once.
+    one_at_a_time: bool,
 }
 static PT_SETUP: Mutex<Option<PtSetup>> = Mutex::new(None);
 
@@ -517,6 +528,16 @@ const DIRECT_BLOCKED_TTL: std::time::Duration = std::time::Duration::from_secs(2
 const DIRECT_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 /// Online, awake time the bridge gets per try before its PT is parked.
 const BRIDGE_TRY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// obfs4 is plain TCP: a reachable bridge is ready in seconds, so the next line comes sooner.
+const BRIDGE_TRY_OBFS4: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The per-try time of the configured transport.
+fn bridge_try() -> std::time::Duration {
+    match PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        Some(pt) if pt.protocol == "obfs4" => BRIDGE_TRY_OBFS4,
+        _ => BRIDGE_TRY,
+    }
+}
 /// First and longest park of a bridge that never gets ready. Doubles in between.
 const BRIDGE_PAUSE_FIRST: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const BRIDGE_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(2 * 3600);
@@ -526,7 +547,7 @@ const FALLBACK_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many `Hop::Bridge` choices the configured bridge has: one per Snowflake line, else one.
 fn bridge_choices() -> usize {
     match PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
-        Some(pt) if pt.protocol == "snowflake" => pt.lines.len().max(1),
+        Some(pt) if pt.one_at_a_time => pt.lines.len().max(1),
         _ => 1,
     }
 }
@@ -620,8 +641,9 @@ async fn watch_bridge_fallback(
     }
     // `bridges[at]` is in use; `tried` choices have failed (counting the current one) since the bridge was last ready.
     let (mut at, mut tried, mut pause) = (0, 1, BRIDGE_PAUSE_FIRST);
+    let try_for = bridge_try();
     loop {
-        match wait_ready(&client, &dormant, BRIDGE_TRY).await {
+        match wait_ready(&client, &dormant, try_for).await {
             None => return,
             Some(true) => {
                 // Healthy: no timer, only arti's status events, until it stops being ready (the bridge died).
@@ -629,7 +651,7 @@ async fn watch_bridge_fallback(
                 if !wait_unready(&client).await {
                     return;
                 }
-                log::warn!("Tor: bridge no longer ready, giving it {BRIDGE_TRY:?} online");
+                log::warn!("Tor: bridge no longer ready, giving it {try_for:?} online");
                 continue;
             }
             Some(false) => {}
@@ -637,13 +659,13 @@ async fn watch_bridge_fallback(
         at = (at + 1) % bridges.len();
         if tried < bridges.len() {
             tried += 1;
-            log::warn!("Tor: bridge not ready after {BRIDGE_TRY:?} online, trying bridge line {}", at + 1);
+            log::warn!("Tor: bridge not ready after {try_for:?} online, trying bridge line {}", at + 1);
             if reconfigure(&bridges[at]).is_none() {
                 return;
             }
             continue;
         }
-        log::warn!("Tor: bridge not ready after {BRIDGE_TRY:?} online, parking it for {pause:?}");
+        log::warn!("Tor: bridge not ready after {try_for:?} online, parking it for {pause:?}");
         if reconfigure(&paused).is_none() {
             return;
         }
@@ -702,12 +724,21 @@ pub fn set_transport(mode: &str, bridges: &str, pt_dir: &str) -> Result<(), Stri
         "direct" => None,
         "snowflake" | "obfs4" => {
             let (protocol, binary) = pt_binary(mode, pt_dir).ok_or("no PT directory")?;
-            let lines = if mode == "snowflake" {
-                SNOWFLAKE_BRIDGES.iter().map(|s| s.to_string()).collect()
-            } else {
-                parse_bridge_lines(bridges)?
+            let builtin = |list: &[&str]| -> Vec<String> {
+                // A random first line, so users of a shared list do not all start on the same bridge.
+                use rand::seq::SliceRandom;
+                let mut v: Vec<String> = list.iter().map(|s| s.to_string()).collect();
+                v.shuffle(&mut rand::thread_rng());
+                v
             };
-            Some(PtSetup { protocol, binary, lines })
+            let (lines, one_at_a_time) = if mode == "snowflake" {
+                (builtin(SNOWFLAKE_BRIDGES), true)
+            } else if bridges.trim().is_empty() {
+                (builtin(OBFS4_BUILTIN_BRIDGES), true)
+            } else {
+                (parse_bridge_lines(bridges)?, false)
+            };
+            Some(PtSetup { protocol, binary, lines, one_at_a_time })
         }
         other => return Err(format!("unknown Tor mode: {other}")),
     };
@@ -995,9 +1026,10 @@ mod bridge_tests {
         assert!(parse_bridge_lines("").is_err());
         assert!(parse_bridge_lines("obfs4 nonsense").unwrap_err().starts_with("line 1"));
         assert!(parse_bridge_lines(&format!("{ok}\n192.0.2.1:443 316E643333645F6D79216558614D3931657A5F5F")).unwrap_err().starts_with("line 2"));
-        for l in SNOWFLAKE_BRIDGES {
+        for l in SNOWFLAKE_BRIDGES.iter().chain(OBFS4_BUILTIN_BRIDGES) {
             l.parse::<arti_client::config::BridgeConfigBuilder>().unwrap().build().unwrap();
         }
+        assert_eq!(parse_bridge_lines(&OBFS4_BUILTIN_BRIDGES.join("\n")).unwrap().len(), OBFS4_BUILTIN_BRIDGES.len());
         assert!(pt_available("direct", ""));
         assert!(!pt_available("obfs4", "/nonexistent"));
     }

@@ -271,7 +271,7 @@ fn usage() {
          --storage <size>                  Total disk budget, e.g. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n\n\
          Tor bridges (environment, read by `run`):\n\
          TYPEON_SERVER_TOR_MODE=direct|snowflake|obfs4   default direct; a bridge is used only when Direct is blocked\n\
-         TYPEON_SERVER_BRIDGES_FILE=<path>               obfs4 bridge lines, one per line\n\
+         TYPEON_SERVER_BRIDGES_FILE=<path>               obfs4 bridge lines, one per line (unset: Tor built-in bridges)\n\
          TYPEON_SERVER_PT_DIR=<dir>                      lyrebird, obfs4 + snowflake (default: next to this binary)\n"
     );
 }

@@ -400,11 +400,21 @@ internal fun SettingsFragment.showTorModeDialog() {
         setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorError))
         visibility = View.GONE
     }
+    // Where to get bridges; with no lines Tor's built-in public bridges are used.
+    val bridgesHelp = TextView(ctx).apply {
+        setText(R.string.msg_tor_bridges_help)
+        autoLinkMask = android.text.util.Linkify.WEB_URLS
+        linksClickable = true
+        movementMethod = android.text.method.LinkMovementMethod.getInstance()
+        setPadding(0, pad / 2, 0, 0)
+    }
+    root.addView(bridgesHelp)
     root.addView(bridgesInput)
     root.addView(errorView)
     fun selected(): String = group.findViewById<View>(group.checkedRadioButtonId)?.tag as? String ?: "direct"
     fun syncVisibility() {
         bridgesInput.visibility = if (selected() == "obfs4") View.VISIBLE else View.GONE
+        bridgesHelp.visibility = bridgesInput.visibility
         errorView.visibility = View.GONE
     }
     group.setOnCheckedChangeListener { _, _ -> syncVisibility() }
@@ -420,7 +430,7 @@ internal fun SettingsFragment.showTorModeDialog() {
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val mode = selected()
             val bridges = bridgesInput.text.toString().trim()
-            if (mode == "obfs4") {
+            if (mode == "obfs4" && bridges.isNotEmpty()) {
                 val check = P2PLib.validateBridgeLines(bridges)
                 if (check.startsWith("Error")) {
                     errorView.text = getString(R.string.msg_tor_bridges_invalid, check.removePrefix("Error: "))

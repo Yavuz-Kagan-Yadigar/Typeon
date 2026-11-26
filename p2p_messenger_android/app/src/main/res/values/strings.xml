@@ -127,6 +127,7 @@
     <string name="tor_mode_unavailable">Not available in this build</string>
     <string name="tor_state_direct">Now: Direct</string>
     <string name="tor_state_bridge">Now: using the bridge, Tor was blocked</string>
+    <string name="msg_tor_bridges_help">Get your own bridges at https://bridges.torproject.org/options and paste them below. Left empty, Tor\'s built-in public bridges are used.</string>
     <string name="hint_tor_bridges">Paste obfs4 bridge lines, one per line</string>
     <string name="msg_tor_mode_restart">Snowflake and bridges are used only when Tor is blocked: the app tries Direct first and switches after a minute without Tor. They use more battery than Direct. The app restarts to apply a change.</string>
     <string name="msg_tor_bridges_invalid">Invalid bridge: %1$s</string>
