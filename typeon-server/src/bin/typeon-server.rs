@@ -270,14 +270,14 @@ fn usage() {
          --dir <path>                          Data directory (TYPEON_SERVER_DIR)\n\
          --storage <size>                  Total disk budget, e.g. 20G, 512M (TYPEON_SERVER_BUDGET_BYTES)\n\n\
          Tor bridges (environment, read by `run`):\n\
-         TYPEON_SERVER_TOR_MODE=direct|snowflake|obfs4   default direct\n\
+         TYPEON_SERVER_TOR_MODE=direct|snowflake|obfs4   default direct; a bridge is used only when Direct is blocked\n\
          TYPEON_SERVER_BRIDGES_FILE=<path>               obfs4 bridge lines, one per line\n\
          TYPEON_SERVER_PT_DIR=<dir>                      lyrebird, obfs4 + snowflake (default: next to this binary)\n"
     );
 }
 
-/// Tor bridges from the environment (see `usage`). A bad setting stops the server: it never falls back
-/// to a direct Tor connection the operator turned away from.
+/// Tor bridges from the environment (see `usage`). A bridge is a fallback: Direct first, the bridge once
+/// Direct is blocked (core `tor::watch_bridge_fallback`). A bad setting stops the server.
 fn apply_tor_transport() {
     let mode = std::env::var("TYPEON_SERVER_TOR_MODE").unwrap_or_else(|_| "direct".to_string());
     let bridges = match std::env::var("TYPEON_SERVER_BRIDGES_FILE") {

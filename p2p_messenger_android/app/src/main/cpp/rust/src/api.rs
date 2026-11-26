@@ -167,6 +167,11 @@ pub fn tor_transport_available(mode: &str, pt_dir: &str) -> bool {
     crate::tor::pt_available(mode, pt_dir)
 }
 
+/// Tor runs over the configured bridge because Direct was blocked (see `tor::watch_bridge_fallback`).
+pub fn tor_bridge_in_use() -> bool {
+    crate::tor::bridge_in_use()
+}
+
 pub fn set_node_mode(enabled: bool) {
     let _ = catch_panic(move || {
         let _guard = RUNTIME.enter();

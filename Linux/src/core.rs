@@ -179,6 +179,11 @@ pub fn tor_transport_available(mode: &str) -> bool {
     api::tor_transport_available(mode, "")
 }
 
+/// Tor runs over the configured bridge because Direct was blocked.
+pub fn tor_bridge_in_use() -> bool {
+    api::tor_bridge_in_use()
+}
+
 pub fn set_history_storage_limit_bytes(bytes: u64) {
     api::set_history_storage_limit_bytes(bytes);
 }

@@ -568,11 +568,38 @@ thread_local!(static REBUILDING: std::cell::Cell<bool> = const { std::cell::Cell
 /// Tor connection mode: Direct, Snowflake or pasted obfs4 bridges. Read at network start only, so a change
 /// applies after a restart (same as the Tor switch). A mode whose PT binary is not shipped cannot be picked.
 fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
-    const MODES: [(&str, &str); 3] = [("direct", "Direct"), ("snowflake", "Snowflake"), ("obfs4", "Bridges (obfs4)")];
-    let group = adw::PreferencesGroup::builder()
-        .title("Tor connection")
-        .description("Use Snowflake or bridges where Tor is blocked. They use more battery and data than Direct.")
-        .build();
+    const MODES: [(&str, &str); 3] = [
+        ("direct", "Direct"),
+        ("snowflake", "Snowflake (only if Tor is blocked)"),
+        ("obfs4", "Bridges (obfs4, only if Tor is blocked)"),
+    ];
+    // A bridge mode is a fallback (core `tor::watch_bridge_fallback`): Direct first, the bridge after a minute without Tor.
+    let describe = {
+        let app = app.clone();
+        move || {
+            let now = if app.prefs.borrow().tor_mode == "direct" {
+                ""
+            } else if core::tor_bridge_in_use() {
+                " Now: using the bridge, Tor was blocked."
+            } else {
+                " Now: Direct."
+            };
+            format!("Snowflake and bridges are used only when Tor is blocked. They use more battery and data than Direct.{now}")
+        }
+    };
+    let group = adw::PreferencesGroup::builder().title("Tor connection").description(describe()).build();
+    // Live "Now:" while the group is on screen: the refresh starts on map and stops once it is unmapped or gone.
+    group.connect_map(move |group| {
+        let weak = group.downgrade();
+        let describe = describe.clone();
+        glib::timeout_add_seconds_local(2, move || match weak.upgrade() {
+            Some(group) if group.is_mapped() => {
+                group.set_description(Some(&describe()));
+                glib::ControlFlow::Continue
+            }
+            _ => glib::ControlFlow::Break,
+        });
+    });
     let labels: Vec<String> = MODES
         .iter()
         .map(|(mode, label)| {

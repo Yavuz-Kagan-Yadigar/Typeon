@@ -107,6 +107,7 @@ internal fun SettingsFragment.updateTorStatusLabel() {
             "failed" -> getString(R.string.tor_status_failed)
             else -> getString(R.string.tor_status_disabled)
         }
+        updateTorModeDesc()
     }
 }
 
@@ -348,9 +349,17 @@ internal fun SettingsFragment.torModeLabel(mode: String): String = getString(
     }
 )
 
+/** Mode label, plus which path is in use now: a bridge mode is a fallback (Rust `tor::watch_bridge_fallback`).
+ *  Refreshed by the Tor status poll, which runs only while this screen is in the foreground. */
+internal fun SettingsFragment.updateTorModeDesc(root: View? = view) {
+    val desc = root?.findViewById<TextView>(R.id.tor_mode_desc) ?: return
+    val mode = P2PService.getTorMode(requireContext())
+    desc.text = if (mode == "direct") torModeLabel(mode)
+        else torModeLabel(mode) + "\n" + getString(if (P2PLib.torBridgeInUse()) R.string.tor_state_bridge else R.string.tor_state_direct)
+}
+
 internal fun SettingsFragment.setupTorMode(view: View) {
-    val desc = view.findViewById<TextView>(R.id.tor_mode_desc)
-    desc.text = torModeLabel(P2PService.getTorMode(requireContext()))
+    updateTorModeDesc(view)
     view.findViewById<Button>(R.id.btn_tor_mode).setOnClickListener { showTorModeDialog() }
 }
 
@@ -366,15 +375,12 @@ internal fun SettingsFragment.showTorModeDialog() {
     root.addView(TextView(ctx).apply { setText(R.string.msg_tor_mode_restart) })
     val group = android.widget.RadioGroup(ctx)
     TOR_MODES.forEachIndexed { i, mode ->
-        // ponytail: Snowflake is off on Android. Device test 2026-11-26: lyrebird's WebRTC never opened a
-        // DataChannel on the phone (same binary version and network work on Linux). Re-enable once fixed.
-        val broken = mode == "snowflake"
-        val available = !broken && P2PLib.torTransportAvailable(mode, ptDir)
+        val available = P2PLib.torTransportAvailable(mode, ptDir)
         group.addView(android.widget.RadioButton(ctx).apply {
             id = View.generateViewId()
             tag = mode
             text = if (available) torModeLabel(mode)
-                else torModeLabel(mode) + "\n" + getString(if (broken) R.string.tor_mode_not_yet_android else R.string.tor_mode_unavailable)
+                else torModeLabel(mode) + "\n" + getString(R.string.tor_mode_unavailable)
             isEnabled = available || mode == current
             isChecked = mode == current || (i == 0 && current !in TOR_MODES)
         })

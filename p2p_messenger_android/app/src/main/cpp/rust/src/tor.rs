@@ -87,6 +87,8 @@ pub struct TorHandle {
     _service: Arc<Mutex<Option<Arc<tor_hsservice::RunningOnionService>>>>,
     /// A `notify_network_changed` retry loop is running.
     rebootstrapping: Arc<std::sync::atomic::AtomicBool>,
+    /// The radio saver has arti dormant (see `set_dormant`). The bridge fallback does not count that time.
+    dormant: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TorHandle {
@@ -110,6 +112,7 @@ impl TorHandle {
     /// so an idle LTE radio can sleep between windows. `false` restarts the tasks.
     pub fn set_dormant(&self, dormant: bool) {
         use arti_client::DormantMode;
+        self.dormant.store(dormant, std::sync::atomic::Ordering::SeqCst);
         self.client.set_dormant(if dormant { DormantMode::Soft } else { DormantMode::Normal });
     }
 
@@ -159,6 +162,15 @@ impl TorHandle {
 
         trim_dir_cache(cache_dir);
 
+        // A configured bridge is a fallback: Direct first, unless Direct was blocked here in the last 24 h.
+        let bridge_configured = PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        let blocked_file = std::path::Path::new(state_dir).join(DIRECT_BLOCKED_FILE);
+        let on_bridge = bridge_configured && recently_blocked(&blocked_file, std::time::SystemTime::now());
+        BRIDGE_IN_USE.store(on_bridge, std::sync::atomic::Ordering::SeqCst);
+        if on_bridge {
+            log::info!("Tor: Direct was blocked less than 24 h ago, starting on the bridge");
+        }
+
         // A power loss mid-write can leave a state file (guards, intro points) that arti refuses on every start, and the onion service then never
         // comes back. That state is a network cache. The onion identity lives in `keystore/`, which is kept. The bad state is set aside once, then
         // startup is tried again.
@@ -170,7 +182,7 @@ impl TorHandle {
         };
         let start = || -> Result<_, (String, bool)> {
             let client = TorClient::with_runtime(runtime.clone())
-                .config(client_config(state_dir, cache_dir).map_err(|e| (e, false))?)
+                .config(client_config(state_dir, cache_dir, if on_bridge { Hop::Bridge(0) } else { Hop::Direct }).map_err(|e| (e, false))?)
                 .create_unbootstrapped()
                 .map_err(|e| (format!("Arti client: {e}"), state_suspect(&e)))?;
             let svc_config = onion_service_config().map_err(|e| (e, false))?;
@@ -237,7 +249,7 @@ impl TorHandle {
                         Ok(()) => {
                             // Over a bridge, a directory loaded from the cache finishes `bootstrap` before any channel to
                             // a bridge exists. Ready (and the dials it starts) waits until arti can carry traffic.
-                            if PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                            if BRIDGE_IN_USE.load(std::sync::atomic::Ordering::SeqCst) {
                                 use futures::StreamExt;
                                 let mut events = client_bg.bootstrap_events();
                                 while !client_bg.bootstrap_status().ready_for_traffic() {
@@ -319,13 +331,27 @@ impl TorHandle {
             });
         }
 
+        let dormant = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if bridge_configured {
+            let configs = (|| {
+                let bridges = (0..bridge_choices()).map(|i| client_config(state_dir, cache_dir, Hop::Bridge(i))).collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, String>((bridges, client_config(state_dir, cache_dir, Hop::Paused)?))
+            })();
+            match configs {
+                Ok((bridges, paused)) => {
+                    tokio::spawn(watch_bridge_fallback(Arc::downgrade(&client), dormant.clone(), blocked_file, bridges, paused, on_bridge));
+                }
+                Err(e) => log::error!("Tor: bridge config: {e}"),
+            }
+        }
+
         let listen = OnionListen {
             rx: inbound_rx,
             listener: None,
             announced: false,
             addr: format!("/ip4/127.0.0.1/tcp/{onion_port}").parse().map_err(|_| "bad listen label".to_string())?,
         };
-        Ok((TorHandle { client, status, onion_addr, _service: service, rebootstrapping }, listen))
+        Ok((TorHandle { client, status, onion_addr, _service: service, rebootstrapping, dormant }, listen))
     }
 }
 
@@ -390,7 +416,7 @@ fn trim_dir_cache(cache_dir: &str) {
     }
 }
 
-fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorClientConfig, String> {
+fn client_config(state_dir: &str, cache_dir: &str, hop: Hop) -> Result<arti_client::TorClientConfig, String> {
     let mut config = TorClientConfigBuilder::from_directories(state_dir, cache_dir);
     // The circuit build timeout is learned by measurement in arti. A short value learned on fast Wi-Fi made many circuits give up before
     // completing after a switch to mobile data (on the device: an onion dial timed out after 6 s with "tor operation timed out", and recovery took 20-120 s).
@@ -408,22 +434,34 @@ fn client_config(state_dir: &str, cache_dir: &str) -> Result<arti_client::TorCli
     config.channel().padding(tor_config::PaddingLevel::Reduced);
     // Bridges: arti picks its guards from these bridges only, so the onion service's intro and rendezvous
     // circuits go through them as well. run_on_startup = false: the PT process starts on the first channel
-    // to a bridge, never in Direct mode. Direct (None) adds nothing here.
-    if let Some(pt) = PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+    // to a bridge, never in Direct mode. Direct adds nothing here.
+    let pt_setup = PT_SETUP.lock().unwrap_or_else(|p| p.into_inner());
+    if let (Some(pt), Hop::Bridge(_) | Hop::Paused) = (pt_setup.as_ref(), hop) {
         use arti_client::config::pt::TransportConfigBuilder;
         // The first hop runs through the transport (Snowflake: broker, proxy, WebRTC). At 20 s the circuit
         // timeout cut the bridge channel before it opened, over and over (see the vendored tor-chanmgr).
         config.override_net_params().insert("cbtmintimeout".to_string(), 60_000);
         use arti_client::config::{BridgeConfigBuilder, CfgPath};
-        for line in &pt.lines {
+        // Snowflake: one bridge line at a time (`Hop::Bridge(i)`). Each bridge channel is its own snowflake session
+        // (WebRTC plus KCP timers, about 4-5 % of a core on the Tab each), and arti keeps a channel to every configured
+        // bridge open (it fetches each one's descriptor over it), so guard netparams cannot limit it. The watcher moves
+        // to the next line when one does not get ready. obfs4 channels are plain TCP: all lines at once.
+        let lines: Vec<&String> = match hop {
+            Hop::Bridge(i) if pt.protocol == "snowflake" => vec![&pt.lines[i % pt.lines.len()]],
+            _ => pt.lines.iter().collect(),
+        };
+        for line in lines {
             let bridge = line.parse::<BridgeConfigBuilder>().map_err(|e| format!("Bridge line: {e}"))?;
             config.bridges().bridges().push(bridge);
         }
         let mut transport = TransportConfigBuilder::default();
-        transport
-            .protocols(vec![pt.protocol.parse::<arti_client::config::PtTransportName>().map_err(|e| format!("Transport name: {e}"))?])
-            .path(CfgPath::new_literal(pt.binary.clone()))
-            .run_on_startup(false);
+        transport.protocols(vec![pt.protocol.parse::<arti_client::config::PtTransportName>().map_err(|e| format!("Transport name: {e}"))?]);
+        if hop == Hop::Paused {
+            // A closed local port: every bridge channel fails at once, no PT session, no network traffic.
+            transport.proxy_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 1)));
+        } else {
+            transport.path(CfgPath::new_literal(pt.binary.clone())).run_on_startup(false);
+        }
         config.bridges().transports().push(transport);
     }
     config.build().map_err(|e| format!("Arti config: {e}"))
@@ -457,6 +495,165 @@ struct PtSetup {
     lines: Vec<String>,
 }
 static PT_SETUP: Mutex<Option<PtSetup>> = Mutex::new(None);
+
+/// How arti reaches its first hop. A configured bridge is only a fallback for a network that blocks Tor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hop {
+    Direct,
+    /// The configured bridge; for Snowflake only line `n` of it (see `client_config`).
+    Bridge(usize),
+    /// Bridge configured, PT parked (see `watch_bridge_fallback`).
+    Paused,
+}
+
+/// arti runs over the configured bridge (Direct was blocked). Shown in the UI; never set back within a process.
+static BRIDGE_IN_USE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// File in arti's state dir. Its mtime is when Direct last failed to reach Tor while the device had a network.
+const DIRECT_BLOCKED_FILE: &str = "direct-blocked";
+/// For this long after a block, the next start goes straight to the bridge (fewer Direct attempts seen by a censor).
+const DIRECT_BLOCKED_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// Online, awake time Direct gets to become ready before the bridge takes over.
+const DIRECT_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+/// Online, awake time the bridge gets per try before its PT is parked.
+const BRIDGE_TRY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// First and longest park of a bridge that never gets ready. Doubles in between.
+const BRIDGE_PAUSE_FIRST: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const BRIDGE_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(2 * 3600);
+/// Check interval while the fallback waits (only until Tor is ready, or while a bridge try runs).
+const FALLBACK_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How many `Hop::Bridge` choices the configured bridge has: one per Snowflake line, else one.
+fn bridge_choices() -> usize {
+    match PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        Some(pt) if pt.protocol == "snowflake" => pt.lines.len().max(1),
+        _ => 1,
+    }
+}
+
+/// arti is running over the configured bridge because Direct was blocked.
+pub fn bridge_in_use() -> bool {
+    BRIDGE_IN_USE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Direct was blocked less than `DIRECT_BLOCKED_TTL` ago. A file time in the future (clock moved back) counts as old.
+fn recently_blocked(file: &std::path::Path, now: std::time::SystemTime) -> bool {
+    std::fs::metadata(file)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| now.duration_since(t).is_ok_and(|age| age < DIRECT_BLOCKED_TTL))
+}
+
+/// The device has a route to the internet. A UDP connect only looks up the route, it sends nothing. Without a
+/// network, Tor failing says nothing about blocking.
+fn has_network() -> bool {
+    let try_route = |bind: &str, to: &str| std::net::UdpSocket::bind(bind).and_then(|s| s.connect(to)).is_ok();
+    try_route("0.0.0.0:0", "198.51.100.1:9") || try_route("[::]:0", "[2001:db8::1]:9")
+}
+
+/// Waits `limit` of online, awake time for arti to be ready for traffic. True = ready. None = the client is gone.
+async fn wait_ready(
+    client: &std::sync::Weak<TorClient<TokioRustlsRuntime>>,
+    dormant: &std::sync::atomic::AtomicBool,
+    limit: std::time::Duration,
+) -> Option<bool> {
+    let mut online = std::time::Duration::ZERO;
+    loop {
+        if client.upgrade()?.bootstrap_status().ready_for_traffic() {
+            return Some(true);
+        }
+        if online >= limit {
+            return Some(false);
+        }
+        tokio::time::sleep(FALLBACK_TICK).await;
+        if !dormant.load(std::sync::atomic::Ordering::SeqCst) && has_network() {
+            online += FALLBACK_TICK;
+        }
+    }
+}
+
+/// Waits on arti's status events until it is no longer ready for traffic. False = the client is gone.
+async fn wait_unready(client: &std::sync::Weak<TorClient<TokioRustlsRuntime>>) -> bool {
+    let Some(mut events) = client.upgrade().map(|c| c.bootstrap_events()) else { return false };
+    while let Some(status) = events.next().await {
+        if !status.ready_for_traffic() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Bridge mode as a fallback. Started on Direct: if Direct is not ready after `DIRECT_GRACE` online, switch the running
+/// client to the bridge for the rest of the process and note the block for 24 h. On the bridge: whenever it is not ready for
+/// `BRIDGE_TRY` online (at the start, or after it was ready and the bridge died), park the PT for a growing pause, then try
+/// again. Runs until the client is gone.
+async fn watch_bridge_fallback(
+    client: std::sync::Weak<TorClient<TokioRustlsRuntime>>,
+    dormant: Arc<std::sync::atomic::AtomicBool>,
+    blocked_file: std::path::PathBuf,
+    bridges: Vec<arti_client::TorClientConfig>,
+    paused: arti_client::TorClientConfig,
+    on_bridge: bool,
+) {
+    use arti_client::config::Reconfigure;
+    let reconfigure = |cfg: &arti_client::TorClientConfig| {
+        let c = client.upgrade()?;
+        c.reconfigure(cfg, Reconfigure::WarnOnFailures).map_err(|e| log::error!("Tor: reconfigure failed: {e}")).ok()
+    };
+    if !on_bridge {
+        match wait_ready(&client, &dormant, DIRECT_GRACE).await {
+            None => return,
+            Some(true) => {
+                let _ = std::fs::remove_file(&blocked_file);
+                return;
+            }
+            Some(false) => {}
+        }
+        log::warn!("Tor: Direct not ready after {DIRECT_GRACE:?} online, switching to the bridge");
+        // Truncating write: the mtime is now.
+        if let Err(e) = std::fs::write(&blocked_file, b"") {
+            log::warn!("Tor: could not note the Direct block: {e}");
+        }
+        if reconfigure(&bridges[0]).is_none() {
+            return;
+        }
+        BRIDGE_IN_USE.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    // `bridges[at]` is in use; `tried` choices have failed (counting the current one) since the bridge was last ready.
+    let (mut at, mut tried, mut pause) = (0, 1, BRIDGE_PAUSE_FIRST);
+    loop {
+        match wait_ready(&client, &dormant, BRIDGE_TRY).await {
+            None => return,
+            Some(true) => {
+                // Healthy: no timer, only arti's status events, until it stops being ready (the bridge died).
+                (tried, pause) = (1, BRIDGE_PAUSE_FIRST);
+                if !wait_unready(&client).await {
+                    return;
+                }
+                log::warn!("Tor: bridge no longer ready, giving it {BRIDGE_TRY:?} online");
+                continue;
+            }
+            Some(false) => {}
+        }
+        at = (at + 1) % bridges.len();
+        if tried < bridges.len() {
+            tried += 1;
+            log::warn!("Tor: bridge not ready after {BRIDGE_TRY:?} online, trying bridge line {}", at + 1);
+            if reconfigure(&bridges[at]).is_none() {
+                return;
+            }
+            continue;
+        }
+        log::warn!("Tor: bridge not ready after {BRIDGE_TRY:?} online, parking it for {pause:?}");
+        if reconfigure(&paused).is_none() {
+            return;
+        }
+        tokio::time::sleep(pause).await;
+        if reconfigure(&bridges[at]).is_none() {
+            return;
+        }
+        (tried, pause) = (1, (pause * 2).min(BRIDGE_PAUSE_MAX));
+    }
+}
 
 /// The PT binary for `mode` ("obfs4" / "snowflake") in `pt_dir`, or next to the executable when `pt_dir` is empty.
 fn pt_binary(mode: &str, pt_dir: &str) -> Option<(&'static str, std::path::PathBuf)> {
@@ -497,8 +694,9 @@ pub fn parse_bridge_lines(text: &str) -> Result<Vec<String>, String> {
 }
 
 /// Sets how the NEXT `TorHandle::launch` reaches Tor: "direct" (default), "snowflake", or "obfs4" with
-/// `bridges`. A missing PT binary is not an error here: arti then cannot connect (fails closed, never
-/// falls back to a direct connection the user turned away from).
+/// `bridges`. A bridge mode is a fallback: arti starts Direct and moves to the bridge only when Direct is
+/// blocked (see `watch_bridge_fallback`). A missing PT binary is not an error here: once on the bridge,
+/// arti then cannot connect (fails closed, never back to Direct within the process).
 pub fn set_transport(mode: &str, bridges: &str, pt_dir: &str) -> Result<(), String> {
     let setup = match mode {
         "direct" => None,
@@ -802,5 +1000,40 @@ mod bridge_tests {
         }
         assert!(pt_available("direct", ""));
         assert!(!pt_available("obfs4", "/nonexistent"));
+    }
+
+    #[test]
+    fn direct_blocked_memory() {
+        let dir = std::env::temp_dir().join(format!("typeon-blocked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join(DIRECT_BLOCKED_FILE);
+        let now = std::time::SystemTime::now();
+        assert!(!recently_blocked(&f, now), "no file: Direct first");
+        std::fs::write(&f, b"").unwrap();
+        assert!(recently_blocked(&f, now + std::time::Duration::from_secs(3600)));
+        assert!(!recently_blocked(&f, now + DIRECT_BLOCKED_TTL + std::time::Duration::from_secs(60)), "after 24 h: Direct again");
+        assert!(!recently_blocked(&f, now - std::time::Duration::from_secs(3600)), "clock moved back: Direct again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hop_configs_build() {
+        set_transport("snowflake", "", "/nonexistent").unwrap();
+        let d = std::env::temp_dir().join(format!("typeon-hop-{}", std::process::id()));
+        let (st, ca) = (d.join("s"), d.join("c"));
+        let (st, ca) = (st.to_str().unwrap(), ca.to_str().unwrap());
+        assert_eq!(bridge_choices(), SNOWFLAKE_BRIDGES.len());
+        for hop in [Hop::Direct, Hop::Bridge(0), Hop::Bridge(1), Hop::Paused] {
+            let c = client_config(st, ca, hop).unwrap();
+            // Snowflake: one bridge line per choice.
+            let dbg = format!("{c:?}").to_lowercase();
+            let n = ["8838024498816a039fcbbab14e6f40a0843051fa", "2b280b23e1107bb62abfc40ddcc8824814f80a72"]
+                .iter()
+                .filter(|fp| dbg.contains(*fp))
+                .count();
+            let want = match hop { Hop::Direct => 0, Hop::Bridge(_) => 1, Hop::Paused => SNOWFLAKE_BRIDGES.len() };
+            assert_eq!(n, want, "snowflake lines in the config");
+        }
+        set_transport("direct", "", "").unwrap();
     }
 }

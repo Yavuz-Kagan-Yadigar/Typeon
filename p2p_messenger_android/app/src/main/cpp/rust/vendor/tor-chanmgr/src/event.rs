@@ -219,6 +219,9 @@ struct ChanMgrStatus {
     /// If we get to this point, we can successfully talk to something that
     /// holds the private key that it's supposed to.
     last_chan_success: Option<Instant>,
+
+    /// Typeon patch: channel builds that failed since `last_chan_success`.
+    failures_since_chan_success: usize,
 }
 
 impl ChanMgrStatus {
@@ -233,6 +236,7 @@ impl ChanMgrStatus {
             last_tls_success: None,
             last_chan_auth_success: None,
             last_chan_success: None,
+            failures_since_chan_success: 0,
         }
     }
 
@@ -261,7 +265,12 @@ impl ChanMgrStatus {
             (false, false) => Some(false),
         };
 
-        let handshake_works = match (self.last_chan_success.is_some(), early) {
+        // Typeon patch: upstream counted one success forever, so a client whose only guards (bridges)
+        // had died still looked ready. A success (or use of an open channel, see `record_channel_used`)
+        // older than MIN_DURATION, followed by MIN_ATTEMPTS failed channel builds, no longer counts.
+        let stale = self.last_chan_success.is_some_and(|t| now >= t + MIN_DURATION)
+            && self.failures_since_chan_success >= MIN_ATTEMPTS;
+        let handshake_works = match (self.last_chan_success.is_some() && !stale, early) {
             (true, _) => Some(true),
             (_, true) => None,
             (false, false) => Some(false),
@@ -304,6 +313,7 @@ impl ChanMgrStatus {
     fn record_handshake_done(&mut self, now: Instant) {
         self.last_chan_auth_success = Some(now);
         self.last_chan_success = Some(now);
+        self.failures_since_chan_success = 0;
     }
 }
 
@@ -380,6 +390,21 @@ impl ChanMgrEventSender {
         self.mgr_status.record_handshake_done(now);
         self.push_at(now);
     }
+
+    /// Typeon patch: a channel build failed (any stage, including a PT that did not start).
+    pub(crate) fn record_channel_failed(&mut self) {
+        let now = Instant::now();
+        self.mgr_status.failures_since_chan_success += 1;
+        self.push_at(now);
+    }
+
+    /// Typeon patch: a request was served by an open channel, so a channel still works. Counts like a
+    /// fresh handshake for the staleness rule in `conn_status_at`.
+    pub(crate) fn record_channel_used(&mut self) {
+        let now = Instant::now();
+        self.mgr_status.record_handshake_done(now);
+        self.push_at(now);
+    }
 }
 
 /// Create a new channel for sending connectivity status events to other crates.
@@ -415,6 +440,24 @@ mod test {
 
     /// Tolerance for float comparison.
     const TOL: f32 = 0.00001;
+
+    #[test]
+    fn typeon_stale_success() {
+        let t0 = Instant::now();
+        let mut ms = ChanMgrStatus::new_at(t0);
+        for _ in 0..6 {
+            ms.record_attempt();
+        }
+        ms.record_tcp_success(t0);
+        ms.record_handshake_done(t0);
+        let later = t0 + Duration::from_secs(120);
+        assert!(ms.conn_status_at(later).usable(), "old success, no failed attempts since: still usable");
+        ms.failures_since_chan_success = 6;
+        assert!(!ms.conn_status_at(later).usable(), "6 failed builds after 60 s: stale");
+        assert!(ms.conn_status_at(t0 + Duration::from_secs(30)).usable(), "within 60 s of the success: usable");
+        ms.record_handshake_done(later);
+        assert!(ms.conn_status_at(later).usable(), "a new success (or channel use) resets it");
+    }
 
     #[test]
     fn status_basics() {

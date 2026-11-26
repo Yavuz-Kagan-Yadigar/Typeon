@@ -52,6 +52,8 @@ object P2PLib {
     external fun validateBridgeLines(text: String): String
     /** The PT binary for [mode] ships in this APK (liblyrebird.so in [ptDir]: obfs4 + snowflake). */
     external fun torTransportAvailable(mode: String, ptDir: String): Boolean
+    /** Tor runs over the configured bridge (Snowflake / obfs4) because Direct was blocked. False = Direct. */
+    external fun torBridgeInUse(): Boolean
     /** The history and attachment storage limit slider (100 MB to 32 GB) in Settings. It applies only while node mode is on (see Rust
      *  `enforce_history_storage_limit`). Lowering the limit deletes the oldest files at once. */
     external fun setHistoryStorageLimitBytes(bytes: Long)

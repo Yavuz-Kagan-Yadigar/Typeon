@@ -163,3 +163,7 @@ strip = true
 tor-hsservice = { path = "vendor/tor-hsservice" }
 tor-netdir = { path = "vendor/tor-netdir" }
 tor-chanmgr = { path = "vendor/tor-chanmgr" }
+# tor-circmgr: drop cached circuit timeouts on new netparams (Snowflake never got a channel).
+tor-circmgr = { path = "vendor/tor-circmgr" }
+# tor-ptmgr: stop a PT on reconfigure once it is no longer configured (bridge park).
+tor-ptmgr = { path = "vendor/tor-ptmgr" }

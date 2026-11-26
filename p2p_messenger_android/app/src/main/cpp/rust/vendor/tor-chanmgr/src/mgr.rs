@@ -231,6 +231,10 @@ impl<CF: AbstractChannelFactory + Clone> AbstractChanMgr<CF> {
                 }
                 // Easy case: we have an error or a channel to return.
                 Some(Action::Return(v)) => {
+                    if v.is_ok() {
+                        // Typeon patch: see `ChanMgrEventSender::record_channel_used`.
+                        self.reporter.0.lock().expect("Lock poisoned").record_channel_used();
+                    }
                     return v.map(|chan| (chan, provenance));
                 }
                 // There's an in-progress channel.  Wait for it.
@@ -291,6 +295,8 @@ impl<CF: AbstractChannelFactory + Clone> AbstractChanMgr<CF> {
                                     .upgrade_pending_channel_to_open(handle, Arc::clone(chan))?;
                             }
                             Err(_) => {
+                                // Typeon patch: see `ChanMgrEventSender::record_channel_failed`.
+                                self.reporter.0.lock().expect("Lock poisoned").record_channel_failed();
                                 // Remove the pending channel.
                                 let handle = guard.handle.take().expect("pending handle used once");
                                 if let Err(e) = self.channels.remove_pending_channel(handle) {

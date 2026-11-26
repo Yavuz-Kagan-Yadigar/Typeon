@@ -254,3 +254,9 @@ pub extern "system" fn Java_com_p2p_messenger_P2PLib_torTransportAvailable<'loca
     let pt_dir = jstr(&mut env, &pt_dir).unwrap_or_default();
     crate::api::tor_transport_available(&mode, &pt_dir) as jboolean
 }
+
+/// See api `tor_bridge_in_use`.
+#[no_mangle]
+pub extern "system" fn Java_com_p2p_messenger_P2PLib_torBridgeInUse<'local>(_env: JNIEnv<'local>, _class: JClass<'local>) -> jboolean {
+    crate::api::tor_bridge_in_use() as jboolean
+}
