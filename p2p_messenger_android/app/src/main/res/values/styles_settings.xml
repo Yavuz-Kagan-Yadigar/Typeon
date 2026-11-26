@@ -44,12 +44,18 @@
     </style>
 
     <style name="Settings.Title" parent="">
+        <!-- A text that starts with a Latin word ("Tor: …") must still read right-to-left in Arabic. -->
+        <item name="android:textDirection">locale</item>
+        <item name="android:textAlignment">viewStart</item>
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>
         <item name="android:textSize">15sp</item>
     </style>
 
     <style name="Settings.Desc" parent="">
+        <!-- A text that starts with a Latin word ("Tor: …") must still read right-to-left in Arabic. -->
+        <item name="android:textDirection">locale</item>
+        <item name="android:textAlignment">viewStart</item>
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
         <item name="android:layout_marginTop">2dp</item>

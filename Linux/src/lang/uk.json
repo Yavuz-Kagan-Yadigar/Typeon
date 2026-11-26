@@ -482,7 +482,7 @@
  "Sans": "Sans",
  "Serif": "Serif",
  "Monospace": "Monospace",
- "Now: using the bridge, Tor was blocked.": "Зараз: використовується міст, бо Tor було заблоковано.",
+ "Now: using a bridge.": "Зараз: використовується міст.",
  "Now: Direct.": "Зараз: напряму.",
  "Save bridges": "Зберегти містки",
  "Tor connection applies after a restart.": "Підключення Tor набуває чинності після перезапуску.",

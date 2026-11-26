@@ -112,7 +112,7 @@
     <string name="action_tor_mode">Değiştir</string>
     <string name="tor_mode_unavailable">Bu sürümde yok</string>
     <string name="tor_state_direct">Şu an: Doğrudan</string>
-    <string name="tor_state_bridge">Şu an: köprü kullanılıyor, Tor engelliydi</string>
+    <string name="tor_state_bridge">Şu an: köprü kullanılıyor</string>
     <string name="msg_tor_bridges_help">Boş bırakılan kutu için Tor\'un herkese açık yerleşik köprüleri kullanılır. Kendi köprülerinizi https://bridges.torproject.org/options adresinden alın</string>
     <string name="lbl_tor_always_bridge">Köprüyü her zaman kullan</string>
     <string name="msg_tor_always_bridge">Önce doğrudan bağlantı hiç denenmez. Tor kullanmanın kendisi riskliyse bunu açın: ağ bu cihazdan hiçbir zaman doğrudan Tor bağlantısı görmez. Daha fazla pil ve veri harcar.</string>

@@ -108,7 +108,7 @@
     <string name="action_tor_mode">बदलें</string>
     <string name="tor_mode_unavailable">इस बिल्ड में उपलब्ध नहीं</string>
     <string name="tor_state_direct">अभी: सीधा</string>
-    <string name="tor_state_bridge">अभी: ब्रिज इस्तेमाल हो रहा है, क्योंकि Tor ब्लॉक था</string>
+    <string name="tor_state_bridge">अभी: ब्रिज इस्तेमाल हो रहा है</string>
     <string name="msg_tor_bridges_help">खाली छोड़े गए बॉक्स के लिए Tor के अंतर्निहित सार्वजनिक ब्रिज इस्तेमाल होते हैं। अपने ब्रिज https://bridges.torproject.org/options से पाएँ</string>
     <string name="lbl_tor_always_bridge">हमेशा ब्रिज इस्तेमाल करें</string>
     <string name="msg_tor_always_bridge">पहले सीधा कनेक्शन कभी नहीं आज़माया जाता। जहाँ Tor इस्तेमाल करना ही जोखिम भरा हो, वहाँ इसे चालू करें: नेटवर्क को इस डिवाइस से कभी सीधा Tor कनेक्शन नहीं दिखेगा। इसमें बैटरी और डेटा ज़्यादा लगता है।</string>

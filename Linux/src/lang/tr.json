@@ -482,7 +482,7 @@
  "Sans": "Sans",
  "Serif": "Serif",
  "Monospace": "Eşit aralıklı",
- "Now: using the bridge, Tor was blocked.": "Şimdi: köprü kullanılıyor, Tor engellendi.",
+ "Now: using a bridge.": "Şu an: köprü kullanılıyor.",
  "Now: Direct.": "Şimdi: Doğrudan.",
  "Save bridges": "Köprüleri kaydet",
  "Tor connection applies after a restart.": "Tor bağlantısı yeniden başlatmadan sonra uygulanır.",

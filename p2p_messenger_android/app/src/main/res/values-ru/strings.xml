@@ -108,7 +108,7 @@
     <string name="action_tor_mode">Изменить</string>
     <string name="tor_mode_unavailable">Недоступно в этой сборке</string>
     <string name="tor_state_direct">Сейчас: напрямую</string>
-    <string name="tor_state_bridge">Сейчас: используется мост, потому что Tor заблокирован</string>
+    <string name="tor_state_bridge">Сейчас: используется мост</string>
     <string name="msg_tor_bridges_help">Для пустого поля используются встроенные публичные мосты Tor. Свои мосты можно получить на https://bridges.torproject.org/options</string>
     <string name="lbl_tor_always_bridge">Всегда использовать мост</string>
     <string name="msg_tor_always_bridge">Прямое подключение не пробуется. Включите, если само использование Tor опасно: сеть никогда не увидит прямого подключения к Tor с этого устройства. Расходует больше заряда и трафика.</string>

@@ -482,7 +482,7 @@
   "Sans": "بدون زخارف (Sans)",
   "Serif": "بزخارف (Serif)",
   "Monospace": "ثابت العرض (Monospace)",
-  "Now: using the bridge, Tor was blocked.": "الآن: يُستخدم الجسر لأن Tor كان محجوبًا.",
+  "Now: using a bridge.": "الآن: يُستخدم جسر.",
   "Now: Direct.": "الآن: مباشر.",
   "Save bridges": "حفظ الجسور",
   "Tor connection applies after a restart.": "يسري اتصال Tor بعد إعادة التشغيل.",

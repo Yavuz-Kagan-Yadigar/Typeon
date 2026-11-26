@@ -108,7 +108,7 @@
     <string name="action_tor_mode">更改</string>
     <string name="tor_mode_unavailable">此版本不可用</string>
     <string name="tor_state_direct">当前：直连</string>
-    <string name="tor_state_bridge">当前：Tor 曾被封锁，正在使用网桥</string>
+    <string name="tor_state_bridge">当前：正在使用网桥</string>
     <string name="msg_tor_bridges_help">留空的输入框使用 Tor 内置的公共网桥。可在 https://bridges.torproject.org/options 获取你自己的网桥</string>
     <string name="lbl_tor_always_bridge">始终使用网桥</string>
     <string name="msg_tor_always_bridge">从不先尝试直连。在使用 Tor 本身就有风险的地方开启：网络将永远看不到本设备的直连 Tor 连接。会消耗更多电量和流量。</string>

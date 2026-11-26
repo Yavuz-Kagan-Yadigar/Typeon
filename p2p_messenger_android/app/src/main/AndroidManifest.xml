@@ -63,6 +63,14 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.P2PMessenger">
 
+        <!-- See util/RestartActivity: restarts the app from a second process. -->
+        <activity
+            android:name=".util.RestartActivity"
+            android:process=":restart"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
                 <!-- singleTop: when the join link below is tapped while the app is already open, it
              must not stack a second MainActivity. The same instance is brought forward through
              onNewIntent. This does not change the app's own navigation: MainActivity already

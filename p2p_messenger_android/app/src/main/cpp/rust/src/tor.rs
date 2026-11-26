@@ -168,7 +168,8 @@ impl TorHandle {
         let on_bridge = bridge_configured && (always || recently_blocked(&blocked_file, std::time::SystemTime::now()));
         BRIDGE_IN_USE.store(on_bridge, std::sync::atomic::Ordering::SeqCst);
         if on_bridge {
-            log::info!("Tor: Direct was blocked less than 24 h ago, starting on the bridge");
+            let why = if always { "\"always use the bridge\" is on" } else { "Direct was blocked less than 24 h ago" };
+            log::info!("Tor: starting on a bridge: {why}");
         }
 
         // A power loss mid-write can leave a state file (guards, intro points) that arti refuses on every start, and the onion service then never
@@ -530,7 +531,7 @@ enum Hop {
     Paused,
 }
 
-/// arti runs over the configured bridge (Direct was blocked). Shown in the UI; never set back within a process.
+/// arti runs over a bridge (Direct was blocked, or `always`). Shown in the UI; never set back within a process.
 static BRIDGE_IN_USE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// File in arti's state dir. Its mtime is when Direct last failed to reach Tor while the device had a network.
@@ -562,7 +563,7 @@ fn bridge_choices() -> usize {
     PT_SETUP.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map_or(1, |pt| pt.choices.len().max(1))
 }
 
-/// arti is running over the configured bridge because Direct was blocked.
+/// arti is running over a bridge.
 pub fn bridge_in_use() -> bool {
     BRIDGE_IN_USE.load(std::sync::atomic::Ordering::SeqCst)
 }

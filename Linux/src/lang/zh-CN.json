@@ -482,7 +482,7 @@
   "Sans": "无衬线",
   "Serif": "衬线",
   "Monospace": "等宽",
-  "Now: using the bridge, Tor was blocked.": "当前：正在使用网桥，Tor 曾被封锁。",
+  "Now: using a bridge.": "当前：正在使用网桥。",
   "Now: Direct.": "当前：直连。",
   "Save bridges": "保存网桥",
   "Tor connection applies after a restart.": "Tor 连接设置将在重启后生效。",

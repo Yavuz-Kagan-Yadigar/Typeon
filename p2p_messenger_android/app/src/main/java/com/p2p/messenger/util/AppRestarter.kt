@@ -19,14 +19,13 @@ import com.p2p.messenger.R
  */
 object AppRestarter {
     fun restart(context: Context) {
-        val packageManager = context.packageManager
-        val intent = packageManager.getLaunchIntentForPackage(context.packageName) ?: return
-        val component = intent.component ?: return
-        val restartIntent = Intent.makeRestartActivityTask(component)
-        // A background start (service path) can be blocked on API 29+; it must
-        // not crash the restart, and the exit waits so the task can start.
-        try { context.startActivity(restartIntent) } catch (e: Exception) { com.p2p.messenger.util.Log.w("AppRestarter", "startActivity: ${e.message}") }
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ Runtime.getRuntime().exit(0) }, 400)
+        val intent = Intent(context, RestartActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .putExtra(RestartActivity.EXTRA_PID, android.os.Process.myPid())
+        // A background start (service path) can be blocked on API 29+. It must not crash the restart.
+        try { context.startActivity(intent) } catch (e: Exception) { com.p2p.messenger.util.Log.w("AppRestarter", "startActivity: ${e.message}") }
+        // RestartActivity kills this process. This is the fallback when it could not start: the exit must still happen.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ Runtime.getRuntime().exit(0) }, 3000)
     }
 
     /**

@@ -123,7 +123,7 @@
     <string name="action_tor_mode">Change</string>
     <string name="tor_mode_unavailable">Not available in this build</string>
     <string name="tor_state_direct">Now: Direct</string>
-    <string name="tor_state_bridge">Now: using the bridge, Tor was blocked</string>
+    <string name="tor_state_bridge">Now: using a bridge</string>
     <string name="msg_tor_bridges_help">A box left empty uses Tor\'s built-in public bridges. Get your own at https://bridges.torproject.org/options</string>
     <string name="lbl_tor_always_bridge">Always use the bridge</string>
     <string name="msg_tor_always_bridge">Never try Direct first. Use this where using Tor itself is risky: the network then never sees a Direct Tor connection from this device. Uses more battery and data.</string>

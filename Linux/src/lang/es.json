@@ -482,7 +482,7 @@
  "Sans": "Sans",
  "Serif": "Serif",
  "Monospace": "Monoespaciada",
- "Now: using the bridge, Tor was blocked.": "Ahora: usando un puente, porque Tor estaba bloqueado.",
+ "Now: using a bridge.": "Ahora: usando un puente.",
  "Now: Direct.": "Ahora: Directa.",
  "Save bridges": "Guardar puentes",
  "Tor connection applies after a restart.": "El cambio de conexión Tor se aplica tras reiniciar.",

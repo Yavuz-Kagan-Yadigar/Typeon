@@ -482,7 +482,7 @@
  "Sans": "Sans",
  "Serif": "Serif",
  "Monospace": "Monospace",
- "Now: using the bridge, Tor was blocked.": "अभी: ब्रिज इस्तेमाल हो रहा है, क्योंकि Tor ब्लॉक था।",
+ "Now: using a bridge.": "अभी: ब्रिज इस्तेमाल हो रहा है।",
  "Now: Direct.": "अभी: सीधा।",
  "Save bridges": "ब्रिज सहेजें",
  "Tor connection applies after a restart.": "Tor कनेक्शन दोबारा शुरू होने के बाद लागू होगा।",

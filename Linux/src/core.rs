@@ -179,7 +179,7 @@ pub fn tor_transport_available() -> bool {
     api::tor_transport_available("")
 }
 
-/// Tor runs over the configured bridge because Direct was blocked.
+/// Tor runs over a bridge.
 pub fn tor_bridge_in_use() -> bool {
     api::tor_bridge_in_use()
 }

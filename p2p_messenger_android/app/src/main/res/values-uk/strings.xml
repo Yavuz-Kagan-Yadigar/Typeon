@@ -121,7 +121,7 @@
     <string name="action_tor_mode">Змінити</string>
     <string name="tor_mode_unavailable">Недоступно в цій збірці</string>
     <string name="tor_state_direct">Зараз: напряму</string>
-    <string name="tor_state_bridge">Зараз: використовується міст, бо Tor було заблоковано</string>
+    <string name="tor_state_bridge">Зараз: використовується міст</string>
     <string name="msg_tor_bridges_help">Для порожнього поля використовуються вбудовані публічні мости Tor. Власні мости можна отримати на https://bridges.torproject.org/options</string>
     <string name="lbl_tor_always_bridge">Завжди використовувати місток</string>
     <string name="msg_tor_always_bridge">Пряме підключення не пробується. Увімкніть, якщо саме використання Tor небезпечне: мережа ніколи не побачить прямого підключення до Tor з цього пристрою. Витрачає більше заряду й трафіку.</string>

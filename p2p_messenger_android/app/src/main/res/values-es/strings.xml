@@ -119,7 +119,7 @@
     <string name="action_tor_mode">Cambiar</string>
     <string name="tor_mode_unavailable">No disponible en esta versión</string>
     <string name="tor_state_direct">Ahora: Directa</string>
-    <string name="tor_state_bridge">Ahora: usando un puente, porque Tor estaba bloqueado</string>
+    <string name="tor_state_bridge">Ahora: usando un puente</string>
     <string name="msg_tor_bridges_help">Un cuadro vacío usa los puentes públicos integrados de Tor. Consigue los tuyos en https://bridges.torproject.org/options</string>
     <string name="lbl_tor_always_bridge">Usar siempre el puente</string>
     <string name="msg_tor_always_bridge">Nunca intenta primero la conexión directa. Actívalo donde usar Tor ya sea un riesgo: la red nunca verá una conexión directa a Tor desde este dispositivo. Gasta más batería y datos.</string>

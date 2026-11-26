@@ -57,6 +57,7 @@
 
                         <TextView
                             android:id="@+id/display_name_value"
+                            android:textAlignment="viewStart"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:textIsSelectable="true"
@@ -69,6 +70,7 @@
 
                         <TextView
                             android:id="@+id/identity_code_value"
+                            android:textAlignment="viewStart"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:fontFamily="monospace"

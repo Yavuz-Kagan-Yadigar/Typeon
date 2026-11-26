@@ -578,7 +578,7 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
         let now = if !core::tor_transport_available() {
             t("Not available in this build")
         } else if core::tor_bridge_in_use() {
-            t("Now: using the bridge, Tor was blocked.")
+            t("Now: using a bridge.")
         } else {
             t("Now: Direct.")
         };
@@ -604,7 +604,7 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
         .xalign(0.0)
         .build();
     hint.add_css_class("dim-label");
-    let editor = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
+    let editor = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).build();
     editor.append(&hint);
     let bridge_box = |title: &str, stored: &str| {
         let label = gtk::Label::builder().label(title).xalign(0.0).margin_top(6).build();
@@ -621,6 +621,8 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
             .build();
         let scroll = gtk::ScrolledWindow::builder().child(&text).min_content_height(90).build();
         scroll.add_css_class("card");
+        // Clips the white text area to the rounded corners.
+        scroll.set_overflow(gtk::Overflow::Hidden);
         editor.append(&label);
         editor.append(&scroll);
         buffer
@@ -645,7 +647,6 @@ fn tor_bridges_group(app: &Rc<App>) -> adw::PreferencesGroup {
         .title(t("Always use the bridge"))
         .subtitle(t("Never try Direct first. Use this where using Tor itself is risky. Uses more battery and data."))
         .active(app.prefs.borrow().tor_always_bridge)
-        .margin_top(12)
         .build();
     {
         let app = app.clone();

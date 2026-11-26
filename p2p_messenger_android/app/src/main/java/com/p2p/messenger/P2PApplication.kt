@@ -42,8 +42,12 @@ class P2PApplication : Application() {
         }
     }
 
+    private fun processName(): String = Application.getProcessName() ?: ""
+
     override fun onCreate() {
         super.onCreate()
+        // The short-lived restart process (util/RestartActivity) must not touch files, the core or the service.
+        if (processName().endsWith(com.p2p.messenger.util.RestartActivity.PROCESS_SUFFIX)) return
         // A logout / account delete / revoke left the marker: wipe again before anything opens a file.
         com.p2p.messenger.util.LocalWipe.finishPending(this)
         if (!BuildConfig.DEBUG) try { P2PLib.hardenProcess() } catch (e: Throwable) {}
