@@ -23,9 +23,12 @@ import javax.crypto.spec.SecretKeySpec
  * cannot open them with the Keystore alone.
  *
  * Every blob [KeystoreCrypto] writes is sealed twice: first with this random 256-bit vault key (AES-GCM), then
- * with the Keystore key. The vault key itself is in `vault.enc`, sealed with a key derived from the app password
- * (Argon2id, [P2PLib.argon2idKey]) and then with its own Keystore key. A root user who can use the app's Keystore
- * keys still needs the password, and has to guess it at Argon2id cost per try.
+ * with the Keystore key. The vault key itself is in `vault2.enc`, sealed with a key derived from the app password
+ * (Argon2id, [P2PLib.argon2idKey], then HMAC-SHA256 with a Keystore key, [KeystoreCrypto.keystoreHmac]) and then with
+ * its own Keystore key. The HMAC step puts the Keystore inside the password derivation: the outer Keystore layer opens
+ * without the password, so without that step a root user could take the inner ciphertext once and guess the password
+ * offline on a GPU. Now every guess needs an Argon2id run and a Keystore call on this phone.
+ * Limit: a short numeric password is still found on the phone in days. Only a longer password stops that.
  *
  * The vault key lives only in this process's memory. After a reboot or a process kill, nothing can be decrypted
  * until the password is entered again: the database stays closed and no messages are received. [showUnlockPrompt]
@@ -34,10 +37,12 @@ import javax.crypto.spec.SecretKeySpec
  * Limit: an attacker with root while the app is unlocked can read the key from process memory. No app-level
  * measure stops that.
  *
- * File: `salt(16) || m_kib(4) || t(4) || keystore( iv(12) || AES-GCM_kek(vaultKey), aad = header )`.
+ * File: `salt(16) || m_kib(4) || t(4) || keystore( iv(12) || AES-GCM_kek(vaultKey), aad = header )`, with
+ * `kek = HMAC_keystore(Argon2id(password, salt, m_kib, t))`. The file was `vault.enc` before the HMAC step; such an
+ * install counts as pre-vault and is wiped when the first password is set (no migration, see [create]).
  */
 object Vault {
-    private const val FILE = "vault.enc"
+    private const val FILE = "vault2.enc"
     private const val SALT_LEN = 16
     private const val HEADER_LEN = SALT_LEN + 8
     /** 64 MiB, 3 passes: about a second on a slow phone, and memory-hard against GPU guessing. */
@@ -130,15 +135,14 @@ object Vault {
     }
 
     private fun hasPreVaultState(app: Context): Boolean =
-        listOf("identity_secret.enc", "skipped_key_enc.enc").any { File(app.filesDir, it).exists() }
+        listOf("identity_secret.enc", "skipped_key_enc.enc", "vault.enc").any { File(app.filesDir, it).exists() }
 
     private fun header(salt: ByteArray, mKib: Int, t: Int): ByteArray =
         ByteBuffer.allocate(HEADER_LEN).put(salt).putInt(mKib).putInt(t).array()
 
     private fun write(app: Context, password: String, vaultKey: ByteArray): Boolean {
         val salt = ByteArray(SALT_LEN).also { SecureRandom().nextBytes(it) }
-        val kek = P2PLib.argon2idKey(password, salt, M_KIB, T_COST)
-        if (kek.size != 32) return false
+        val kek = passwordKey(password, salt, M_KIB, T_COST, create = true) ?: return false
         return try {
             val header = header(salt, M_KIB, T_COST)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -155,6 +159,20 @@ object Vault {
         }
     }
 
+    /** `HMAC_keystore(Argon2id(password))`, see the class note. `null` on bad input or a Keystore failure. */
+    private fun passwordKey(password: String, salt: ByteArray, mKib: Int, t: Int, create: Boolean): ByteArray? {
+        val stretched = P2PLib.argon2idKey(password, salt, mKib, t)
+        if (stretched.size != 32) return null
+        return try {
+            KeystoreCrypto.keystoreHmac(stretched, KeystoreCrypto.ALIAS_VAULT_KDF, create).takeIf { it.size == 32 }
+        } catch (e: Exception) {
+            Log.e("Vault", "Keystore HMAC failed", e)
+            null
+        } finally {
+            stretched.fill(0)
+        }
+    }
+
     private fun read(app: Context, password: String): ByteArray? {
         val bytes = try { file(app).readBytes() } catch (e: Exception) { return null }
         if (bytes.size <= HEADER_LEN) return null
@@ -162,8 +180,7 @@ object Vault {
         val salt = ByteArray(SALT_LEN).also { buf.get(it) }
         val mKib = buf.int
         val t = buf.int
-        val kek = P2PLib.argon2idKey(password, salt, mKib, t)
-        if (kek.size != 32) return null
+        val kek = passwordKey(password, salt, mKib, t, create = false) ?: return null
         return try {
             val inner = KeystoreCrypto.keystoreDecrypt(bytes.copyOfRange(HEADER_LEN, bytes.size), KeystoreCrypto.ALIAS_VAULT)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")

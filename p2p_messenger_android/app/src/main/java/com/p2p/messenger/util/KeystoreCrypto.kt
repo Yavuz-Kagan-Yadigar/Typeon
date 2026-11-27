@@ -40,8 +40,10 @@ object KeystoreCrypto {
      *  `DeviceSync`, and it is included in the recovery file. If they shared one alias, "reset local history" would also make the server
      *  archive unreadable. */
     const val ALIAS_ARCHIVE_ROOT = "p2p_messenger_archive_root_wrap_key"
-    /** Alias of the key that wraps `vault.enc` (see [Vault]). */
+    /** Alias of the key that wraps `vault2.enc` (see [Vault]). */
     const val ALIAS_VAULT = "p2p_messenger_vault_wrap_key"
+    /** Alias of the HMAC key in the vault's password derivation (see [Vault] and [keystoreHmac]). */
+    const val ALIAS_VAULT_KDF = "p2p_messenger_vault_kdf_key"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val GCM_TAG_LENGTH_BITS = 128
 
@@ -49,22 +51,25 @@ object KeystoreCrypto {
         KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
     }
 
-    /** Returns the Keystore key for the given alias. If it does not exist, it is created (in StrongBox if available, otherwise in the TEE). */
+    /** Returns the Keystore key for the given alias. If it does not exist, it is created (in StrongBox if available, otherwise in the TEE).
+     *  `hmac`: an HMAC-SHA256 key (purpose sign) instead of an AES-GCM key. */
     @Synchronized
-    private fun getOrCreateKey(alias: String): SecretKey {
+    private fun getOrCreateKey(alias: String, hmac: Boolean = false): SecretKey {
         (keyStore.getKey(alias, null) as? SecretKey)?.let { return it }
         // an existing alias that is unusable must not be silently replaced
         // (everything wrapped under it would become unreadable).
         if (keyStore.containsAlias(alias)) throw java.security.GeneralSecurityException("keystore key unusable: $alias")
 
-        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val baseSpec = KeyGenParameterSpec.Builder(
-            alias,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
+        val keyGenerator = KeyGenerator.getInstance(
+            if (hmac) KeyProperties.KEY_ALGORITHM_HMAC_SHA256 else KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+        val baseSpec = if (hmac) {
+            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN).setKeySize(256)
+        } else {
+            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+        }
 
         // StrongBox (a separate security chip) is tried first, for stronger isolation. `setIsStrongBoxBacked` was added in API 28, and this
         // app's minSdk is 26, so the API level is checked first (otherwise there is a NoSuchMethodError risk on API 26 and 27). If the device or
@@ -92,7 +97,7 @@ object KeystoreCrypto {
     /** Account wipe, see [LocalWipe]. */
     @Synchronized
     fun deleteAllKeys() {
-        for (alias in listOf(ALIAS_IDENTITY, ALIAS_HISTORY, ALIAS_SKIPPED_KEYS, ALIAS_ARCHIVE_ROOT, ALIAS_VAULT)) {
+        for (alias in listOf(ALIAS_IDENTITY, ALIAS_HISTORY, ALIAS_SKIPPED_KEYS, ALIAS_ARCHIVE_ROOT, ALIAS_VAULT, ALIAS_VAULT_KDF)) {
             try { keyStore.deleteEntry(alias) } catch (e: Exception) { }
         }
     }
@@ -124,13 +129,26 @@ object KeystoreCrypto {
         }
     }
 
-    /** The Keystore layer alone: `[12-byte IV][ciphertext+tag]`. Only [Vault] uses it directly, for `vault.enc`. */
+    /** The Keystore layer alone: `[12-byte IV][ciphertext+tag]`. Only [Vault] uses it directly, for `vault2.enc`. */
     internal fun keystoreEncrypt(plaintext: ByteArray, alias: String): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(alias))
         val iv = cipher.iv
         val ciphertext = cipher.doFinal(plaintext)
         return iv + ciphertext
+    }
+
+    /**
+     * HMAC-SHA256 of [data] with the Keystore HMAC key [alias]. The key never leaves the Keystore, so a value made with it
+     * can only be computed on this phone, one Keystore call at a time. `create`: make the key when it is missing (a new
+     * password); otherwise a missing key fails, like [keystoreDecrypt].
+     */
+    internal fun keystoreHmac(data: ByteArray, alias: String, create: Boolean): ByteArray {
+        val key = if (create) getOrCreateKey(alias, hmac = true) else
+            keyStore.getKey(alias, null) as? SecretKey ?: throw java.security.KeyStoreException("Keystore key missing: $alias")
+        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac.init(key)
+        return mac.doFinal(data)
     }
 
     /** Decodes the `[iv][ciphertext+tag]` format produced by [keystoreEncrypt]. */

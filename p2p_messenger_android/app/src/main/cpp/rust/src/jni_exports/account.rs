@@ -396,13 +396,30 @@ pub(crate) fn tamper_signs() -> String {
 }
 
 /// Library names of hooking frameworks in a `/proc/self/maps` text. Typeon itself loads none of them.
+///
+/// A hit kills the process and refuses the unlock, so a false one locks the user out. Only the path field of each line
+/// is read, cut into words at every non-alphanumeric character, and a word must BE the name (or `lib` + the name); the
+/// `prefix` names also match the start of a word (`XposedBridge`, `EdXposed`). A substring anywhere in the line matched
+/// unrelated paths (`com.example.fridaynotes`).
 pub(crate) fn maps_tamper_signs(maps: &str) -> Vec<&'static str> {
-    const SIGNS: [(&str, &str); 7] = [
-        ("frida", "frida"), ("gum-js", "frida"), ("linjector", "frida"),
-        ("xposed", "xposed"), ("lspd", "xposed"), ("edxp", "xposed"), ("substrate", "substrate"),
+    // (word, prefix match, reported name)
+    const SIGNS: [(&str, bool, &str); 6] = [
+        ("frida", false, "frida"), ("linjector", false, "frida"),
+        ("xposed", true, "xposed"), ("lspd", false, "xposed"), ("edxp", true, "xposed"), ("substrate", false, "substrate"),
     ];
-    let lower = maps.to_ascii_lowercase();
-    let mut out: Vec<&'static str> = SIGNS.iter().filter(|(needle, _)| lower.contains(needle)).map(|(_, name)| *name).collect();
-    out.dedup();
+    let mut out: Vec<&'static str> = Vec::new();
+    for line in maps.lines() {
+        // Fields: address, perms, offset, dev, inode, path. Anonymous mappings have no path.
+        let Some(path) = line.split_whitespace().nth(5) else { continue };
+        let path = path.to_ascii_lowercase();
+        for word in path.split(|c: char| !c.is_ascii_alphanumeric()) {
+            let word = word.strip_prefix("lib").filter(|w| !w.is_empty()).unwrap_or(word);
+            for (name, prefix, report) in SIGNS {
+                if (word == name || (prefix && word.starts_with(name))) && !out.contains(&report) {
+                    out.push(report);
+                }
+            }
+        }
+    }
     out
 }

@@ -1538,8 +1538,10 @@ impl P2PCore {
                 let sender = e.sender_identity_id.clone().unwrap_or_else(|| own_id.clone());
                 if file_present(self) || (file.is_none() && self.message_exists_in_chat(&e.message_id, Some(gid.as_str()), "")) {
                     // Our sibling holds the author's own copy: a relayed row here is verified too.
-                    if file.is_none() && e.relayed_by.is_none() {
-                        self.verify_group_row(&gid, &e.message_id, (!e.text.is_empty()).then_some(e.text.as_str()));
+                    // An empty text tells nothing (no text known), so the marker stays. The entry carries no edited
+                    // flag: the sibling's text is the author's, shown without the "(edited)" label.
+                    if file.is_none() && e.relayed_by.is_none() && !e.text.is_empty() {
+                        self.verify_group_row(&gid, &e.message_id, Some((e.text.as_str(), false)));
                     }
                     (true, false)
                 } else if let Some(f) = file {

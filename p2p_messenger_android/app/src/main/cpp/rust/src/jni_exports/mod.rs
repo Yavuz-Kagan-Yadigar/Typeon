@@ -354,7 +354,10 @@ mod app_password_key_tests {
         let clean = "7f00-7f10 r-xp 0 fd:01 1 /data/app/x/lib/arm64/libp2p_messenger.so\n7f20-7f30 r--p 0 fd:01 2 /system/lib64/libc.so\n";
         assert!(maps_tamper_signs(clean).is_empty());
         assert_eq!(maps_tamper_signs("7f00 r-xp 0 0 0 /data/local/tmp/re.frida.server/frida-agent-64.so"), vec!["frida"]);
-        assert_eq!(maps_tamper_signs("7f00 r-xp 0 0 0 /data/adb/lspd/lib.so\n7f01 /system/framework/XposedBridge.jar"), vec!["xposed"]);
+        assert_eq!(maps_tamper_signs("7f00 r-xp 0 0 0 /data/adb/lspd/lib.so\n7f01 r--p 0 0 0 /system/framework/XposedBridge.jar"), vec!["xposed"]);
+        assert_eq!(maps_tamper_signs("7f00 r-xp 0 fd:01 9 /system/lib64/libsubstrate.so"), vec!["substrate"]);
+        // Unrelated paths that merely contain a name.
+        assert!(maps_tamper_signs("7f00 r--p 0 fd:01 3 /data/app/com.example.fridaynotes/base.apk\n7f01 r--p 0 0 0 /data/data/x/lspdf.db").is_empty());
     }
 }
 

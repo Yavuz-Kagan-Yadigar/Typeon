@@ -425,10 +425,11 @@ impl P2PCore {
                     .map(|id| self.message_exists_in_chat(id, Some(gid.as_str()), ""))
                     .unwrap_or(false);
                 if already_archived {
-                    // The author's own copy (its pairwise session): a copy another member relayed earlier is verified now, and its
-                    // text replaced when it differs. No live event: an open chat shows the change at its next load.
+                    // The author's own copy (its pairwise session): a copy another member relayed earlier is verified now. Its
+                    // text and its edited/deleted flags (the relayer's word) are replaced. No live event: an open chat shows the
+                    // change at its next load.
                     if let Some(mid) = group_message_local_id.as_deref() {
-                        self.verify_group_row(&gid, mid, Some(&text));
+                        self.verify_group_row(&gid, mid, Some((&text, false)));
                     }
                     self.ack_text_packet(&peer_fp, &message_id, group_message_local_id.as_deref());
                     return Ok(serde_json::json!({"type": "noop"}).to_string());
@@ -781,7 +782,7 @@ impl P2PCore {
                                         if m.is_deleted && local.as_ref().map_or(false, |(_, deleted, _)| !*deleted) {
                                             self.apply_delete_to_archive(Some(gid.as_str()), "", &mid);
                                         }
-                                        self.verify_group_row(gid, &mid, (!m.is_deleted).then_some(m.text.as_str()));
+                                        self.verify_group_row(gid, &mid, (!m.is_deleted).then_some((m.text.as_str(), m.is_edited)));
                                     }
                                     let (text, deleted, edited) = self.group_row_text(gid, &mid)?;
                                     return Some(serde_json::json!({

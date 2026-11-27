@@ -1334,8 +1334,9 @@ impl P2PCore {
 
     /// Is the carrier of a `Message` the device its header names (`sender_fp`)? Packets carry no signature, so this is what stops a
     /// stranger acting under a contact's fingerprint before decryption can tell. `Some(true)`: proven (the PeerId known for the device,
-    /// or a server mailbox only it fills, see `server_item_sender`). `Some(false)`: another carrier. `None`: unknown (no PeerId known
-    /// for the device yet, or `raw` not given for a server item).
+    /// or a server mailbox only it fills, see `server_item_sender`). `Some(false)`: another carrier while a known PeerId of the device is
+    /// connected. `None`: unknown (no PeerId known for the device yet, another PeerId while the known ones are offline, or `raw`
+    /// not given for a server item).
     pub(crate) fn carrier_is_sender(&self, source: Option<PeerId>, raw: Option<&[u8]>, sender_fp: &str) -> Option<bool> {
         let Some(pid) = source else {
             return raw.and_then(|r| self.server_item_sender(r, sender_fp));
@@ -1348,7 +1349,15 @@ impl P2PCore {
         if known.is_empty() {
             return None;
         }
-        Some(known.contains(&pid))
+        if known.contains(&pid) {
+            return Some(true);
+        }
+        // Another PeerId. While one the device is known by is connected, this carrier is someone else. Otherwise the device
+        // may have a new libp2p key: it is unproven (a few trial decrypts per window, `unproven_fails_blocked`), so its
+        // AddressAnnounce can still decrypt and replace the stored address. `Some(false)` here dropped that announce too,
+        // and the direct path never came back.
+        let old_connected = self.swarm.as_ref().map_or(false, |s| known.iter().any(|p| s.is_connected(p)));
+        if old_connected { Some(false) } else { None }
     }
 
     /// See `early_packets`. Buffers a packet that arrives before the ratchet exists. Limited to `MAX_EARLY_PACKETS_PER_PEER` per peer (the oldest is dropped),

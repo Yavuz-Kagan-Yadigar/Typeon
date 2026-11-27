@@ -505,12 +505,11 @@ impl ServerCore {
     pub(super) fn handle_anonymous(&mut self, peer: PeerId, req: ServerRequest) -> ServerResponse {
         let now = now_ms();
         let mono = mono_ms();
-        // One global budget for every anonymous connection together: PeerIds are free, so a per-peer limit alone does
-        // not bound the work.
-        if !anon_bucket_take(&mut self.anon_bucket, mono) {
-            self.stats.rejected += 1;
-            return ServerResponse::Err(ServerErrorCode::RateLimited);
-        }
+        // One global budget for the authorised work of every anonymous connection together: PeerIds are free, so a
+        // per-peer limit alone does not bound it. Taken only once the secret checked out (`take_anon_budget`): junk
+        // with unknown boxes or wrong secrets would otherwise use it up and refuse every real deposit on the server.
+        // ponytail: a refused request still costs one hash and one indexed lookup, bounded only per connection
+        // (`check_rate`) and by the connection limits; add a miss budget that drops connections if floods show up.
         let limits = self.config.limits.clone();
         match req {
             ServerRequest::Deposit { mailbox, deposit_secret, cancel_hash, sealed } => {
@@ -526,6 +525,9 @@ impl ServerCore {
                     self.stats.rejected += 1;
                     return ServerResponse::Err(ServerErrorCode::UnknownMailbox);
                 };
+                if !self.take_anon_budget(mono) {
+                    return ServerResponse::Err(ServerErrorCode::RateLimited);
+                }
                 // Per box, repeats included: a client stuck re-depositing the same envelope (the old handshake storm,
                 // about one a second) is stopped here, whatever PeerId it comes from.
                 // This connection's own share comes first, so one sender cannot use up the box for the others.
@@ -593,6 +595,8 @@ impl ServerCore {
                     return ServerResponse::Err(ServerErrorCode::BadDirection);
                 }
                 if self.store.cancel_deposit(&mailbox, seq, &cancel_secret) > 0 {
+                    // Done already (one DELETE): it only counts toward the budget of later requests.
+                    let _ = self.take_anon_budget(mono);
                     self.mail_recount_due = true;
                     self.note_anon_done(peer, mono);
                     info!("Sender withdrew a packet");
@@ -601,6 +605,15 @@ impl ServerCore {
             }
             _ => ServerResponse::Err(ServerErrorCode::BadDirection),
         }
+    }
+
+    /// One token of the global anonymous budget (`ANON_BUCKET_CAP`), for a request whose secret checked out.
+    fn take_anon_budget(&mut self, mono: u64) -> bool {
+        let ok = anon_bucket_take(&mut self.anon_bucket, mono);
+        if !ok {
+            self.stats.rejected += 1;
+        }
+        ok
     }
 
     /// See `UNENROLLED_GRACE_MS`: a connection whose deposit or cancel went through is not idle. A refused one (junk,

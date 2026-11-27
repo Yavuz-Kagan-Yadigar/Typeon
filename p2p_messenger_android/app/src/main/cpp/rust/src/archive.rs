@@ -560,28 +560,32 @@ impl P2PCore {
         ).ok().flatten()
     }
 
-    /// The author's own copy of a group row arrived. A relayed row is verified now: `author_text` (when given) replaces its text
-    /// if it differs, since the author's copy wins. A relayed row already deleted or edited only loses its marker: a late
-    /// original copy must not undelete it or undo the edit. A row that is not relayed is left as it is.
-    pub(crate) fn verify_group_row(&mut self, group_id: &str, message_id: &str, author_text: Option<&str>) {
+    /// The author's own copy of a group row arrived. A relayed row is verified now.
+    ///
+    /// `author`: the author's text and edited flag. Everything the relayer said about the row (its text, and its
+    /// edited and deleted flags) is only the relayer's word, so the author's copy replaces all of it: a relayer that
+    /// marked a row edited or deleted cannot keep its own text, or hide the message, once the author's copy is here.
+    /// `None`: the author's own Edit or Delete was just applied to the row (an authenticated change), so only the
+    /// marker goes. That Edit or Delete clears the marker first, so a late original copy then leaves the row alone.
+    /// A row that is not relayed is left as it is.
+    pub(crate) fn verify_group_row(&mut self, group_id: &str, message_id: &str, author: Option<(&str, bool)>) {
         if self.group_row_relayed_by(group_id, message_id).is_none() {
             return;
         }
         let Some(key) = self.history_key else { return };
-        let replace = author_text.filter(|t| self.group_row_text(group_id, message_id)
-            .map_or(true, |(stored, deleted, edited)| !deleted && !edited && stored != *t));
-        let sealed = match replace {
-            Some(t) => match seal_with(&key, t.as_bytes()) {
-                Some(v) => Some(v),
+        let sealed = match author {
+            Some((t, edited)) => match seal_with(&key, t.as_bytes()) {
+                Some(v) => Some((v, edited)),
                 None => return,
             },
             None => None,
         };
         let Some(conn) = &self.db else { return };
         let done = match &sealed {
-            Some((blob, nonce)) => conn.execute(
-                "UPDATE messages SET encrypted_blob = ?1, nonce = ?2, relayed_by = NULL WHERE message_id = ?3 AND group_id = ?4",
-                params![blob, nonce.to_vec(), message_id, group_id],
+            Some(((blob, nonce), edited)) => conn.execute(
+                "UPDATE messages SET encrypted_blob = ?1, nonce = ?2, is_deleted = 0, is_edited = ?3, relayed_by = NULL
+                 WHERE message_id = ?4 AND group_id = ?5",
+                params![blob, nonce.to_vec(), *edited, message_id, group_id],
             ),
             None => conn.execute(
                 "UPDATE messages SET relayed_by = NULL WHERE message_id = ?1 AND group_id = ?2",
@@ -1411,10 +1415,12 @@ impl P2PCore {
     /// `held_tag`s and send times of the rows of a chat (`group_id`, else the
     /// 1:1 chat under `chat_key`) sent in `[after, before)`, newest first, at
     /// most `cap`. Index range on `idx_messages_*_sent`, no decryption.
+    /// A relayed group row (`relayed_by`) does not count as held: its author's answer sends it again and verifies it
+    /// (the held-row branch of `HistorySyncResponse`).
     pub(crate) fn held_tags(&self, chat_key: &str, group_id: Option<&str>, before: i64, after: i64, cap: usize) -> Vec<(u64, i64)> {
         let Some(conn) = &self.db else { return Vec::new() };
         let (cond, key) = match group_id {
-            Some(g) => ("group_id = ?1", g),
+            Some(g) => ("group_id = ?1 AND relayed_by IS NULL", g),
             None => ("peer_device_fingerprint = ?1 AND group_id IS NULL", chat_key),
         };
         let t = "COALESCE(NULLIF(sent_at_ms,0), timestamp)";

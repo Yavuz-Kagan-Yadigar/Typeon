@@ -239,10 +239,11 @@ impl ServerCore {
     /// server encrypts, decrypts and re-frames nothing.
     ///
     /// Limits: `CHUNKS_PER_MINUTE` per connection, and one global bucket for all chunk requests together
-    /// (`CHUNK_BUCKET_CAP`), since PeerIds are free. Both are in memory and run before any disk read. Refusals log
-    /// at debug only, so a request loop does not fill the journal.
+    /// (`CHUNK_BUCKET_CAP`), since PeerIds are free. Both run before any disk read. The global bucket is taken only for
+    /// a file that exists: requests for unknown ids would otherwise use it up and stop every real download. Refusals
+    /// log at debug only, so a request loop does not fill the journal.
     pub(super) fn serve_blob_get(&mut self, peer: PeerId, file_id: String, chunk_index: u32) -> ServerResponse {
-        if !self.check_rate(peer, true, 1) || !anon_bucket_take_with(&mut self.chunk_bucket, mono_ms(), CHUNK_BUCKET_CAP, CHUNK_REFILL_PER_MS) {
+        if !self.check_rate(peer, true, 1) {
             debug!("File chunk request rejected (rate limit)");
             self.stats.rejected += 1;
             return ServerResponse::Err(ServerErrorCode::RateLimited);
@@ -255,6 +256,11 @@ impl ServerCore {
         let Some(state) = self.store.blob_state(&file_id).filter(|s| s.complete) else {
             return ServerResponse::Err(ServerErrorCode::NotFound);
         };
+        if !anon_bucket_take_with(&mut self.chunk_bucket, mono_ms(), CHUNK_BUCKET_CAP, CHUNK_REFILL_PER_MS) {
+            debug!("File chunk request rejected (server-wide chunk budget)");
+            self.stats.rejected += 1;
+            return ServerResponse::Err(ServerErrorCode::RateLimited);
+        }
         // Touched once per download (chunk 0), not once per chunk, which would be a DB write per chunk.
         if chunk_index == 0 {
             self.store.blob_touch(&file_id, now_ms());

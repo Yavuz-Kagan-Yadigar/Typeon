@@ -1224,6 +1224,34 @@ mod recovery_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A relayer's edited or deleted flag does not survive the author's own copy: its text and flags are replaced, so a
+    /// forged "edited" text is not shown as the author's, and a forged deletion does not hide the message.
+    #[test]
+    fn author_copy_replaces_a_relayed_rows_flags() {
+        let dir = std::env::temp_dir().join(format!("typeon-relayflags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut me = core_on_disk(&dir);
+        let gid = "group-0123456789abcdef".to_string();
+        me.groups.insert(gid.clone(), Group::new(gid.clone(), "g".into(), "R".into(), 1));
+        let (edited, deleted, real_edit) = ("m-edited", "m-deleted", "m-real-edit");
+        for id in [edited, deleted, real_edit] {
+            me.archive_group_message(&gid, "A", "received", b"forged", Some(id), None, None, None, 5, Some("M")).unwrap();
+        }
+        me.mark_synced_message_edited(Some(&gid), "", edited);
+        me.apply_delete_to_archive(Some(&gid), "", deleted);
+        for id in [edited, deleted] {
+            me.verify_group_row(&gid, id, Some(("real", false)));
+            assert_eq!(me.group_row_text(&gid, id), Some(("real".to_string(), false, false)), "{id}");
+            assert_eq!(me.group_row_relayed_by(&gid, id), None);
+        }
+        // The author's own Edit clears the marker: its late original copy then leaves the edited text alone.
+        me.verify_group_row(&gid, real_edit, None);
+        me.verify_group_row(&gid, real_edit, Some(("original", false)));
+        assert_eq!(me.group_row_text(&gid, real_edit).map(|(t, ..)| t).as_deref(), Some("forged"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A device that said it is going offline (keepalive `bye`) is not
     /// dialed, even forced, for `RECONNECT_BACKOFF_MAX_MS`; then once per
     /// that interval until its connection clears the park mark.

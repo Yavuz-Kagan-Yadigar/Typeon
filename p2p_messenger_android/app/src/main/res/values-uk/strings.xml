@@ -352,7 +352,6 @@
     <string name="action_reject">Відхилити</string>
     <string name="msg_connection_not_complete">Підключення ще не завершено, спробуйте трохи пізніше</string>
     <!-- Формат назв полів навмисно не перекладається. -->
-    <string name="hint_manual_add_format" translatable="false">identity_id|device_fingerprint|nonce|device_name|rendezvous_node</string>
     <string name="title_add_manually">Додати вручну</string>
     <string name="action_add">Додати</string>
     <string name="msg_added">Додано</string>
