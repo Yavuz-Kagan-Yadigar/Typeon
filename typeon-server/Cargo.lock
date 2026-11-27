@@ -3960,7 +3960,7 @@ dependencies = [
 
 [[package]]
 name = "p2p_messenger_core"
-version = "9.0.0"
+version = "9.1.0-beta.1"
 dependencies = [
  "android_logger",
  "argon2",
@@ -6877,7 +6877,7 @@ dependencies = [
 
 [[package]]
 name = "typeon-server"
-version = "9.0.0"
+version = "9.1.0-beta.1"
 dependencies = [
  "android_logger",
  "ciborium",
