@@ -30,6 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ServerService : Service() {
 
+    override fun getResources(): android.content.res.Resources = LanguagePicker.localized(baseContext).resources
+
     companion object {
         private const val TAG = "TypeonServerSvc"
         private const val CHANNEL_ID = "TypeonServerChannel"

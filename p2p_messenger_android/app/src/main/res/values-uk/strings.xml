@@ -118,7 +118,7 @@
     <string name="tor_status_ready">Tor: готово — .onion-адресу активовано</string>
     <string name="tor_status_failed">Tor: помилка (дивіться журнал)</string>
     <string name="lbl_tor_connection">Мости Tor</string>
-    <string name="action_tor_mode">Змінити</string>
+    <string name="action_tor_save">Зберегти мости</string>
     <string name="tor_mode_unavailable">Недоступно в цій збірці</string>
     <string name="tor_state_direct">Зараз: напряму</string>
     <string name="tor_state_bridge">Зараз: використовується міст</string>

@@ -72,6 +72,7 @@ object SelfUpdate {
 
     /** Line under the beta switch: installed version, newest on GitHub, and what the core is doing (update.rs `status`). */
     fun statusText(context: Context): String {
+        @Suppress("NAME_SHADOWING") val context = com.p2p.messenger.util.LanguagePicker.localized(context)
         val installed = currentVersion(context)
         val raw = try { File(dir(context), "status").readText().trim() } catch (e: Exception) { "" }
         val github = raw.substringBefore(' ').ifEmpty { "-" }
@@ -112,6 +113,7 @@ object SelfUpdate {
 
     /** Android wants the user to confirm (first update, or no silent-install right). Ask through a notification. */
     fun askUser(context: Context, confirm: Intent, version: String) {
+        @Suppress("NAME_SHADOWING") val context = com.p2p.messenger.util.LanguagePicker.localized(context)
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL, context.getString(R.string.update_ready_title), NotificationManager.IMPORTANCE_DEFAULT))
         confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

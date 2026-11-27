@@ -77,7 +77,8 @@ class ServerActivity : AppCompatActivity() {
         setContentView(R.layout.activity_server)
         // Android 13+: without this the service notification, the only place
         // a start error is shown after a boot, is suppressed.
-        if (Build.VERSION.SDK_INT >= 33) {
+        // On the first start the language popup comes first (see guardLock).
+        if (Build.VERSION.SDK_INT >= 33 && (LanguagePicker.isChosen(this) || ServerLock.hasPin(this))) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 0)
         }
 
@@ -120,6 +121,19 @@ class ServerActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btn_new_invite).setOnClickListener { confirmRotateJoinCode() }
         findViewById<Button>(R.id.btn_copy_invite).setOnClickListener { copyInvite() }
+        findViewById<Button>(R.id.btn_language).apply {
+            text = getString(R.string.lbl_language) + ": " + LanguagePicker.labels[LanguagePicker.currentIndex(this@ServerActivity)]
+            setOnClickListener {
+                AlertDialog.Builder(this@ServerActivity)
+                    .setTitle(R.string.lbl_language)
+                    .setSingleChoiceItems(LanguagePicker.labels, LanguagePicker.currentIndex(this@ServerActivity)) { dialog, position ->
+                        dialog.dismiss()
+                        LanguagePicker.apply(this@ServerActivity, position)
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+        }
         findViewById<Button>(R.id.btn_pin).setOnClickListener { ServerLock.showSettings(this) }
         // Screen off locks at once; leaving the app locks after a short grace (ServerLock).
         androidx.core.content.ContextCompat.registerReceiver(
@@ -149,6 +163,18 @@ class ServerActivity : AppCompatActivity() {
         }
         content.visibility = android.view.View.INVISIBLE
         if (lockDialog?.isShowing == true) return
+        if (!ServerLock.hasPin(this) && !LanguagePicker.isChosen(this)) {
+            // First start: language, then the notification permission and the PIN.
+            lockDialog = LanguagePicker.showFirstRun(this) {
+                lockDialog = null
+                if (Build.VERSION.SDK_INT >= 33) {
+                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 0)
+                }
+                // Same language: no recreate, so nothing else would call this again.
+                handler.post { if (!isDestroyed) guardLock() }
+            }
+            return
+        }
         val open = {
             content.visibility = android.view.View.VISIBLE
             // The dialog is gone now, so one poll repaints the hidden screen.

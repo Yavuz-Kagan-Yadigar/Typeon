@@ -190,9 +190,7 @@ fn activate(application: &adw::Application) {
         return;
     }
     // Before the first translated text. Arabic also mirrors the layout.
-    if i18n::init(prefs::Prefs::load(&data_dir).language.as_deref()) == "ar" {
-        gtk::Widget::set_default_direction(gtk::TextDirection::Rtl);
-    }
+    i18n::apply(prefs::Prefs::load(&data_dir).language.as_deref());
 
     // Backstop for single-instance mode, which needs a session bus (GLib on
     // Windows falls back to non-unique without one). Two cores on one data

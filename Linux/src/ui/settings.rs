@@ -746,6 +746,7 @@ fn appearance_page(app: &Rc<App>) -> adw::PreferencesPage {
     let language = adw::ComboRow::builder().title(i18n::t("Language")).subtitle(i18n::t("Restart Typeon to apply.")).build();
     let mut names = vec![i18n::t("Follow system")];
     names.extend(i18n::LANGUAGES.iter().map(|(_, name)| *name));
+    language.add_prefix(&gtk::Image::from_icon_name("preferences-desktop-locale-symbolic"));
     language.set_model(Some(&gtk::StringList::new(&names)));
     let chosen = app.prefs.borrow().language.clone();
     let index = i18n::LANGUAGES.iter().position(|(code, _)| Some(*code) == chosen.as_deref());

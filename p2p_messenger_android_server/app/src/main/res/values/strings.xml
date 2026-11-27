@@ -93,4 +93,5 @@
     <string name="update_state_error">Last check failed: %1$s</string>
     <string name="update_ready_title">Update ready</string>
     <string name="update_ready_text">Tap to install Typeon Server %1$s</string>
+    <string name="lbl_language">Language</string>
 </resources>

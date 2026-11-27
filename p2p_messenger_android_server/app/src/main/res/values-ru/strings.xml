@@ -86,4 +86,5 @@
     <string name="update_state_error">Последняя проверка не удалась: %1$s</string>
     <string name="update_ready_title">Обновление готово</string>
     <string name="update_ready_text">Нажмите, чтобы установить Typeon Сервер %1$s</string>
+    <string name="lbl_language">Язык</string>
 </resources>

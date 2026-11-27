@@ -105,7 +105,7 @@
     <string name="tor_status_ready">Tor：就绪 — .onion 地址已生效</string>
     <string name="tor_status_failed">Tor：失败（请查看日志）</string>
     <string name="lbl_tor_connection">Tor 网桥</string>
-    <string name="action_tor_mode">更改</string>
+    <string name="action_tor_save">保存网桥</string>
     <string name="tor_mode_unavailable">此版本不可用</string>
     <string name="tor_state_direct">当前：直连</string>
     <string name="tor_state_bridge">当前：正在使用网桥</string>

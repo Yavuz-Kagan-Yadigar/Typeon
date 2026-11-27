@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 /// (code, name in its own language). The codes match the Android picker.
 pub const LANGUAGES: &[(&str, &str)] = &[
@@ -32,7 +32,8 @@ fn source(code: &str) -> Option<&'static str> {
     })
 }
 
-static TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+/// Swapped once more by the first-start language popup. Tables are leaked: at most two.
+static TABLE: RwLock<Option<&'static HashMap<String, String>>> = RwLock::new(None);
 
 /// The language of the desktop session, from names such as `ru_RU.UTF-8`.
 fn system_code(names: &[impl AsRef<str>]) -> &'static str {
@@ -41,7 +42,7 @@ fn system_code(names: &[impl AsRef<str>]) -> &'static str {
     LANGUAGES.iter().map(|(c, _)| *c).find(|c| c.split('-').next() == Some(base)).unwrap_or("en")
 }
 
-/// Call once, before the first widget. `chosen = None` follows the system.
+/// Call before the first widget. `chosen = None` follows the system.
 /// Returns the code in use.
 pub fn init(chosen: Option<&str>) -> String {
     let code = match chosen {
@@ -49,13 +50,22 @@ pub fn init(chosen: Option<&str>) -> String {
         None => system_code(&gtk::glib::language_names()).to_string(),
     };
     let table = source(&code).and_then(|json| serde_json::from_str(json).ok()).unwrap_or_default();
-    let _ = TABLE.set(table);
+    *TABLE.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(table)));
+    code
+}
+
+/// [`init`], plus the layout direction: Arabic mirrors the layout.
+pub fn apply(chosen: Option<&str>) -> String {
+    let code = init(chosen);
+    let direction = if code == "ar" { gtk::TextDirection::Rtl } else { gtk::TextDirection::Ltr };
+    gtk::Widget::set_default_direction(direction);
     code
 }
 
 /// Translates a fixed text.
 pub fn t(english: &'static str) -> &'static str {
-    TABLE.get().and_then(|table| table.get(english)).map(String::as_str).unwrap_or(english)
+    let table: Option<&'static HashMap<String, String>> = *TABLE.read().unwrap_or_else(|e| e.into_inner());
+    table.and_then(|table| table.get(english)).map(String::as_str).unwrap_or(english)
 }
 
 /// Puts `args` into `{}` (in order) or `{0}`, `{1}` (a translation can move

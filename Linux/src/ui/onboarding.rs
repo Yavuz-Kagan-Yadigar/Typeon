@@ -20,7 +20,7 @@ use gtk::glib;
 
 use crate::app::{self, App};
 use crate::core;
-use crate::i18n::t;
+use crate::i18n::{self, t};
 use crate::qr;
 use crate::secrets::{self, Vault};
 use crate::ui;
@@ -49,7 +49,11 @@ impl Drop for WipeOnDrop {
 /// drives it to the main window.
 pub fn start(app: &Rc<App>, host: &adw::ToastOverlay) {
     if !secrets::exists(&app.data_dir) {
-        host.set_child(Some(&framed(&welcome_page(app, host))));
+        if app.prefs.borrow().language.is_none() {
+            prompt_language(app, host);
+        } else {
+            host.set_child(Some(&framed(&welcome_page(app, host))));
+        }
         return;
     }
 
@@ -100,6 +104,39 @@ pub fn start(app: &Rc<App>, host: &adw::ToastOverlay) {
 }
 
 // --- route 1: first run ---
+
+/// The first popup: the language. The welcome page is built after it, in that language.
+fn prompt_language(app: &Rc<App>, host: &adw::ToastOverlay) {
+    let Some(window) = app.window() else { return };
+    let names: Vec<&str> = i18n::LANGUAGES.iter().map(|(_, name)| *name).collect();
+    let dropdown = gtk::DropDown::from_strings(&names);
+    dropdown.set_hexpand(true);
+    let system = i18n::init(None);
+    let index = i18n::LANGUAGES.iter().position(|(code, _)| *code == system).unwrap_or(0);
+    dropdown.set_selected(index as u32);
+    let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).build();
+    row.append(&gtk::Image::from_icon_name("preferences-desktop-locale-symbolic"));
+    row.append(&dropdown);
+
+    let dialog = adw::MessageDialog::new(Some(&window), Some(t("Language")), None);
+    dialog.set_extra_child(Some(&row));
+    dialog.add_response("ok", t("OK"));
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("ok");
+    dialog.set_response_appearance("ok", adw::ResponseAppearance::Suggested);
+    let (app, host) = (app.clone(), host.clone());
+    dialog.connect_response(None, move |_, _| {
+        let Some((code, _)) = i18n::LANGUAGES.get(dropdown.selected() as usize) else { return };
+        {
+            let mut prefs = app.prefs.borrow_mut();
+            prefs.language = Some(code.to_string());
+            prefs.save();
+        }
+        i18n::apply(Some(code));
+        host.set_child(Some(&framed(&welcome_page(&app, &host))));
+    });
+    dialog.present();
+}
 
 fn welcome_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
     let name_row = adw::EntryRow::builder().title(t("Device name")).build();

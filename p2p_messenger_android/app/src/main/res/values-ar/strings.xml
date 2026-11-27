@@ -108,7 +108,7 @@
     <string name="tor_status_ready">Tor: جاهز — عنوان .onion نشط</string>
     <string name="tor_status_failed">Tor: فشل (راجع السجل)</string>
     <string name="lbl_tor_connection">جسور Tor</string>
-    <string name="action_tor_mode">تغيير</string>
+    <string name="action_tor_save">حفظ الجسور</string>
     <string name="tor_mode_unavailable">غير متوفر في هذا الإصدار</string>
     <string name="tor_state_direct">الحالة الآن: مباشر</string>
     <string name="tor_state_bridge">الآن: يُستخدم جسر</string>

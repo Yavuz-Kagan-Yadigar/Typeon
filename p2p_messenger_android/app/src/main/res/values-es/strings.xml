@@ -116,7 +116,7 @@
     <string name="tor_status_ready">Tor: listo — la dirección .onion está activa</string>
     <string name="tor_status_failed">Tor: error (consulta el registro)</string>
     <string name="lbl_tor_connection">Puentes de Tor</string>
-    <string name="action_tor_mode">Cambiar</string>
+    <string name="action_tor_save">Guardar puentes</string>
     <string name="tor_mode_unavailable">No disponible en esta versión</string>
     <string name="tor_state_direct">Ahora: Directa</string>
     <string name="tor_state_bridge">Ahora: usando un puente</string>

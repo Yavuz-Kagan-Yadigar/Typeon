@@ -215,12 +215,12 @@ object Vault {
         try {
             val nm = app.getSystemService(NotificationManager::class.java)
             nm?.createNotificationChannel(NotificationChannel(
-                UNLOCK_CHANNEL_ID, app.getString(R.string.channel_unlock), NotificationManager.IMPORTANCE_HIGH))
+                UNLOCK_CHANNEL_ID, LanguagePicker.localized(app).getString(R.string.channel_unlock), NotificationManager.IMPORTANCE_HIGH))
             nm?.notify(UNLOCK_NOTIFICATION_ID, NotificationCompat.Builder(app, UNLOCK_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(app.getString(R.string.app_name))
-                .setContentText(app.getString(R.string.msg_tamper_closed))
-                .setStyle(NotificationCompat.BigTextStyle().bigText(app.getString(R.string.msg_tamper_closed)))
+                .setContentTitle(LanguagePicker.localized(app).getString(R.string.app_name))
+                .setContentText(LanguagePicker.localized(app).getString(R.string.msg_tamper_closed))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(LanguagePicker.localized(app).getString(R.string.msg_tamper_closed)))
                 .build())
         } catch (e: Exception) {}
         android.os.Process.killProcess(android.os.Process.myPid())
@@ -238,7 +238,7 @@ object Vault {
         if (isOpen() || !exists(app)) return
         val nm = app.getSystemService(NotificationManager::class.java) ?: return
         nm.createNotificationChannel(NotificationChannel(
-            UNLOCK_CHANNEL_ID, app.getString(R.string.channel_unlock), NotificationManager.IMPORTANCE_HIGH))
+            UNLOCK_CHANNEL_ID, LanguagePicker.localized(app).getString(R.string.channel_unlock), NotificationManager.IMPORTANCE_HIGH))
         val intent = Intent(app, MainActivity::class.java)
             // No CLEAR_TOP: it finished a password screen already open above MainActivity.
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -246,8 +246,8 @@ object Vault {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val n = NotificationCompat.Builder(app, UNLOCK_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(app.getString(R.string.app_name))
-            .setContentText(app.getString(R.string.msg_unlock_to_receive))
+            .setContentTitle(LanguagePicker.localized(app).getString(R.string.app_name))
+            .setContentText(LanguagePicker.localized(app).getString(R.string.msg_unlock_to_receive))
             .setCategory(NotificationCompat.CATEGORY_STATUS)  // ALARM made MIUI ring it like an alarm clock
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)

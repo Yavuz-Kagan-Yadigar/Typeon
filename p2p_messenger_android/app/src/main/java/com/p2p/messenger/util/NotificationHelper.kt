@@ -25,6 +25,7 @@ object NotificationHelper {
     const val MENTION_CHANNEL_ID = "P2PMentionsChannel"
 
     fun createChannel(context: Context) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(
             MESSAGE_CHANNEL_ID,
@@ -74,6 +75,7 @@ object NotificationHelper {
         }
 
     fun showMessageNotification(context: Context, peerDeviceFingerprint: String, text: String, messageId: String = "", alert: Boolean = true) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val displayName = resolveContactNameByFingerprint(peerDeviceFingerprint) ?: peerDeviceFingerprint.take(8)
         val intent = Intent(context, ChatActivity::class.java).apply {
             putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
@@ -93,6 +95,7 @@ object NotificationHelper {
     /** Shown once, when the primary device has revoked this device. The app data is deleted and the app returns to
      *  onboarding. This one-time notification explains WHY. Tapping it opens MainActivity (onboarding). */
     fun showDeviceRevokedNotification(context: Context) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -109,6 +112,7 @@ object NotificationHelper {
      * where the accept, reject or block dialog is shown.
      */
     fun showDeviceAlertNotification(context: Context, contactName: String, shortCode: String) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val intent = Intent(context, com.p2p.messenger.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -125,6 +129,7 @@ object NotificationHelper {
 
     /** A contact deleted their account. A one-time notification with the contact's name. */
     fun showAccountDeletedNotification(context: Context, peerDeviceFingerprint: String, displayName: String) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val name = displayName.ifBlank { resolveContactNameByFingerprint(peerDeviceFingerprint) ?: peerDeviceFingerprint.take(8) }
         val intent = Intent(context, ChatActivity::class.java).apply {
             putExtra(ChatActivity.EXTRA_PEER_DEVICE_FINGERPRINT, peerDeviceFingerprint)
@@ -138,6 +143,7 @@ object NotificationHelper {
     }
 
     fun showGroupMessageNotification(context: Context, groupId: String, senderIdentityId: String, text: String, messageId: String = "", mention: Boolean = false) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val groupName = resolveGroupName(groupId) ?: groupId.take(8)
         val senderName = resolveContactNameByIdentity(senderIdentityId) ?: senderIdentityId.take(8)
         val intent = Intent(context, GroupChatActivity::class.java).apply {
@@ -170,6 +176,7 @@ object NotificationHelper {
     /** "New drawing" alert for a shared whiteboard. Own slot, so it does not replace a message notification. With the
      *  "show messages" switch off, the body does not name the chat. */
     fun showWhiteboardNotification(context: Context, peerDeviceFingerprint: String, groupId: String) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val intent: Intent
         val chatName: String
         if (groupId.isNotEmpty()) {
@@ -248,6 +255,7 @@ object NotificationHelper {
 
     /** See `updateMessageNotificationIfShowing`. This is the group version. */
     fun updateGroupMessageNotificationIfShowing(context: Context, groupId: String, newText: String) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         val id = ("group:$groupId").hashCode()
         if (!isNotificationActive(context, id)) return
         // The sender's name is not carried by the live edit event (see the Rust `group_edit` event). The existing notification
@@ -271,6 +279,7 @@ object NotificationHelper {
     /** Consecutive messages from the same chat share one notification ID (a hash of conversationId). So they update one
      *  notification instead of stacking and filling the notification bar. */
     private fun show(context: Context, notificationId: Int, title: String, text: String, contentIntent: Intent, alert: Boolean = true, channel: String = MESSAGE_CHANNEL_ID, security: Boolean = false) {
+        @Suppress("NAME_SHADOWING") val context = LanguagePicker.localized(context)
         // Tapping the notification opens the app in the normal launcher way, not the specific chat. One back press also
         // leaves it.
         val isChat = contentIntent.component?.className.let {

@@ -120,7 +120,7 @@
     <string name="tor_status_ready">Tor: ready — .onion address is live</string>
     <string name="tor_status_failed">Tor: failed (see log)</string>
     <string name="lbl_tor_connection">Tor bridges</string>
-    <string name="action_tor_mode">Change</string>
+    <string name="action_tor_save">Save bridges</string>
     <string name="tor_mode_unavailable">Not available in this build</string>
     <string name="tor_state_direct">Now: Direct</string>
     <string name="tor_state_bridge">Now: using a bridge</string>

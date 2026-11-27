@@ -197,20 +197,13 @@ internal fun SettingsFragment.setupAppearanceControls(view: View) {
  *  and recreates all activities; the explicit recreate() below matches this
  *  screen's own font/color pickers for immediate visual feedback. */
 internal fun SettingsFragment.setupLanguageControl(view: View) {
-    val languageCodes = arrayOf("en", "tr", "es", "ru", "uk", "hi", "ar", "zh-CN")
-    val languageLabels = arrayOf("English", "Türkçe", "Español", "Русский", "Українська", "हिन्दी", "العربية", "简体中文")
-    val languageValueText = view.findViewById<TextView>(R.id.language_value)
-    fun currentLanguageIndex(): Int {
-        val current = AppCompatDelegate.getApplicationLocales().toLanguageTags()
-            .ifEmpty { resources.configuration.locales[0].language } // follows the system
-        return languageCodes.indexOfFirst { current.substringBefore('-') == it.substringBefore('-') }.coerceAtLeast(0)
-    }
-    languageValueText.text = languageLabels[currentLanguageIndex()]
+    val picker = com.p2p.messenger.util.LanguagePicker
+    view.findViewById<TextView>(R.id.language_value).text = picker.labels[picker.currentIndex(requireContext())]
     view.findViewById<Button>(R.id.btn_pick_language).setOnClickListener {
         AlertDialog.Builder(requireContext())
             .setTitle(R.string.lbl_language)
-            .setSingleChoiceItems(languageLabels, currentLanguageIndex()) { dialog, position ->
-                AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags(languageCodes[position]))
+            .setSingleChoiceItems(picker.labels, picker.currentIndex(requireContext())) { dialog, position ->
+                picker.apply(requireContext(), position)
                 dialog.dismiss()
                 requireActivity().recreate()
             }

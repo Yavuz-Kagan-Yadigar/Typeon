@@ -109,7 +109,7 @@
     <string name="tor_status_ready">Tor: hazır — .onion adresi aktif</string>
     <string name="tor_status_failed">Tor: başarısız (kayıtlara bakın)</string>
     <string name="lbl_tor_connection">Tor köprüleri</string>
-    <string name="action_tor_mode">Değiştir</string>
+    <string name="action_tor_save">Köprüleri kaydet</string>
     <string name="tor_mode_unavailable">Bu sürümde yok</string>
     <string name="tor_state_direct">Şu an: Doğrudan</string>
     <string name="tor_state_bridge">Şu an: köprü kullanılıyor</string>

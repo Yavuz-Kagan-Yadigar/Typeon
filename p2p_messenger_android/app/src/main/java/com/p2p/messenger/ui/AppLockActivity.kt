@@ -35,6 +35,11 @@ class AppLockActivity : AppCompatActivity() {
 
         createMode = !AppLock.hasPassword(this)
 
+        // First start: the language comes before every other prompt. An upgrade has a password already.
+        if (createMode && !com.p2p.messenger.util.LanguagePicker.isChosen(this)) {
+            com.p2p.messenger.util.LanguagePicker.showFirstRun(this)
+        }
+
         val title = findViewById<TextView>(R.id.txt_app_lock_title)
         val desc = findViewById<TextView>(R.id.txt_app_lock_desc)
         val password = findViewById<EditText>(R.id.edt_app_lock_password)

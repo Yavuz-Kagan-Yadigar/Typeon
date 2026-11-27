@@ -545,6 +545,8 @@ impl ChatView {
                 .halign(if current.mine { gtk::Align::End } else { gtk::Align::Start })
                 .can_target(false)
                 .build();
+            // Physical sides for `halign` and the start/end margin below.
+            widget.set_direction(gtk::TextDirection::Ltr);
             widget.add_css_class(&format!("fillet-{corner}-{r}"));
             // Colour follows the host bubble's shade (see `update_shading`).
             let step = if host.shade.get() >= 0 { host.shade.get() } else { SHADE_STEPS / 2 };
@@ -630,6 +632,8 @@ pub(super) fn place_bubble(column: &gtk::Box, mine: bool) -> (gtk::Overlay, gtk:
             gtk::Align::Start
         })
         .build();
+    // Only this widget's own `halign`; its children keep the language's direction.
+    clamp.set_direction(gtk::TextDirection::Ltr);
 
         // Each bubble is now inside an `Overlay`. It is normally empty and keeps the child's (Clamp) size and alignment exactly, at
         // no extra cost. It is here so that `mark_group_seam` can later add a small notch to this bubble, when it is found to be in

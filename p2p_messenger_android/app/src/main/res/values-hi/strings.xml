@@ -105,7 +105,7 @@
     <string name="tor_status_ready">Tor: तैयार — .onion पता सक्रिय है</string>
     <string name="tor_status_failed">Tor: विफल (लॉग देखें)</string>
     <string name="lbl_tor_connection">Tor ब्रिज</string>
-    <string name="action_tor_mode">बदलें</string>
+    <string name="action_tor_save">ब्रिज सहेजें</string>
     <string name="tor_mode_unavailable">इस बिल्ड में उपलब्ध नहीं</string>
     <string name="tor_state_direct">अभी: सीधा</string>
     <string name="tor_state_bridge">अभी: ब्रिज इस्तेमाल हो रहा है</string>

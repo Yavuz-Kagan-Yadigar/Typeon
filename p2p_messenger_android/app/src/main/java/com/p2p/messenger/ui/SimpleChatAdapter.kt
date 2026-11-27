@@ -534,7 +534,7 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             return
         }
         holder.txtExpire.visibility = View.VISIBLE
-        holder.txtExpire.gravity = if (item.isMine) Gravity.END else Gravity.START
+        holder.txtExpire.gravity = if (item.isMine) Gravity.RIGHT else Gravity.LEFT
         holder.txtExpire.text = Disappear.formatLeft(holder.itemView.context, item, System.currentTimeMillis())
         val density = holder.itemView.resources.displayMetrics.density
         holder.bubble.foreground = android.graphics.drawable.GradientDrawable().apply {
@@ -864,7 +864,8 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
         holder.itemView.foreground = if (item.messageId in selectedIds) selectionTint(holder.itemView) else null
         val groupedWithPrevious = isGroupedWithPrevious(position)
         val groupedWithNext = isGroupedWithNext(position)
-        holder.container.gravity = if (item.isMine) Gravity.END else Gravity.START
+        // Physical sides: own messages are on the right in right-to-left languages too.
+        holder.container.gravity = if (item.isMine) Gravity.RIGHT else Gravity.LEFT
         placeSideColumn(holder, item.isMine)
         // Grouped bubbles do NOT draw their own background. The merged outline (convex corners and
         // concave steps) is drawn as one path under the list by MergedBubbleDecoration. A drawable
@@ -1156,15 +1157,21 @@ class SimpleChatAdapter(private val items: MutableList<Item>) : RecyclerView.Ada
             line.addView(first, 0)
         }
         val gap = (4 * holder.itemView.resources.displayMetrics.density).toInt()
+        // The row is ordered left to right in every language. Its two children keep the language's direction.
+        line.layoutDirection = View.LAYOUT_DIRECTION_LTR
+        holder.bubble.layoutDirection = View.LAYOUT_DIRECTION_LOCALE
+        holder.sideColumn.layoutDirection = View.LAYOUT_DIRECTION_LOCALE
         val params = holder.sideColumn.layoutParams as ViewGroup.MarginLayoutParams
-        val start = if (isMine) 0 else gap
-        val end = if (isMine) gap else 0
-        if (params.marginStart != start || params.marginEnd != end) {
-            params.marginStart = start
-            params.marginEnd = end
+        val left = if (isMine) 0 else gap
+        val right = if (isMine) gap else 0
+        if (params.leftMargin != left || params.rightMargin != right || params.isMarginRelative) {
+            params.marginStart = Int.MIN_VALUE // unset: relative margins would override left/right
+            params.marginEnd = Int.MIN_VALUE
+            params.leftMargin = left
+            params.rightMargin = right
             holder.sideColumn.layoutParams = params
         }
-        holder.sideColumn.gravity = Gravity.TOP or (if (isMine) Gravity.END else Gravity.START)
+        holder.sideColumn.gravity = Gravity.TOP or (if (isMine) Gravity.RIGHT else Gravity.LEFT)
     }
 
     /** Fills an attachment bubble. OFFERED / FAILED: "Download" button. DOWNLOADING: progress indicator.

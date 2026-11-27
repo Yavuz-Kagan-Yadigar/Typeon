@@ -93,4 +93,5 @@
     <string name="update_state_error">Остання перевірка не вдалася: %1$s</string>
     <string name="update_ready_title">Оновлення готове</string>
     <string name="update_ready_text">Торкніться, щоб встановити Typeon Сервер %1$s</string>
+    <string name="lbl_language">Мова</string>
 </resources>

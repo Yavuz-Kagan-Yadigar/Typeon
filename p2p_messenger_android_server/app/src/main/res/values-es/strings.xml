@@ -93,4 +93,5 @@
     <string name="update_state_error">La última comprobación falló: %1$s</string>
     <string name="update_ready_title">Actualización lista</string>
     <string name="update_ready_text">Toca para instalar Typeon Server %1$s</string>
+    <string name="lbl_language">Idioma</string>
 </resources>

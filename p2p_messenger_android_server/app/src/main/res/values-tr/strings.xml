@@ -93,4 +93,5 @@
     <string name="update_state_error">Son kontrol başarısız: %1$s</string>
     <string name="update_ready_title">Güncelleme hazır</string>
     <string name="update_ready_text">Typeon Sunucu %1$s kurmak için dokun</string>
+    <string name="lbl_language">Dil</string>
 </resources>

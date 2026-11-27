@@ -16,6 +16,8 @@ import org.json.JSONObject
 
 class P2PService : Service() {
 
+    override fun getResources(): android.content.res.Resources = com.p2p.messenger.util.LanguagePicker.localized(baseContext).resources
+
     companion object {
         private const val TAG = "P2PService"
         const val CHANNEL_ID = "P2PServiceChannel"
