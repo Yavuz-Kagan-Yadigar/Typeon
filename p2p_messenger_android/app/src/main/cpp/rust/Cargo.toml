@@ -1,6 +1,6 @@
 [package]
 name = "p2p_messenger_core"
-version = "9.1.0-beta.2"
+version = "9.1.0-beta.3"
 edition = "2021"
 license = "GPL-3.0-or-later"
 

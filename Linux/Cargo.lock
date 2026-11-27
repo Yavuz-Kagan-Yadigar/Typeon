@@ -4677,7 +4677,7 @@ dependencies = [
 
 [[package]]
 name = "p2p_messenger_core"
-version = "9.1.0-beta.2"
+version = "9.1.0-beta.3"
 dependencies = [
  "android_logger",
  "argon2",
@@ -7741,7 +7741,7 @@ dependencies = [
 
 [[package]]
 name = "typeon-linux"
-version = "9.1.0-beta.2"
+version = "9.1.0-beta.3"
 dependencies = [
  "argon2",
  "async-channel",

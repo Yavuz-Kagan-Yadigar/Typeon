@@ -69,7 +69,9 @@ jobs:
           echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/llvm-mingw.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/llvm-mingw.tar.xz" -C ~/tools
       - run: python3 -I Linux/packaging/windows/fetch-sysroot.py
+      - run: tools/fetch-pt-binaries.sh   # lyrebird (Tor bridges): gitignored, so CI must fetch it
       - run: Linux/packaging/windows/package.sh
+      - run: unzip -l Linux/target/typeon-windows-*.zip | grep -q 'bin/lyrebird.exe$' || { echo '::error::lyrebird.exe missing from the zip'; exit 1; }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: windows, path: Linux/target/typeon-windows-*.zip }
 
@@ -84,6 +86,7 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.gnome.Platform//49 org.gnome.Sdk//49 org.freedesktop.Sdk.Extension.rust-stable//25.08
+      - run: tools/fetch-pt-binaries.sh   # lyrebird (Tor bridges): gitignored, so CI must fetch it
       - run: |
           cd Linux/packaging
           flatpak-builder --user --force-clean --disable-rofiles-fuse --repo=repo build-dir com.p2p.messenger.Typeon.yml
@@ -102,6 +105,7 @@ jobs:
       - run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
           cargo install cargo-ndk --locked --version 4.1.2
+      - run: tools/fetch-pt-binaries.sh   # lyrebird (Tor bridges): gitignored, so CI must fetch it
       - name: build client + server apps
         run: |
           for d in p2p_messenger_android p2p_messenger_android_server; do
@@ -113,6 +117,9 @@ jobs:
           VER=$(sed -n 's/.*versionName "\(.*\)"/\1/p' p2p_messenger_android/app/build.gradle | head -1)
           cp p2p_messenger_android/app/build/outputs/apk/release/*.apk "out/typeon-client-$VER.apk"
           cp p2p_messenger_android_server/app/build/outputs/apk/release/*.apk "out/typeon-server-$VER.apk"
+          for abi in arm64-v8a armeabi-v7a; do
+            unzip -l "out/typeon-client-$VER.apk" | grep -q "lib/$abi/liblyrebird.so$" || { echo "::error::liblyrebird.so ($abi) missing from the client APK"; exit 1; }
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: android-unsigned, path: out/*.apk }
 

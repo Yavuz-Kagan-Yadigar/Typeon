@@ -50,7 +50,7 @@
     <content_attribute id="social-info">mild</content_attribute>
   </content_rating>
   <releases>
-    <release version="9.1.0-beta.2" date="2026-11-27">
+    <release version="9.1.0-beta.3" date="2026-11-27">
       <description>
         <p>Current release of the Linux desktop client.</p>
       </description>
