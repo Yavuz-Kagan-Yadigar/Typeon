@@ -8,6 +8,8 @@
 
 # Android build directories
 build/
+# Vendored crates have a src/build/ module, not build output.
+!**/vendor/*/src/build/
 .gradle/
 captures/
 .externalNativeBuild/

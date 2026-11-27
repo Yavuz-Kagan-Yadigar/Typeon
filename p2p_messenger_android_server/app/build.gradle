@@ -22,8 +22,8 @@ android {
         // minSdk 28: v3 signing-key rotation (--rotation-min-sdk-version 28) requires it; Android 8.0/8.1 only check v1/v2 signatures made with the old key.
         minSdk 28
         targetSdk 35
-        versionCode 61
-        versionName "9.1.0-beta.1"
+        versionCode 62
+        versionName "9.1.0-beta.2"
 
         ndk {
             abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
