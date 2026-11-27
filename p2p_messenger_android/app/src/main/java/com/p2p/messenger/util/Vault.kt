@@ -240,7 +240,8 @@ object Vault {
         nm.createNotificationChannel(NotificationChannel(
             UNLOCK_CHANNEL_ID, app.getString(R.string.channel_unlock), NotificationManager.IMPORTANCE_HIGH))
         val intent = Intent(app, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            // No CLEAR_TOP: it finished a password screen already open above MainActivity.
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val pending = PendingIntent.getActivity(app, UNLOCK_NOTIFICATION_ID, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val n = NotificationCompat.Builder(app, UNLOCK_CHANNEL_ID)

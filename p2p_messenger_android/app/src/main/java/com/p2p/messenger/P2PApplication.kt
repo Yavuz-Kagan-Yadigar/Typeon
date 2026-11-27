@@ -262,6 +262,11 @@ class P2PApplication : Application() {
                 // A screen that was never stopped under the prompt gets only this call.
                 if (AppLock.isUnlocked()) {
                     activity.findViewById<android.view.View>(android.R.id.content)?.visibility = android.view.View.VISIBLE
+                } else if (activity !is com.p2p.messenger.ui.AppLockActivity && activity !is com.p2p.messenger.ui.CallActivity) {
+                    // Still locked, yet this screen is on top: something finished the prompt before this screen was stopped
+                    // under it, e.g. the unlock prompt's CLEAR_TOP start of MainActivity right after launch (seen on the Tab A8).
+                    // MainActivity then stayed blank with no prompt. A second prompt finishes itself once unlocked (onStart).
+                    AppLock.guard(activity)
                 }
             }
             override fun onActivityPaused(activity: Activity) = AppLock.excursionPaused()
