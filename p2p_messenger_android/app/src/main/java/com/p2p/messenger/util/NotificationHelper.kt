@@ -117,7 +117,7 @@ object NotificationHelper {
             context.getString(R.string.title_security_warning_dialog),
             // No contact name while the message text is hidden: the lock screen may show the body. The app shows the name
             // after unlock.
-            if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_device_warning, contactName, shortCode)
+            if (NotificationPrefs.showMessageText(context)) context.getString(R.string.notif_new_device_warning, contactName, ltr(shortCode))
             else context.getString(R.string.msg_security_warning),
             intent, security = true
         )

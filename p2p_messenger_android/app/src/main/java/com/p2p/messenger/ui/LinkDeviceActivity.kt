@@ -1,5 +1,6 @@
 package com.p2p.messenger.ui
 
+import com.p2p.messenger.util.ltr
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Bundle
@@ -102,7 +103,7 @@ class LinkDeviceActivity : AppCompatActivity() {
         // The approving device shows the same code in its confirm dialog.
         if (code.isNotEmpty()) {
             statusText.textAlignment = View.TEXT_ALIGNMENT_CENTER
-            statusText.text = getString(R.string.link_device_waiting) + "\n\n" + getString(R.string.link_device_code_shown, code)
+            statusText.text = getString(R.string.link_device_waiting) + "\n\n" + getString(R.string.link_device_code_shown, ltr(code))
         }
     }
 

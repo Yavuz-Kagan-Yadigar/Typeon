@@ -1,5 +1,6 @@
 package com.p2p.messenger
 
+import com.p2p.messenger.util.ltr
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -148,7 +149,7 @@ internal fun SettingsFragment.showPasteServerCodeDialog() {
                 AlertDialog.Builder(requireContext())
                     .setTitle(R.string.dlg_add_server_title)
                     .setMessage(
-                        getString(R.string.msg_join_link_confirm, code) +
+                        getString(R.string.msg_join_link_confirm, ltr(code)) +
                             if (historyServer) "\n\n" + getString(R.string.lbl_server_history_warn) + " " + getString(R.string.msg_server_history_upload) else ""
                     )
                     .setPositiveButton(android.R.string.ok) { _, _ -> addServer(code) }
@@ -311,7 +312,7 @@ internal fun SettingsFragment.buildServerRow(obj: org.json.JSONObject): View {
         setOnClickListener {
             // Rejoining needs the operator's join code again: ask first.
             AlertDialog.Builder(ctx)
-                .setMessage(getString(R.string.confirm_remove_server, name))
+                .setMessage(getString(R.string.confirm_remove_server, if (obj.optString("name").isEmpty()) ltr(name) else name))
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(R.string.action_remove_server) { _, _ ->
                     // `removeServer` JNI — off the main thread.

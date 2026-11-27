@@ -491,6 +491,13 @@ pub fn preview_text(text: &str, max_chars: usize) -> String {
     format!("{}…", cut.trim_end())
 }
 
+/// A code placed in UI text, kept left to right (LTR isolate): in an RTL
+/// language the digit groups were drawn in reverse order. Display only: never
+/// copy, store or compare the result.
+pub fn ltr(code: &str) -> String {
+    format!("\u{2066}{code}\u{2069}")
+}
+
 /// Fingerprints are long hex; the UI only ever shows the head of one.
 pub fn short_fingerprint(fingerprint: &str) -> String {
     fingerprint.chars().take(12).collect()

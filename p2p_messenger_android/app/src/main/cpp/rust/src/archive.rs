@@ -68,10 +68,14 @@ impl P2PCore {
             if asked >= ASKED_PER_PRESS {
                 break;
             }
-            if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id) {
-                if self.send_message_content(peer_fp, &content, None).is_ok() {
-                    asked += 1;
-                }
+            // Every recently seen device of the member, not one: the smallest fingerprint was often an offline
+            // linked desktop, and the member's phone was never asked. Each copy has its own request id; rows dedup by id.
+            let mut any = false;
+            for peer_fp in self.history_targets_for_identity(&member_identity_id) {
+                any |= self.send_message_content(peer_fp, &content, None).is_ok();
+            }
+            if any {
+                asked += 1;
             }
         }
         if asked > 0 {

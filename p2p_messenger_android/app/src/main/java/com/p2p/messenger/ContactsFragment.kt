@@ -1,5 +1,6 @@
 package com.p2p.messenger
 
+import com.p2p.messenger.util.ltr
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
@@ -322,7 +323,7 @@ class ContactsFragment : Fragment() {
             if (code.isNotEmpty()) {
                 AlertDialog.Builder(requireContext())
                     .setTitle(message.displayName)
-                    .setMessage(getString(R.string.lbl_safety_code, code))
+                    .setMessage(getString(R.string.lbl_safety_code, ltr(code)))
                     .setPositiveButton(android.R.string.ok, null)
                     .show()
             }
@@ -393,7 +394,7 @@ class ContactsFragment : Fragment() {
                 if (!isAdded || view == null) return@post
                 val body = if (safetyCode.isNotEmpty()) {
                     getString(R.string.confirm_trust_body, message.displayName) +
-                        "\n\n" + getString(R.string.lbl_safety_code, safetyCode)
+                        "\n\n" + getString(R.string.lbl_safety_code, ltr(safetyCode))
                 } else {
                     getString(R.string.confirm_trust_body, message.displayName)
                 }

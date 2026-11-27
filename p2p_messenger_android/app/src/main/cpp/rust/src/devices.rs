@@ -140,6 +140,11 @@ impl P2PCore {
         }
     }
 
+    /// Every active device of an identity, by the `fanout_targets` rule (recently seen ones, or all if none was).
+    pub(crate) fn history_targets_for_identity(&self, identity_id: &str) -> Vec<String> {
+        self.active_devices_for_identity(identity_id).first().map(|fp| self.fanout_targets(fp)).unwrap_or_default()
+    }
+
     /// The devices a notice to all contacts goes to (name, photo, address,
     /// new device, account deleted): per contact its Active devices seen
     /// within `STALE_PEER_RETRY_HORIZON_MS`, or all its Active devices if none

@@ -619,7 +619,7 @@ fn link_page(app: &Rc<App>, host: &adw::ToastOverlay) -> gtk::Widget {
                             // The phone shows the same code in its confirm dialog.
                             status.set_label(&tf!(
                                 "Waiting for your phone to scan this…\n\nCompare code: {}\nYour phone shows the same code before you approve.",
-                                code
+                                crate::util::ltr(&code)
                             ));
                         }
                         None => status.set_label(t("Could not render the link code.")),

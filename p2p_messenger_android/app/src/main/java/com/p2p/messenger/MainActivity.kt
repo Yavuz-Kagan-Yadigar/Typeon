@@ -1,5 +1,6 @@
 package com.p2p.messenger
 
+import com.p2p.messenger.util.ltr
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -258,7 +259,7 @@ class MainActivity : AppCompatActivity() {
     /** The add-server question. The history warning, and what joining it uploads, is shown only when
      *  this server would become the history server. */
     private fun addServerQuestion(code: String, historyServer: Boolean): String =
-        getString(R.string.msg_join_link_confirm, code) +
+        getString(R.string.msg_join_link_confirm, ltr(code)) +
             if (historyServer) {
                 "\n\n" + getString(R.string.lbl_server_history_warn) + " " + getString(R.string.msg_server_history_upload)
             } else ""
@@ -405,7 +406,7 @@ class MainActivity : AppCompatActivity() {
                 // The archive root key comes back with the recovery file, but it lived only in the core's
                 // memory. After a restart it was lost, and a new random key would split the server archive.
                 com.p2p.messenger.util.ArchiveKeyManager.persistIfNew(applicationContext)
-                statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
+                statusText.text = getString(R.string.lbl_id_short, ltr(identityId.take(8)))
                 startNetworkService()
                 ensureBatteryOptimizationExemption()
                 Toast.makeText(this@MainActivity, R.string.msg_recovery_import_success, Toast.LENGTH_LONG).show()
@@ -453,7 +454,7 @@ class MainActivity : AppCompatActivity() {
                 com.p2p.messenger.util.AppRestarter.restart(applicationContext)
                 return@launch
             }
-            statusText.text = getString(R.string.lbl_id_short, identityId.take(8))
+            statusText.text = getString(R.string.lbl_id_short, ltr(identityId.take(8)))
             startNetworkService()
             ensureBatteryOptimizationExemption()
             if (linkAsSecondary) {
@@ -591,7 +592,7 @@ class MainActivity : AppCompatActivity() {
             val code = withContext(Dispatchers.IO) {
                 try { P2PLib.getIdentityShortCode() } catch (e: Exception) { null }
             } ?: return@launch
-            statusText.text = getString(R.string.lbl_id_code, code)
+            statusText.text = getString(R.string.lbl_id_code, ltr(code))
         }
     }
 
@@ -671,7 +672,7 @@ class MainActivity : AppCompatActivity() {
 
         val dialog = AlertDialog.Builder(this)
             .setTitle(R.string.title_security_warning_dialog)
-            .setMessage(getString(R.string.msg_new_device_warning, contactName, newCode))
+            .setMessage(getString(R.string.msg_new_device_warning, contactName, ltr(newCode)))
             .setPositiveButton(R.string.action_verified_accept) { _, _ ->
                 answerDeviceAlert(fingerprint, accept = true)
                 shownAlertFingerprints.remove(fingerprint)

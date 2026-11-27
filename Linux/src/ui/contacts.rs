@@ -377,7 +377,7 @@ fn build_row(
                     "You met {} through a group, not face to face.\n\nSecurity code: {}\n\n\
                      Compare it with them over a different channel — a call, or in person. \
                      If it matches, the keys are genuinely theirs.",
-                    name, safety_code
+                    name, util::ltr(&safety_code)
                 )
             };
             dialogs::confirm(

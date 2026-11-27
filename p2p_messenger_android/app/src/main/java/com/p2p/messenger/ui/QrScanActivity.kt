@@ -1,5 +1,6 @@
 package com.p2p.messenger.ui
 
+import com.p2p.messenger.util.ltr
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -202,7 +203,7 @@ class QrScanActivity : AppCompatActivity() {
                     }
                     androidx.appcompat.app.AlertDialog.Builder(this)
                         .setTitle(R.string.title_confirm_contact)
-                        .setMessage(getString(R.string.msg_confirm_contact_named, obj.optString("name"), obj.optString("safety_code")))
+                        .setMessage(getString(R.string.msg_confirm_contact_named, obj.optString("name"), ltr(obj.optString("safety_code"))))
                         .setPositiveButton(android.R.string.ok) { _, _ -> runScanned(text, cborBytes) }
                         .setNegativeButton(android.R.string.cancel) { _, _ -> rearmLater() }
                         .setOnCancelListener { rearmLater() }
@@ -225,8 +226,8 @@ class QrScanActivity : AppCompatActivity() {
                 return
             }
             val code = try { P2PLib.deviceLinkCode(cborBytes) } catch (e: Throwable) { "" }
-            getString(R.string.link_device_confirm, obj.optString("device_name"), obj.optString("device_fingerprint")) +
-                "\n\n" + getString(R.string.link_device_code_check, code)
+            getString(R.string.link_device_confirm, obj.optString("device_name"), ltr(obj.optString("device_fingerprint"))) +
+                "\n\n" + getString(R.string.link_device_code_check, ltr(code))
         }
         runOnUiThread {
             if (isFinishing) return@runOnUiThread
@@ -242,7 +243,7 @@ class QrScanActivity : AppCompatActivity() {
     /** The add-server question. The history warning, and what joining it uploads, is shown only when this server would become the
      *  history server. */
     private fun addServerQuestion(code: String, historyServer: Boolean): String =
-        getString(R.string.msg_join_link_confirm, code) +
+        getString(R.string.msg_join_link_confirm, ltr(code)) +
             if (historyServer) {
                 "\n\n" + getString(R.string.lbl_server_history_warn) + " " + getString(R.string.msg_server_history_upload)
             } else ""

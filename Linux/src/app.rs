@@ -464,7 +464,7 @@ impl App {
                 self.notify_always(
                     &format!("device-alert:{who}:{code}"),
                     t("Unverified device"),
-                    &tf!("{} is writing from a device you have not verified ({}).", who, code),
+                    &tf!("{} is writing from a device you have not verified ({}).", who, util::ltr(&code)),
                 );
             }
             "pairing_failed" => {

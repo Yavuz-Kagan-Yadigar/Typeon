@@ -1139,7 +1139,7 @@ fn security_page(app: &Rc<App>) -> adw::PreferencesPage {
         // the row when it arrives.
         let safety_number = safety_number.clone();
         app::run_in_background(core::identity_short_code, move |code| {
-            safety_number.set_subtitle(code.unwrap_or_default().as_str());
+            safety_number.set_subtitle(crate::util::ltr(&code.unwrap_or_default()).as_str());
         });
     }
     identity.add(&safety_number);

@@ -597,8 +597,8 @@ struct P2PCore {
     /// `poll_events` turn, before new arrivals, so the order is kept.
     deferred_incoming: std::collections::VecDeque<(Option<PeerId>, Vec<u8>)>,
     /// Fix: a device connected over Tor was never seen in a group it had been invited to. The fan-out loop of `invite_to_group`,
-    /// `remove_from_group`, `set_group_avatar` and `delete_group` silently dropped a `GroupUpdate` whenever `resolve_active_device_for_identity`
-    /// returned `None` for a member, for example because the device was not yet registered as "active". Tor pairing and handshakes can finish later
+    /// `remove_from_group`, `set_group_avatar` and `delete_group` silently dropped a `GroupUpdate` whenever `active_devices_for_identity`
+    /// was empty for a member, for example because the device was not yet registered as "active". Tor pairing and handshakes can finish later
     /// than they do on the same LAN. There was no log, no retry, and the function still returned `Ok(())`.
     /// Now each (group_id, identity_id) pair that could not be sent keeps its latest `GroupUpdate` here. `group_sync_sweep` (run by the same periodic
     /// pattern as `reconnect_sweep`) retries it until the device resolves. It is in memory, the same scope as the other retry queues
@@ -606,7 +606,7 @@ struct P2PCore {
     pending_group_syncs: HashMap<(String, String), GroupUpdate>,
     /// Fix: a group member sometimes could not receive messages, and behaved inconsistently. `pending_group_syncs` above covered this failure class
     /// only for `GroupUpdate` (membership, name, avatar). The same fan-out pattern in `send_group_message`, `edit_group_message` and
-    /// `delete_group_message` (skip a member's copy when `resolve_active_device_for_identity` returns `None`) was not covered. When a member's active
+    /// `delete_group_message` (skip a member's copy when `active_devices_for_identity` is empty) was not covered. When a member's active
     /// device could not be resolved yet (no IdentityExchange had completed with that member since this process started, or the member briefly
     /// dropped out of "active"), messages to that member were lost silently. There was no error and no retry, and the sender never found out, since
     /// the function returned `Ok(...)` as long as at least one other member got a copy. The problem appeared only while that contact's connection or

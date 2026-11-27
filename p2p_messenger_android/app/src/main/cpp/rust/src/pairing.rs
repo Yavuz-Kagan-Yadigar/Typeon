@@ -728,7 +728,7 @@ impl P2PCore {
     /// finish in the background AFTER this function returns; see the notes below). The caller (Kotlin) uses this triple to send the user straight to the new
     /// contact's chat screen. That screen already has a "Connecting..." indicator that checks `hasActiveSession`/`isPeerConnected` (see ChatActivity
     /// `sessionPollRunnable`/`layoutConnecting`). That is the most natural way to show that pairing is still in progress, with no separate screen.
-    /// `device_fingerprint` comes straight from the QR/manual DATA here. It does NOT wait for `resolve_active_device_for_identity`/`known_remote_devices`,
+    /// `device_fingerprint` comes straight from the QR/manual DATA here. It does NOT wait for `active_devices_for_identity`/`known_remote_devices`,
     /// which only fill in once the real IdentityExchange completes (that would leave them empty for the whole "pairing in progress" period).
     pub(crate) fn process_qr_packet(&mut self, cbor_data: &[u8]) -> Result<(String, String, String), String> {
         let packet = QrPacket::from_cbor(cbor_data)?;

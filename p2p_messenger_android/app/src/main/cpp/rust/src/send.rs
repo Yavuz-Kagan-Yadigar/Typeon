@@ -981,7 +981,7 @@ impl P2PCore {
 
     /// Group version of `send_typing_indicator`, fanned out like
     /// `edit_group_message`/`delete_group_message`. Uses
-    /// `resolve_active_device_for_identity` directly instead of the queuing
+    /// `active_devices_for_identity` directly instead of the queuing
     /// `send_group_message_to_member` — a stale typing state delivered
     /// minutes later once a device resolves has no value.
     pub(crate) fn send_group_typing_indicator(&mut self, group_id: String, is_typing: bool) -> Result<(), String> {
@@ -989,9 +989,11 @@ impl P2PCore {
         let group = self.groups.get(&group_id).cloned_group()?;
         let content = MessageContent::TypingIndicator { is_typing, group_id: Some(group_id.clone()) };
         for member_identity_id in group.other_members(&own_identity_id) {
-            if let Some(peer_fp) = self.resolve_active_device_for_identity(&member_identity_id)
+            // Every connected device: the smallest fingerprint alone was often an offline linked desktop.
+            let live: Vec<String> = self.active_devices_for_identity(&member_identity_id).into_iter()
                 .filter(|fp| self.is_connected_to_device(fp) && self.has_active_session(fp))
-            {
+                .collect();
+            for peer_fp in live {
                 if let Err(e) = self.send_message_content(peer_fp, &content, None) {
                     error!("Group typing indicator could not be sent to a member: {}", e);
                 }

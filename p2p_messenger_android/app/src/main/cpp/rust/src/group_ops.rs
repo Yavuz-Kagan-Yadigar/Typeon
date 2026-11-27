@@ -617,7 +617,7 @@ impl P2PCore {
     }
 
     /// See `pending_group_messages`. Tries to send a group message (Text/Edit/Delete) to one member. If the target's active device is not yet known
-    /// (see `resolve_active_device_for_identity`), the content is queued in the pending list instead of being silently dropped. `group_sync_sweep`
+    /// (see `active_devices_for_identity`), the content is queued in the pending list instead of being silently dropped. `group_sync_sweep`
     /// retries once a device can be resolved. This gathers the block that was repeated in the fan-out loops of `send_group_message`,
     /// `edit_group_message` and `delete_group_message` (compare `send_group_update_to_member`, the same pattern for GroupUpdate).
     /// Returns `true` if the message was really sent (or at least a send attempt was made), `false` if it was only queued.
@@ -1532,16 +1532,6 @@ impl P2PCore {
                 crate::log_id(&d.identity_id), crate::log_id(&d.device_fingerprint)
             );
         }
-    }
-
-    /// The smallest active device fingerprint of an identity, if one is known.
-    pub(crate) fn resolve_active_device_for_identity(&self, identity_id: &str) -> Option<String> {
-        // Deterministic: the active device with the smallest fingerprint. HashMap order is random, so with several active devices a different
-        // one would be returned on each call, and group messages would jump between a member's devices.
-        self.known_remote_devices.values()
-            .filter(|d| d.identity_id == identity_id && d.is_active)
-            .map(|d| d.device_fingerprint.clone())
-            .min()
     }
 
     /// Returns `group_message_local_id`: the id that merges the N fan-out copies of this group message into ONE local id (see packet.rs

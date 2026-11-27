@@ -1635,6 +1635,20 @@ mod fanout_staleness_tests {
         core.touch_device_seen("live");
         assert_eq!(core.fanout_targets("dead"), vec!["live".to_string()], "a packet from live makes dead skippable");
     }
+
+    /// A group "Fetch older history" asks every live device of a member, not
+    /// only the smallest fingerprint (an offline linked desktop hid the phone).
+    #[test]
+    fn group_history_asks_every_device_of_a_member() {
+        let mut core = P2PCore::new();
+        let now = current_time_ms();
+        core.known_remote_devices.insert("a-desktop".into(), dev("a-desktop", now));
+        core.known_remote_devices.insert("b-phone".into(), dev("b-phone", now));
+        let mut t = core.history_targets_for_identity("id");
+        t.sort();
+        assert_eq!(t, vec!["a-desktop".to_string(), "b-phone".to_string()]);
+        assert!(core.history_targets_for_identity("nobody").is_empty());
+    }
 }
 
 #[cfg(test)]

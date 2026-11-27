@@ -379,7 +379,7 @@ pub fn show_own_code(app: &Rc<App>) {
         || core::identity_short_code().unwrap_or_default(),
         move |short_code| {
             if !short_code.is_empty() {
-                safety.set_label(&tf!("Safety number: {}", short_code));
+                safety.set_label(&tf!("Safety number: {}", util::ltr(&short_code)));
                 safety.set_visible(true);
             }
         },
@@ -547,7 +547,7 @@ pub fn linked_devices(app: &Rc<App>) {
                     group.remove(&row);
                 }
                 for device in devices {
-                    let fingerprint = util::short_fingerprint(&device.device_fingerprint);
+                    let fingerprint = util::ltr(&util::short_fingerprint(&device.device_fingerprint));
                     let subtitle = match (device.is_this_device, device.is_active) {
                         (true, true) => tf!("{} · this computer", fingerprint),
                         (true, false) => tf!("{} · this computer · revoked", fingerprint),
@@ -849,11 +849,11 @@ fn check_device_alerts(watch: &Rc<AlertWatch>) {
              {}\nKnown: {}\n\nAccept only if they told you they added or replaced a device. If \
              not, this could be someone impersonating them.",
             alert.contact_display_name,
-            alert.new_device_short_code,
+            util::ltr(&alert.new_device_short_code),
             if alert.known_device_short_codes.is_empty() {
                 t("none").to_string()
             } else {
-                alert.known_device_short_codes.join(", ")
+                alert.known_device_short_codes.iter().map(|c| util::ltr(c)).collect::<Vec<_>>().join(", ")
             }
         );
 
